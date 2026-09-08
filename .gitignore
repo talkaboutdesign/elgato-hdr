@@ -1,0 +1,8 @@
+# build output
+dist/
+# compiled tool binaries (sources are *.c / *.swift next to them)
+tools/*
+!tools/*.c
+!tools/*.swift
+!tools/*.py
+.DS_Store
