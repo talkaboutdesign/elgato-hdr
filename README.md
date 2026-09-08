@@ -1,10 +1,129 @@
 # Elgato HDR
 
-Tiny native macOS viewer/recorder for the Elgato 4K X's hidden 10-bit P010 (HDR) mode, which macOS's own UVC driver never exposes.
+A tiny native macOS app that captures the **10-bit HDR** signal from an **Elgato 4K X** and shows it live, in real HDR, and records it to a proper HDR10 file.
 
-- `app/main.swift` — AppKit app: EDR display via AVSampleBufferDisplayLayer, audio playback, HEVC Main10 HDR10 recording (Cmd-R).
-- `tools/uvc_capture.c` — root helper: libusb UVC bypass (probe/commit format 7 = P010, bulk EP 0x82), UAC1 audio, socket server.
-- `tools/*.c`, `tools/*.py` — descriptor dumps and the mode sweep test client.
-- `build.sh` — builds `dist/Elgato HDR.app` (bundles helper + libusb). Requires Xcode CLT and `brew install libusb`.
+macOS hides this. The Elgato 4K X advertises a 10-bit `P010` video format over USB, but Apple's built-in webcam driver only ever exposes the 8-bit modes to apps like QuickTime, OBS, or anything using AVFoundation. So on a Mac you normally cannot see or record the capture card's HDR output at all, even though the same card does it fine on Windows. This project reaches the hidden 10-bit format directly and renders it the way macOS renders HDR video.
 
-The app launches the helper once with a native admin prompt; it stays alive across mode switches and exits ~20 s after the app quits.
+The whole thing is about 350 KB: a small AppKit app plus a C helper. No Electron, no frameworks, no background services.
+
+![Elgato HDR showing a game capture](docs/screenshot.png)
+
+---
+
+## What it does
+
+- **Live HDR preview.** Displays the incoming 10-bit `P010` video as true HDR (BT.2020 / PQ by default) on any EDR-capable display, such as a Studio Display, XDR, or a MacBook Pro screen. Colors and highlights use the display's extended brightness range, exactly like HDR video playback.
+- **Records HDR10.** Writes a 10-bit HEVC (`Main 10`) `.mov` with BT.2020 / PQ color, HDR10 mastering-display and content-light-level metadata, and AAC audio. The files play back as HDR in QuickTime, Finder, Final Cut, and DaVinci Resolve, and upload correctly to YouTube.
+- **Captures audio too.** Pulls the card's USB audio (48 kHz stereo) alongside the video, plays it live with a mute toggle, and muxes it into the recording locked to the video clock.
+- **Smooth, in-sync playback.** Frames are paced to the display's refresh so motion is even, and recorded files are stamped on a fixed frame grid so they play back perfectly steady regardless of USB timing jitter.
+- **All the card's HDR modes.** 4K30, 1440p60, ultrawide 2560×1080 60, 1080p 120/60/30, and 720p 120, every one of them 10-bit.
+
+### Color modes
+
+| Mode | Use it for |
+|------|------------|
+| **HDR10 (PQ, BT.2020)** — default | An HDR source (HDR game console, HDR camera) |
+| **HLG (BT.2020)** | An HLG source |
+| **SDR (BT.709)** | A standard-dynamic-range source, still captured at 10-bit |
+
+---
+
+## Requirements
+
+- macOS 14 or newer (built and tested on Apple Silicon).
+- An **Elgato 4K X** capture card. Other Elgato cards that expose a `P010` UVC format may work but are untested.
+- An HDR / EDR-capable display to see the HDR preview (SDR displays still work, just tone-mapped by macOS).
+- For building from source: **Xcode Command Line Tools** and **[Homebrew](https://brew.sh)**.
+
+---
+
+## Install
+
+### Option A — download a release
+
+1. Grab the latest `ElgatoHDR-<version>.zip` from the [Releases](../../releases) page and unzip it.
+2. Move **Elgato HDR.app** to `/Applications`.
+3. The app is signed only for local use, not notarized by Apple, so the first launch is blocked by Gatekeeper. Open it once with **right-click → Open**, then click **Open** in the dialog. After that it launches normally. (Command-line equivalent: `xattr -dr com.apple.quarantine "/Applications/Elgato HDR.app"`.)
+
+### Option B — build from source
+
+```sh
+git clone <this-repo-url> elgato-hdr
+cd elgato-hdr
+brew install libusb          # the helper links against libusb
+xcode-select --install       # if you don't already have the CLT
+./build.sh                   # produces dist/Elgato HDR.app
+open "dist/Elgato HDR.app"
+```
+
+---
+
+## Using it
+
+1. Plug an HDR source into the Elgato 4K X and connect the card to your Mac.
+2. Launch **Elgato HDR**. The first launch shows one macOS **administrator prompt** — this is required (see [How it works](#how-it-works)). Enter your password and the live picture appears.
+3. Pick your source resolution from the **Input** menu, and the matching **Color** mode.
+4. Press **⌘R** to start and stop recording. Files are saved to `~/Movies/Elgato HDR/`.
+
+### Menus and shortcuts
+
+| Menu | Item | Shortcut |
+|------|------|----------|
+| Input | 4K 30 … 720p 120 | ⌘1 – ⌘7 |
+| Color | HDR10 / HLG / SDR | — |
+| Audio | Mute | ⌘M |
+| Record | Start / Stop Recording | ⌘R |
+| Record | Show Recordings in Finder | — |
+| View | Toggle Full Screen | ⌘F |
+| View | Low Latency (no vsync) | ⌘L |
+| View | Reconnect | ⇧⌘R |
+
+**Low Latency** trades smoothness for the lowest possible delay by presenting frames without waiting for the display refresh. It has slightly uneven motion and can tear; leave it off for the smoothest picture. It does not affect recordings.
+
+---
+
+## How it works
+
+Three moving parts:
+
+1. **`tools/uvc_capture.c` — a small root helper.** Using [libusb](https://libusb.info), it detaches Apple's USB video driver from the card and talks the USB Video Class protocol directly. It negotiates the hidden `P010` format (format index 7), reads the video off the card's bulk endpoint, reassembles frames, and also captures the card's USB audio. Detaching the kernel driver requires root on macOS, which is why the app asks for your password once and launches the helper with administrator privileges. The helper runs as a small server, stays alive across resolution changes, and exits on its own about 20 seconds after the app quits, handing the card back to macOS so other apps see it again.
+
+2. **Shared-memory hand-off.** The helper writes each frame straight into a shared-memory ring the app reads with zero copies. Only tiny header messages travel over a Unix socket. This keeps 4K frames off the CPU's memory-copy path entirely.
+
+3. **`app/main.swift` — the AppKit app.** A Metal shader converts the 10-bit `P010` planes to RGB directly from shared memory and draws into a PQ / HLG / BT.709 layer with the right EDR metadata, so macOS lights it up as HDR. A display-link scheduler paces frames onto the refresh grid for even motion. Audio plays through AVAudioEngine on a dedicated thread. Recording uses the hardware HEVC `Main 10` encoder via AVAssetWriter, stamping video on a fixed frame grid and gently slewing audio to keep A/V sync locked.
+
+Measured latency from a frame arriving over USB to it appearing on screen is a few milliseconds of app work on top of the card's own processing; the app favors smooth, in-sync output over shaving off the last milliseconds.
+
+### A note on HDR metadata
+
+The recorded files carry standard HDR10 mastering metadata (1000-nit peak, P3 primaries). The Elgato does not pass the source's original HDMI HDR metadata over USB, so these are sensible defaults rather than the exact values the source mastered to. Players use them only as a tone-mapping hint; the actual 10-bit pixels are untouched, so the picture is correct either way.
+
+---
+
+## Project layout
+
+```
+app/main.swift        The macOS app: capture client, Metal HDR renderer, audio, recorder
+app/Info.plist        App bundle metadata
+tools/uvc_capture.c   Root helper: libusb UVC bypass, P010 capture, USB audio, shm server
+tools/*.c             USB descriptor dumps used while reverse-engineering the card
+tools/modetest.py     Test client that sweeps every capture mode
+build.sh              Builds dist/Elgato HDR.app (bundles the helper and libusb)
+package.sh            Builds and zips a distributable release
+```
+
+---
+
+## Contributing
+
+Contributions are welcome. Bug reports, new capture-device support, and improvements to latency, color, or recording are all useful.
+
+- Open an issue describing what you see, ideally with the card model and macOS version.
+- For code changes, keep the app small and dependency-free, and test that live view, audio, and recording all still work before opening a pull request.
+- Descriptor dumps from other Elgato (or other-brand) capture cards that expose a 10-bit UVC format are especially welcome — they are how support for more devices gets added.
+
+---
+
+## License
+
+[MIT](LICENSE). This is an independent project and is not affiliated with or endorsed by Elgato or Corsair.

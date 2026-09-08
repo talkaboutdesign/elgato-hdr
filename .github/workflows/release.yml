@@ -1,0 +1,23 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libusb
+        run: brew install libusb
+      - name: Build and package
+        run: ./package.sh "${GITHUB_REF_NAME#v}"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/releases/ElgatoHDR-*.zip
+          generate_release_notes: true
