@@ -16,6 +16,7 @@
 #include <math.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <poll.h>
@@ -35,7 +36,7 @@ static uint16_t le16(const uint8_t *p){return p[0]|(p[1]<<8);}
 static uint32_t le32(const uint8_t *p){return p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24);}
 static void put16(uint8_t *p,uint16_t v){p[0]=v;p[1]=v>>8;}
 static void put32(uint8_t *p,uint32_t v){p[0]=v;p[1]=v>>8;p[2]=v>>16;p[3]=v>>24;}
-static uint64_t now_ns(void){struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec;}
+static uint64_t now_ns(void){struct timespec ts; clock_gettime(CLOCK_UPTIME_RAW,&ts); return (uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec;}
 
 // Descriptor lookup: find width/height/fourcc for a format/frame index.
 typedef struct { int fmt, frm, w, h; char fourcc[5]; uint32_t dflt_interval; int n_intervals; uint32_t intervals[16]; } FrameInfo;
@@ -86,6 +87,8 @@ static uint64_t t_start;
 static volatile uint64_t video_bytes_seen=0;
 static int au_enabled;
 static void audio_flush(void);
+static int use_shm;
+static uint8_t *shm_slot(uint32_t n);
 
 static int write_all(int fd,const void *p,size_t n){ const uint8_t *b=p; while(n){ ssize_t w=write(fd,b,n); if(w<0){ if(errno==EINTR)continue; return -1;} b+=w; n-=w;} return 0; }
 
@@ -101,14 +104,37 @@ static void emit_frame(void){
         char name[512]; snprintf(name,sizeof name,"%s.frame%04u.bin",dump_prefix,seq);
         int fd=open(name,O_WRONLY|O_CREAT|O_TRUNC,0644); if(fd>=0){write_all(fd,frame_buf,frame_fill); close(fd);}
     } else {
-        uint8_t hdr[32]={0}; memcpy(hdr,"UVCF",4); put32(hdr+4,fi.w); put32(hdr+8,fi.h); memcpy(hdr+12,fi.fourcc,4); put32(hdr+16,frame_size);
+        uint8_t hdr[32]={0}; memcpy(hdr,use_shm?"UVCS":"UVCF",4); put32(hdr+4,fi.w); put32(hdr+8,fi.h); memcpy(hdr+12,fi.fourcc,4); put32(hdr+16,frame_size);
         memcpy(hdr+20,&t,8); put32(hdr+28,seq);
-        if(write_all(out_fd,hdr,32)||write_all(out_fd,frame_buf,frame_fill)){ fprintf(stderr,"output closed\n"); running=0; }
+        if(use_shm){
+            if(write_all(out_fd,hdr,32)){ fprintf(stderr,"output closed\n"); running=0; }
+            frame_buf = shm_slot(seq+1);   // next frame lands in the next slot; client reads slot seq%3
+        } else if(write_all(out_fd,hdr,32)||write_all(out_fd,frame_buf,frame_fill)){ fprintf(stderr,"output closed\n"); running=0; }
     }
     seq++;
     if(want_count && frames_ok>=want_count) running=0;
 }
 
+
+
+// ---- Shared-memory frame ring (zero-copy delivery to the client) ----
+#define SHM_NAME "/elgato-uvc-frames"
+#define SHM_SLOTS 3
+#define SHM_SLOT_BYTES 24883200u   // 3840x2160 P010; multiple of 4096
+static uint8_t *shm_base = NULL;
+static int shm_setup(void){
+    int fd = shm_open(SHM_NAME, O_CREAT|O_RDWR, 0666);
+    if(fd<0){ perror("shm_open"); return -1; }
+    fchmod(fd, 0666);
+    size_t total = (size_t)SHM_SLOTS*SHM_SLOT_BYTES;
+    struct stat st; if(fstat(fd,&st)==0 && (size_t)st.st_size < total){ if(ftruncate(fd,total)){ perror("ftruncate"); close(fd); return -1; } }
+    shm_base = mmap(NULL,total,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+    close(fd);
+    if(shm_base==MAP_FAILED){ perror("mmap"); shm_base=NULL; return -1; }
+    fprintf(stderr,"shared frame ring %s: %d x %u bytes\n",SHM_NAME,SHM_SLOTS,SHM_SLOT_BYTES);
+    return 0;
+}
+static uint8_t *shm_slot(uint32_t n){ return shm_base + (size_t)(n%SHM_SLOTS)*SHM_SLOT_BYTES; }
 
 // ---- Audio (UAC1: iso IN EP 0x83, 48 kHz stereo 16-bit) ----
 #define AU_IFACE 3
@@ -116,8 +142,8 @@ static void emit_frame(void){
 #define AU_PKT 208
 #define AU_PKTS_PER_XFER 32
 #define NUM_AU_XFERS 8
-#define AU_FLUSH_BYTES 9600   // 50 ms of 48k stereo s16
-static uint8_t au_buf[AU_FLUSH_BYTES*4]; static uint32_t au_fill=0, au_seq=0;
+#define AU_FLUSH_BYTES 1920   // 10 ms of 48k stereo s16
+static uint8_t au_buf[65536]; static uint32_t au_fill=0, au_seq=0;
 static uint64_t au_bytes_total=0;
 static void audio_flush(void){
     if(!au_fill || dump_prefix) { au_fill=0; return; }
@@ -256,7 +282,8 @@ static int run_session(int fmt, int frm, double fps, int nofps, int want_audio){
         if(!strcmp(fi.fourcc,"P010") && frame_size!=expect) fprintf(stderr,"note: maxFrameSize %u != w*h*3 %u\n",frame_size,expect);
         if(!strcmp(fi.fourcc,"P010")) frame_size=expect;
         if(frame_size==0||max_payload==0){ fprintf(stderr,"bad probe values\n"); continue; }
-        frame_buf=realloc(frame_buf,frame_size); frame_fill=0; cur_fid=-1; seq=0; frames_ok=0; frames_bad=0; video_bytes_seen=0;
+        if(use_shm && shm_base && frame_size<=SHM_SLOT_BYTES){ frame_buf=shm_slot(0); } else { use_shm=0; static uint8_t *own=NULL; own=realloc(own,frame_size); frame_buf=own; }
+        frame_fill=0; cur_fid=-1; seq=0; frames_ok=0; frames_bad=0; video_bytes_seen=0;
 
         xfer_len = (int)max_payload*64;
         for(int i=0;i<NUM_XFERS;i++){
@@ -304,6 +331,7 @@ static int serve(const char *path, int idle_secs){
     if(bind(s,(struct sockaddr*)&sa,sizeof sa)){perror("bind");return 1;}
     chmod(path,0666);
     listen(s,1);
+    shm_setup();
     fprintf(stderr,"serving on %s (pid %d)\n",path,getpid());
     while(!quit_all){
         struct pollfd pfd={s,POLLIN,0};
@@ -313,9 +341,10 @@ static int serve(const char *path, int idle_secs){
         int c=accept(s,NULL,NULL); if(c<0) continue;
         char line[128]={0}; int n=0;
         while(n<(int)sizeof(line)-1){ ssize_t r=read(c,line+n,1); if(r<=0||line[n]=='\n') break; n++; }
-        int fmt=7,frm=5; double fps=30;
-        if(sscanf(line,"START %d %d %lf",&fmt,&frm,&fps)<2){ fprintf(stderr,"bad command: %s\n",line); close(c); continue; }
-        fprintf(stderr,"client: fmt=%d frm=%d fps=%g\n",fmt,frm,fps);
+        int fmt=7,frm=5; double fps=30; char flag[16]={0};
+        if(sscanf(line,"START %d %d %lf %15s",&fmt,&frm,&fps,flag)<2){ fprintf(stderr,"bad command: %s\n",line); close(c); continue; }
+        use_shm = (!strcmp(flag,"SHM") && shm_base!=NULL);
+        fprintf(stderr,"client: fmt=%d frm=%d fps=%g shm=%d\n",fmt,frm,fps,use_shm);
         { int sz=8*1024*1024; setsockopt(c,SOL_SOCKET,SO_SNDBUF,&sz,sizeof sz); }
         out_fd=c; running=1; want_count=0; dump_prefix=NULL;
         run_session(fmt,frm,fps,0,1);
