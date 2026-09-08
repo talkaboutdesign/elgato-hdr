@@ -122,7 +122,7 @@ final class Renderer {
     var lastArrival = 0.0
     var earlyStreak = 0
     var slips = 0, pulls = 0
-    let minLead = 0.003, leadTarget = 0.010
+    let minLead = 0.016, leadTarget = 0.018   // empirically, scanout < ~24 ms after arrival misses vsync now and then
     let statLock = NSLock()
 
     init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer) {
@@ -217,19 +217,19 @@ final class Renderer {
         } else {
             statLock.lock(); let g0 = grid0; statLock.unlock()
             // desired = arrival + lead, snapped up to the vsync grid
-            let desired = a + leadTarget
+            let desired = a + leadTarget + refresh * 0.5
             var t = g0 + ((desired - g0) / refresh).rounded(.up) * refresh
             if nextTarget > 0 {
-                if a + minLead <= nextTarget {
+                if a + minLead <= nextTarget - refresh * 0.5 {
                     // on schedule (or early). If consistently early by a whole refresh, pull the schedule in.
-                    if nextTarget - a - refresh >= minLead + 0.002 { earlyStreak += 1 } else { earlyStreak = 0 }   // a whole refresh of slack, with margin
+                    if nextTarget - refresh * 0.5 - a - refresh >= minLead + 0.002 { earlyStreak += 1 } else { earlyStreak = 0 }   // a whole refresh of slack, with margin
                     if earlyStreak > 60 { t = nextTarget - refresh; pulls += 1; earlyStreak = 0 } else { t = nextTarget }
                 } else {
                     // late: slip whole refreshes until feasible
-                    t = nextTarget; while a + minLead > t { t += refresh }; slips += 1; earlyStreak = 0
+                    t = nextTarget; while a + minLead > t - refresh * 0.5 { t += refresh }; slips += 1; earlyStreak = 0
                 }
             }
-            cb.present(drawable, atTime: t - 0.0005)
+            cb.present(drawable, atTime: t - refresh + 0.001)   // a full refresh early: robust to grid-anchor error
             nextTarget = t + Double(k) * refresh
         }
         cb.commit()
