@@ -101,29 +101,36 @@ fragment float4 frag(V in [[stage_in]], texture2d<float> yT [[texture(0)]], text
 }
 """
 
-final class Renderer {
+final class Renderer: NSObject {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let pipeline: MTLRenderPipelineState
     let layer: CAMetalLayer
     var slotBuffers: [MTLBuffer] = []
-    var textures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<32 | w<<16 | h
+    var shmTextures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<40 | w<<20 | h
     var colorMode: ColorMode = .pq { didSet { applyColor() } }
     var lowLatency = false { didSet { layer.displaySyncEnabled = !lowLatency; resetPacing() } }
-    // latency stats (seconds)
-    var latSum = 0.0, latMax = 0.0, latN = 0
-    var lastPresented = 0.0
-    var hist = [Int](repeating: 0, count: 6)   // presented interval in refresh units (0..5+)
-    // Frame pacing: present on a fixed vsync grid, k refreshes per source frame, with a lead-time budget for jitter.
+
+    // App-owned texture ring: frames are blitted here on arrival so shared-memory slots can be reused freely.
+    static let ringSize = 8
+    var ring: [(MTLTexture, MTLTexture)] = []
+    var ringW = 0, ringH = 0, ringNext = 0
+    struct Queued { let ring: Int; let target: Double; let arrival: Double }
+    var pending: [Queued] = []
+    let lock = NSLock()
+
+    // Pacing: fixed vsync grid, k refreshes per source frame, lead budget for jitter.
+    var displayLink: CADisplayLink?
     var refresh = 1.0 / 60
-    var grid0 = 0.0            // a vsync-aligned presented time (grid anchor)
-    var nextTarget = 0.0       // scheduled presentation time of the next frame
-    var period = 0.0           // EMA of source frame period
-    var lastArrival = 0.0
-    var earlyStreak = 0
-    var slips = 0, pulls = 0
-    let minLead = 0.016, leadTarget = 0.018   // empirically, scanout < ~24 ms after arrival misses vsync now and then
-    let statLock = NSLock()
+    var grid0 = 0.0, nextTarget = 0.0, period = 0.0, lastArrival = 0.0
+    var lastTarget = 0.0, slips = 0, pacingDrops = 0
+    let minLead = 0.030, leadTarget = 0.034
+
+    // stats
+    var latSum = 0.0, latMax = 0.0, latN = 0, lastPresented = 0.0
+    var hist = [Int](repeating: 0, count: 6)
+    var arrHist = [Int](repeating: 0, count: 6)   // |arrival delta - period| in 4 ms buckets
+    var lastTick = 0.0, tickGaps = 0
 
     init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer) {
         guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else { return nil }
@@ -139,15 +146,23 @@ final class Renderer {
             guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: nil) else { log("no-copy buffer failed"); return nil }
             slotBuffers.append(b)
         }
+        super.init()
         layer.device = dev
         layer.pixelFormat = .rgb10a2Unorm
         layer.framebufferOnly = true
         layer.isOpaque = true
         layer.presentsWithTransaction = false
-        layer.maximumDrawableCount = 2
-        layer.displaySyncEnabled = !lowLatency
+        layer.maximumDrawableCount = 3
+        layer.displaySyncEnabled = true
         layer.backgroundColor = NSColor.black.cgColor
         applyColor()
+    }
+
+    func attachDisplayLink(view: NSView) {
+        displayLink?.invalidate()
+        let link = view.displayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
     }
 
     func applyColor() {
@@ -167,27 +182,89 @@ final class Renderer {
         }
     }
 
-    func textures(slot: Int, w: Int, h: Int) -> (MTLTexture, MTLTexture)? {
+    func shmTextures(slot: Int, w: Int, h: Int) -> (MTLTexture, MTLTexture)? {
         let key = slot << 40 | w << 20 | h
-        if let t = textures[key] { return t }
+        if let t = shmTextures[key] { return t }
         let yd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
         yd.usage = .shaderRead; yd.storageMode = .shared
         let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: w / 2, height: h / 2, mipmapped: false)
         cd.usage = .shaderRead; cd.storageMode = .shared
         guard let y = slotBuffers[slot].makeTexture(descriptor: yd, offset: 0, bytesPerRow: w * 2),
               let c = slotBuffers[slot].makeTexture(descriptor: cd, offset: w * h * 2, bytesPerRow: w * 2) else { return nil }
-        textures[key] = (y, c); return (y, c)
+        shmTextures[key] = (y, c); return (y, c)
     }
 
-    /// Render slot `slot` (w x h P010) and present immediately. `arrivalNs` = helper timestamp (CLOCK_UPTIME_RAW).
-    func draw(slot: Int, w: Int, h: Int, arrivalNs: UInt64) {
-        guard let (yT, cT) = textures(slot: slot, w: w, h: h), let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
+    func ensureRing(w: Int, h: Int) {
+        if ringW == w && ringH == h && ring.count == Renderer.ringSize { return }
+        ring = []
+        for _ in 0..<Renderer.ringSize {
+            let yd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
+            yd.usage = .shaderRead; yd.storageMode = .private
+            let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: w / 2, height: h / 2, mipmapped: false)
+            cd.usage = .shaderRead; cd.storageMode = .private
+            guard let y = device.makeTexture(descriptor: yd), let c = device.makeTexture(descriptor: cd) else { return }
+            ring.append((y, c))
+        }
+        ringW = w; ringH = h; ringNext = 0
+        lock.lock(); pending.removeAll(); lock.unlock()
+    }
+
+    func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); lock.unlock() }
+
+    /// Reader thread: copy the shared-memory slot into the ring on the GPU and schedule it. Never blocks on drawables.
+    func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64) {
+        guard let (sy, sc) = shmTextures(slot: slot, w: w, h: h) else { return }
+        let a = Double(arrivalNs) / 1e9
+        if lowLatency { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }
+        ensureRing(w: w, h: h)
+        guard ring.count == Renderer.ringSize, let cb = queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
+        let idx = ringNext; ringNext = (ringNext + 1) % Renderer.ringSize
+        blit.copy(from: sy, to: ring[idx].0); blit.copy(from: sc, to: ring[idx].1)
+        blit.endEncoding(); cb.commit()
+
+        lock.lock(); defer { lock.unlock() }
+        if lastArrival > 0 { let d = a - lastArrival; if d > 0.002 && d < 0.5 { if period > 0 { arrHist[min(5, Int(abs(d - period) / 0.004))] += 1 }; period = period == 0 ? d : period * 0.9 + d * 0.1 } }
+        lastArrival = a
+        // Schedule from THIS frame's arrival, snapped to the vsync grid. Arrival jitter is <4 ms, so a direct
+        // snap gives an even cadence with no accumulator that can run away. Monotonic guard keeps frames on
+        // distinct vsyncs; if the schedule ever falls too far behind wall time, it re-bases on arrival.
+        var t: Double
+        if grid0 == 0 {
+            t = a
+        } else {
+            t = grid0 + ((a + leadTarget - grid0) / refresh).rounded() * refresh
+            if t <= lastTarget + refresh * 0.5 { t = lastTarget + refresh; slips += 1 }   // collision: next vsync
+            if t < a { t = grid0 + ((a + leadTarget - grid0) / refresh).rounded(.up) * refresh }  // never in the past
+        }
+        lastTarget = t
+        pending.append(Queued(ring: idx, target: t, arrival: a))
+        while pending.count > Renderer.ringSize - 2 { pending.removeFirst(); pacingDrops += 1 }
+    }
+
+    /// Display link (main thread), once per vsync: present the frame due at this vsync, if any.
+    @objc func tick(_ link: CADisplayLink) {
+        let T = link.targetTimestamp
+        lock.lock()
+        if lastTick > 0 && T - lastTick > refresh * 1.5 { tickGaps += 1 }; lastTick = T
+        refresh = max(1.0 / 240, link.targetTimestamp - link.timestamp)
+        if grid0 == 0 { grid0 = T }
+        var chosen: Queued? = nil
+        while let f = pending.first, f.target <= T + refresh * 0.5 {
+            if chosen != nil { pacingDrops += 1 }
+            chosen = f; pending.removeFirst()
+        }
+        lock.unlock()
+        guard let f = chosen, f.ring < ring.count else { return }
+        drawNow(y: ring[f.ring].0, c: ring[f.ring].1, w: ringW, h: ringH, arrival: f.arrival)
+    }
+
+    func drawNow(y yT: MTLTexture, c cT: MTLTexture, w: Int, h: Int, arrival: Double) {
+        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture
         rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
-        // aspect-fit viewport
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
         let scale = min(dw / Double(w), dh / Double(h))
         let vw = Double(w) * scale, vh = Double(h) * scale
@@ -200,46 +277,22 @@ final class Renderer {
         enc.endEncoding()
         drawable.addPresentedHandler { [weak self] d in
             guard let self = self, d.presentedTime > 0 else { return }
-            let lat = d.presentedTime - Double(arrivalNs) / 1e9
-            self.statLock.lock(); self.latSum += lat; self.latMax = max(self.latMax, lat); self.latN += 1
-            if self.lastPresented > 0 { let r = Int(((d.presentedTime - self.lastPresented) * 60).rounded()); self.hist[min(max(r, 0), 5)] += 1 }
+            self.lock.lock()
+            let lat = d.presentedTime - arrival
+            self.latSum += lat; self.latMax = max(self.latMax, lat); self.latN += 1
+            if self.lastPresented > 0 { let r = Int(((d.presentedTime - self.lastPresented) / self.refresh).rounded()); self.hist[min(max(r, 0), 5)] += 1 }
             self.lastPresented = d.presentedTime
-            if self.grid0 == 0 { self.grid0 = d.presentedTime }
-            self.statLock.unlock()
+            self.lock.unlock()
         }
-        let a = Double(arrivalNs) / 1e9
-        if lastArrival > 0 { let d = a - lastArrival; if d > 0.002 && d < 0.5 { period = period == 0 ? d : period * 0.9 + d * 0.1 } }
-        lastArrival = a
-        let k = period > 0 ? Int((period / refresh).rounded()) : 2
-        if lowLatency || grid0 == 0 || k < 1 {
-            cb.present(drawable)          // immediate (vsync-off mode, warm-up, or source faster than display)
-            nextTarget = 0
-        } else {
-            statLock.lock(); let g0 = grid0; statLock.unlock()
-            // desired = arrival + lead, snapped up to the vsync grid
-            let desired = a + leadTarget + refresh * 0.5
-            var t = g0 + ((desired - g0) / refresh).rounded(.up) * refresh
-            if nextTarget > 0 {
-                if a + minLead <= nextTarget - refresh * 0.5 {
-                    // on schedule (or early). If consistently early by a whole refresh, pull the schedule in.
-                    if nextTarget - refresh * 0.5 - a - refresh >= minLead + 0.002 { earlyStreak += 1 } else { earlyStreak = 0 }   // a whole refresh of slack, with margin
-                    if earlyStreak > 60 { t = nextTarget - refresh; pulls += 1; earlyStreak = 0 } else { t = nextTarget }
-                } else {
-                    // late: slip whole refreshes until feasible
-                    t = nextTarget; while a + minLead > t - refresh * 0.5 { t += refresh }; slips += 1; earlyStreak = 0
-                }
-            }
-            cb.present(drawable, atTime: t - refresh + 0.001)   // a full refresh early: robust to grid-anchor error
-            nextTarget = t + Double(k) * refresh
-        }
+        cb.present(drawable)
         cb.commit()
     }
 
-    func resetPacing() { statLock.lock(); grid0 = 0; nextTarget = 0; period = 0; lastArrival = 0; earlyStreak = 0; statLock.unlock() }
     func takeStats() -> (avgMs: Double, maxMs: Double, n: Int) {
-        statLock.lock(); defer { statLock.unlock() }
+        lock.lock(); defer { lock.unlock() }
         let r = (latN > 0 ? latSum / Double(latN) * 1000 : 0, latMax * 1000, latN)
-        log(String(format: "pacing (refresh units 0..5+): %@  k=%d period=%.2f ms slips=%d pulls=%d", hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, slips, pulls)); slips = 0; pulls = 0
+        log(String(format: "pacing (refresh units 0..5+): %@  k=%d period=%.2f ms refresh=%.2f ms slips=%d drops=%d queue=%d  arrival-jitter(4ms buckets)=%@ tickGaps=%d", hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, refresh * 1000, slips, pacingDrops, pending.count, arrHist.description, tickGaps))
+        slips = 0; pacingDrops = 0; arrHist = [Int](repeating: 0, count: 6); tickGaps = 0
         latSum = 0; latMax = 0; latN = 0; hist = [Int](repeating: 0, count: 6)
         return r
     }
@@ -265,8 +318,8 @@ final class AudioPlayer {
     let player = AVAudioPlayerNode()
     let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
     var queuedFrames: Int = 0           // frames scheduled but not yet played
-    let maxQueuedFrames = 48000 * 80 / 1000    // trim above 80 ms of backlog (delivery jitter is ~10-30 ms)
-    let prefillFrames = 48000 * 30 / 1000       // resume playback once 30 ms is queued after an underrun
+    let maxQueuedFrames = 48000 * 150 / 1000   // trim above 150 ms of backlog
+    let prefillFrames = 48000 * 60 / 1000       // resume playback once 60 ms is queued after an underrun
     var needsPrefill = true
     var underruns = 0
     let lock = NSLock()
@@ -346,8 +399,12 @@ final class Recorder {
     var sessionStarted = false
     var audioAnchor: Double = -1     // seconds (recording time) of the first audio sample written
     var audioSamplesWritten: Int64 = 0
-    var videoFrames = 0, droppedVideo = 0
+    var videoFrames = 0, droppedVideo = 0, dupFrames = 0, gapFrames = 0
     var finished = false
+    let fps: Double
+    let frameDur: Int64          // in 60000 units
+    var lastIndex: Int64 = -1
+    var slewSamples = 0
 
     static func hdr10Metadata() -> (Data, Data) {
         // Mastering display (SEI order G,B,R then white point; 0.00002 units), luminance 1000 / 0.005 nits (0.0001 units)
@@ -361,6 +418,8 @@ final class Recorder {
 
     init(url: URL, width: Int, height: Int, fps: Double, colorMode: ColorMode, startNs: UInt64) throws {
         self.url = url; self.startNs = startNs
+        self.fps = fps
+        frameDur = Int64((60000.0 / fps).rounded())   // 30 -> 2000, 29.97 -> 2002, 60 -> 1000, 120 -> 500
         writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let (prim, tf, mat): (String, String, String)
         switch colorMode {
@@ -413,8 +472,13 @@ final class Recorder {
         let t = time(ns)
         queue.async { [self] in
             guard !finished, writer.status == .writing else { return }
+            // Snap arrival time to the nominal frame grid: removes USB arrival jitter, keeps holes for dropped frames.
+            let index = Int64((t * fps).rounded())
+            if index <= lastIndex { dupFrames += 1; return }
+            if lastIndex >= 0 && index > lastIndex + 1 { gapFrames += Int(index - lastIndex - 1) }
             guard video.isReadyForMoreMediaData else { droppedVideo += 1; return }
-            if adaptor.append(pb, withPresentationTime: CMTime(seconds: t, preferredTimescale: 1_000_000)) { videoFrames += 1 }
+            let pts = CMTime(value: index * frameDur, timescale: 60000)
+            if adaptor.append(pb, withPresentationTime: pts) { videoFrames += 1; lastIndex = index }
             else { log("video append failed: \(writer.error?.localizedDescription ?? "?")"); droppedVideo += 1 }
         }
     }
@@ -435,9 +499,27 @@ final class Recorder {
                 guard n > 0 else { return }
                 audioAnchor = startT; audioSamplesWritten = 0
             }
-            var pts = audioAnchor + Double(audioSamplesWritten) / 48000.0
+            let pts = audioAnchor + Double(audioSamplesWritten) / 48000.0
+            // Slew instead of jumping: if the sample clock drifts from arrival time, drop or repeat a few samples
+            // spread across this chunk (max 1%), keeping audio continuous and locked to the video clock.
             let expected = endT - Double(n) / 48000.0
-            if abs(pts - expected) > 0.08 { log(String(format: "audio re-anchor: drift %.0f ms", (expected - pts) * 1000)); audioAnchor = max(expected, pts); audioSamplesWritten = 0; pts = audioAnchor }
+            let err = expected - pts                       // > 0: audio is behind (need to drop samples)
+            if abs(err) > 0.002 {
+                let want = Int((err * 48000).rounded())
+                let maxAdj = max(1, n / 100)
+                let adj = max(-maxAdj, min(maxAdj, want))
+                if adj != 0 {
+                    var out = Data(capacity: (n + abs(adj)) * 4)
+                    let stride = n / abs(adj)
+                    var i = 0, k = 0
+                    while i < n {
+                        let frame = d.subdata(in: i * 4 ..< i * 4 + 4)
+                        if (i + 1) % stride == 0 && k < abs(adj) { k += 1; if adj > 0 { i += 1; continue } else { out.append(frame) } }
+                        out.append(frame); i += 1
+                    }
+                    d = out; n = out.count / 4; slewSamples += adj
+                }
+            }
             var block: CMBlockBuffer?
             guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: d.count, blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: d.count, flags: 0, blockBufferOut: &block) == noErr, let bb = block else { return }
             d.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: bb, offsetIntoDestination: 0, dataLength: d.count) }
@@ -456,7 +538,7 @@ final class Recorder {
             let frames = videoFrames, dropped = droppedVideo, url = url
             writer.finishWriting {
                 let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-                completion(String(format: "saved %@ (%d frames, %d dropped, %.1f MB)", url.lastPathComponent, frames, dropped, Double(size) / 1e6))
+                completion(String(format: "saved %@ (%d frames, %d dropped, %d gaps, %d dups, audio slew %d samples, %.1f MB)", url.lastPathComponent, frames, dropped, self.gapFrames, self.dupFrames, self.slewSamples, Double(size) / 1e6))
             }
         }
     }
@@ -551,7 +633,7 @@ final class Session {
                 latestSeq = seq; lastFrameNs = tNs
                 let slot = Int(seq % UInt32(shmSlots))
                 let t1 = CFAbsoluteTimeGetCurrent()
-                renderer.draw(slot: slot, w: w, h: h, arrivalNs: tNs)
+                renderer.submit(slot: slot, w: w, h: h, arrivalNs: tNs)
                 let dd = CFAbsoluteTimeGetCurrent() - t1; tDraw += dd; tDrawMax = max(tDrawMax, dd)
                 if recorder != nil { copyForRecording(slot: slot, seq: seq, w: w, h: h, ns: tNs, colorMode: renderer.colorMode) }
                 frames += 1
@@ -711,12 +793,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.renderer = Renderer(layer: self.view.metalLayer, shm: shm)
                     self.renderer?.colorMode = self.colorMode; self.renderer?.lowLatency = self.lowLatency
                     self.view.updateDrawableSize()
+                    self.renderer?.attachDisplayLink(view: self.view)
                 }
             }
             guard let renderer = self.renderer else { DispatchQueue.main.async { self.setTitle("Metal unavailable") }; close(fd); return }
             let cmd = "START 7 \(mode.frame) \(mode.fps) SHM\n"
             _ = cmd.withCString { write(fd, $0, strlen($0)) }
-            DispatchQueue.main.sync { renderer.refresh = 1.0 / Double(max(self.window.screen?.maximumFramesPerSecond ?? 60, 24)); renderer.resetPacing() }
+            renderer.resetPacing()
             let s = Session(fd: fd, renderer: renderer, shm: shm)
             s.audio = self.audio
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
