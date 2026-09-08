@@ -109,9 +109,20 @@ final class Renderer {
     var slotBuffers: [MTLBuffer] = []
     var textures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<32 | w<<16 | h
     var colorMode: ColorMode = .pq { didSet { applyColor() } }
-    var lowLatency = false { didSet { layer.displaySyncEnabled = !lowLatency } }
+    var lowLatency = false { didSet { layer.displaySyncEnabled = !lowLatency; resetPacing() } }
     // latency stats (seconds)
     var latSum = 0.0, latMax = 0.0, latN = 0
+    var lastPresented = 0.0
+    var hist = [Int](repeating: 0, count: 6)   // presented interval in refresh units (0..5+)
+    // Frame pacing: present on a fixed vsync grid, k refreshes per source frame, with a lead-time budget for jitter.
+    var refresh = 1.0 / 60
+    var grid0 = 0.0            // a vsync-aligned presented time (grid anchor)
+    var nextTarget = 0.0       // scheduled presentation time of the next frame
+    var period = 0.0           // EMA of source frame period
+    var lastArrival = 0.0
+    var earlyStreak = 0
+    var slips = 0, pulls = 0
+    let minLead = 0.003, leadTarget = 0.010
     let statLock = NSLock()
 
     init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer) {
@@ -190,16 +201,46 @@ final class Renderer {
         drawable.addPresentedHandler { [weak self] d in
             guard let self = self, d.presentedTime > 0 else { return }
             let lat = d.presentedTime - Double(arrivalNs) / 1e9
-            self.statLock.lock(); self.latSum += lat; self.latMax = max(self.latMax, lat); self.latN += 1; self.statLock.unlock()
+            self.statLock.lock(); self.latSum += lat; self.latMax = max(self.latMax, lat); self.latN += 1
+            if self.lastPresented > 0 { let r = Int(((d.presentedTime - self.lastPresented) * 60).rounded()); self.hist[min(max(r, 0), 5)] += 1 }
+            self.lastPresented = d.presentedTime
+            if self.grid0 == 0 { self.grid0 = d.presentedTime }
+            self.statLock.unlock()
         }
-        cb.present(drawable)
+        let a = Double(arrivalNs) / 1e9
+        if lastArrival > 0 { let d = a - lastArrival; if d > 0.002 && d < 0.5 { period = period == 0 ? d : period * 0.9 + d * 0.1 } }
+        lastArrival = a
+        let k = period > 0 ? Int((period / refresh).rounded()) : 2
+        if lowLatency || grid0 == 0 || k < 1 {
+            cb.present(drawable)          // immediate (vsync-off mode, warm-up, or source faster than display)
+            nextTarget = 0
+        } else {
+            statLock.lock(); let g0 = grid0; statLock.unlock()
+            // desired = arrival + lead, snapped up to the vsync grid
+            let desired = a + leadTarget
+            var t = g0 + ((desired - g0) / refresh).rounded(.up) * refresh
+            if nextTarget > 0 {
+                if a + minLead <= nextTarget {
+                    // on schedule (or early). If consistently early by a whole refresh, pull the schedule in.
+                    if nextTarget - a - refresh >= minLead + 0.002 { earlyStreak += 1 } else { earlyStreak = 0 }   // a whole refresh of slack, with margin
+                    if earlyStreak > 60 { t = nextTarget - refresh; pulls += 1; earlyStreak = 0 } else { t = nextTarget }
+                } else {
+                    // late: slip whole refreshes until feasible
+                    t = nextTarget; while a + minLead > t { t += refresh }; slips += 1; earlyStreak = 0
+                }
+            }
+            cb.present(drawable, atTime: t - 0.0005)
+            nextTarget = t + Double(k) * refresh
+        }
         cb.commit()
     }
 
+    func resetPacing() { statLock.lock(); grid0 = 0; nextTarget = 0; period = 0; lastArrival = 0; earlyStreak = 0; statLock.unlock() }
     func takeStats() -> (avgMs: Double, maxMs: Double, n: Int) {
         statLock.lock(); defer { statLock.unlock() }
         let r = (latN > 0 ? latSum / Double(latN) * 1000 : 0, latMax * 1000, latN)
-        latSum = 0; latMax = 0; latN = 0
+        log(String(format: "pacing (refresh units 0..5+): %@  k=%d period=%.2f ms slips=%d pulls=%d", hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, slips, pulls)); slips = 0; pulls = 0
+        latSum = 0; latMax = 0; latN = 0; hist = [Int](repeating: 0, count: 6)
         return r
     }
 }
@@ -675,6 +716,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let renderer = self.renderer else { DispatchQueue.main.async { self.setTitle("Metal unavailable") }; close(fd); return }
             let cmd = "START 7 \(mode.frame) \(mode.fps) SHM\n"
             _ = cmd.withCString { write(fd, $0, strlen($0)) }
+            DispatchQueue.main.sync { renderer.refresh = 1.0 / Double(max(self.window.screen?.maximumFramesPerSecond ?? 60, 24)); renderer.resetPacing() }
             let s = Session(fd: fd, renderer: renderer, shm: shm)
             s.audio = self.audio
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
