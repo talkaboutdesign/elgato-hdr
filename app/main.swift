@@ -1,12 +1,18 @@
-// Elgato HDR — slim native macOS viewer for the Elgato 4K X hidden P010 (10-bit HDR) mode.
-// Talks to a tiny root helper (uvc_capture --serve) over a Unix socket; helper is launched once via a native admin prompt.
+// Elgato HDR — slim native macOS viewer/recorder for the Elgato 4K X hidden P010 (10-bit HDR) mode.
+// Low-latency build: frames arrive in shared memory from the root helper, are rendered by Metal straight from
+// that memory (no copies), and presented without waiting for vsync.
 import AppKit
 import AVFoundation
 import CoreMedia
 import CoreVideo
 import VideoToolbox
+import Metal
+import QuartzCore
 
 let socketPath = "/tmp/elgato-uvc.sock"
+let shmName = "/elgato-uvc-frames"
+let shmSlots = 3
+let shmSlotBytes = 24883200
 
 enum ColorMode: String { case pq, hlg, sdr }
 struct Mode { let name: String; let frame: Int; let fps: Double }
@@ -43,7 +49,7 @@ func connectHelper() -> Int32 {
     }
     let r = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
     if r != 0 { close(fd); return -1 }
-    var sz: Int32 = 8 * 1024 * 1024
+    var sz: Int32 = 1 << 20
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, socklen_t(MemoryLayout<Int32>.size))
     return fd
 }
@@ -60,76 +66,334 @@ func spawnHelperWithAdminPrompt() -> Bool {
     return true
 }
 
+func mapSharedFrames() -> UnsafeMutableRawPointer? {
+    // shm_open is variadic (unavailable to Swift); without O_CREAT the mode argument is ignored, so a 2-arg call is safe.
+    typealias ShmOpen2 = @convention(c) (UnsafePointer<CChar>, Int32) -> Int32
+    guard let sym = dlsym(dlopen(nil, RTLD_NOW), "shm_open") else { return nil }
+    let shmOpen = unsafeBitCast(sym, to: ShmOpen2.self)
+    let fd = shmOpen(shmName, O_RDWR)
+    if fd < 0 { return nil }
+    defer { close(fd) }
+    let total = shmSlots * shmSlotBytes
+    let p = mmap(nil, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+    return p == MAP_FAILED ? nil : p
+}
+
+// MARK: - Metal renderer (P010 -> PQ/HLG/709 RGB, zero-copy from shared memory)
+
+let shaderSource = """
+#include <metal_stdlib>
+using namespace metal;
+struct V { float4 pos [[position]]; float2 uv; };
+vertex V vtx(uint id [[vertex_id]]) {
+    float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };
+    V o; o.pos = float4(p[id], 0, 1); o.uv = float2((p[id].x + 1) * 0.5, 1 - (p[id].y + 1) * 0.5); return o;
+}
+fragment float4 frag(V in [[stage_in]], texture2d<float> yT [[texture(0)]], texture2d<float> cT [[texture(1)]], constant int &mode [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float y = yT.sample(s, in.uv).r * (65535.0 / 64.0);      // 10-bit code, MSB-aligned in 16 bits
+    float2 c = cT.sample(s, in.uv).rg * (65535.0 / 64.0);
+    float Y = (y - 64.0) / 876.0, Cb = (c.x - 512.0) / 896.0, Cr = (c.y - 512.0) / 896.0;   // video range
+    float3 rgb = (mode == 2)
+        ? float3(Y + 1.5748 * Cr, Y - 0.1873 * Cb - 0.4681 * Cr, Y + 1.8556 * Cb)       // BT.709
+        : float3(Y + 1.4746 * Cr, Y - 0.16455 * Cb - 0.57135 * Cr, Y + 1.8814 * Cb);    // BT.2020
+    return float4(clamp(rgb, 0.0, 1.0), 1.0);
+}
+"""
+
+final class Renderer: NSObject {
+    let device: MTLDevice
+    let queue: MTLCommandQueue
+    let pipeline: MTLRenderPipelineState
+    let layer: CAMetalLayer
+    var slotBuffers: [MTLBuffer] = []
+    var shmTextures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<40 | w<<20 | h
+    var colorMode: ColorMode = .pq { didSet { applyColor() } }
+    var lowLatency = false { didSet { layer.displaySyncEnabled = !lowLatency; resetPacing() } }
+
+    // App-owned texture ring: frames are blitted here on arrival so shared-memory slots can be reused freely.
+    static let ringSize = 8
+    var ring: [(MTLTexture, MTLTexture)] = []
+    var ringW = 0, ringH = 0, ringNext = 0
+    struct Queued { let ring: Int; let target: Double; let arrival: Double }
+    var pending: [Queued] = []
+    let lock = NSLock()
+
+    // Pacing: fixed vsync grid, k refreshes per source frame, lead budget for jitter.
+    var displayLink: CADisplayLink?
+    var refresh = 1.0 / 60
+    var grid0 = 0.0, nextTarget = 0.0, period = 0.0, lastArrival = 0.0
+    var lastTarget = 0.0, slips = 0, pacingDrops = 0
+    let minLead = 0.030, leadTarget = 0.034
+
+    // stats
+    var latSum = 0.0, latMax = 0.0, latN = 0, lastPresented = 0.0
+    var hist = [Int](repeating: 0, count: 6)
+    var arrHist = [Int](repeating: 0, count: 6)   // |arrival delta - period| in 4 ms buckets
+    var lastTick = 0.0, tickGaps = 0
+
+    init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer) {
+        guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else { return nil }
+        device = dev; queue = q; self.layer = layer
+        do {
+            let lib = try dev.makeLibrary(source: shaderSource, options: nil)
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = lib.makeFunction(name: "vtx"); d.fragmentFunction = lib.makeFunction(name: "frag")
+            d.colorAttachments[0].pixelFormat = .rgb10a2Unorm
+            pipeline = try dev.makeRenderPipelineState(descriptor: d)
+        } catch { log("metal setup failed: \(error)"); return nil }
+        for i in 0..<shmSlots {
+            guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: nil) else { log("no-copy buffer failed"); return nil }
+            slotBuffers.append(b)
+        }
+        super.init()
+        layer.device = dev
+        layer.pixelFormat = .rgb10a2Unorm
+        layer.framebufferOnly = true
+        layer.isOpaque = true
+        layer.presentsWithTransaction = false
+        layer.maximumDrawableCount = 3
+        layer.displaySyncEnabled = true
+        layer.backgroundColor = NSColor.black.cgColor
+        applyColor()
+    }
+
+    func attachDisplayLink(view: NSView) {
+        displayLink?.invalidate()
+        let link = view.displayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    func applyColor() {
+        switch colorMode {
+        case .pq:
+            layer.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
+            layer.wantsExtendedDynamicRangeContent = true
+            layer.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005, maxLuminance: 1000, opticalOutputScale: 10000)
+        case .hlg:
+            layer.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_HLG)
+            layer.wantsExtendedDynamicRangeContent = true
+            layer.edrMetadata = CAEDRMetadata.hlg
+        case .sdr:
+            layer.colorspace = CGColorSpace(name: CGColorSpace.itur_709)
+            layer.wantsExtendedDynamicRangeContent = false
+            layer.edrMetadata = nil
+        }
+    }
+
+    func shmTextures(slot: Int, w: Int, h: Int) -> (MTLTexture, MTLTexture)? {
+        let key = slot << 40 | w << 20 | h
+        if let t = shmTextures[key] { return t }
+        let yd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
+        yd.usage = .shaderRead; yd.storageMode = .shared
+        let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: w / 2, height: h / 2, mipmapped: false)
+        cd.usage = .shaderRead; cd.storageMode = .shared
+        guard let y = slotBuffers[slot].makeTexture(descriptor: yd, offset: 0, bytesPerRow: w * 2),
+              let c = slotBuffers[slot].makeTexture(descriptor: cd, offset: w * h * 2, bytesPerRow: w * 2) else { return nil }
+        shmTextures[key] = (y, c); return (y, c)
+    }
+
+    func ensureRing(w: Int, h: Int) {
+        if ringW == w && ringH == h && ring.count == Renderer.ringSize { return }
+        ring = []
+        for _ in 0..<Renderer.ringSize {
+            let yd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
+            yd.usage = .shaderRead; yd.storageMode = .private
+            let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: w / 2, height: h / 2, mipmapped: false)
+            cd.usage = .shaderRead; cd.storageMode = .private
+            guard let y = device.makeTexture(descriptor: yd), let c = device.makeTexture(descriptor: cd) else { return }
+            ring.append((y, c))
+        }
+        ringW = w; ringH = h; ringNext = 0
+        lock.lock(); pending.removeAll(); lock.unlock()
+    }
+
+    func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); lock.unlock() }
+
+    /// Reader thread: copy the shared-memory slot into the ring on the GPU and schedule it. Never blocks on drawables.
+    func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64) {
+        guard let (sy, sc) = shmTextures(slot: slot, w: w, h: h) else { return }
+        let a = Double(arrivalNs) / 1e9
+        if lowLatency { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }
+        ensureRing(w: w, h: h)
+        guard ring.count == Renderer.ringSize, let cb = queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
+        let idx = ringNext; ringNext = (ringNext + 1) % Renderer.ringSize
+        blit.copy(from: sy, to: ring[idx].0); blit.copy(from: sc, to: ring[idx].1)
+        blit.endEncoding(); cb.commit()
+
+        lock.lock(); defer { lock.unlock() }
+        if lastArrival > 0 { let d = a - lastArrival; if d > 0.002 && d < 0.5 { if period > 0 { arrHist[min(5, Int(abs(d - period) / 0.004))] += 1 }; period = period == 0 ? d : period * 0.9 + d * 0.1 } }
+        lastArrival = a
+        // Schedule from THIS frame's arrival, snapped to the vsync grid. Arrival jitter is <4 ms, so a direct
+        // snap gives an even cadence with no accumulator that can run away. Monotonic guard keeps frames on
+        // distinct vsyncs; if the schedule ever falls too far behind wall time, it re-bases on arrival.
+        var t: Double
+        if grid0 == 0 {
+            t = a
+        } else {
+            t = grid0 + ((a + leadTarget - grid0) / refresh).rounded() * refresh
+            if t <= lastTarget + refresh * 0.5 { t = lastTarget + refresh; slips += 1 }   // collision: next vsync
+            if t < a { t = grid0 + ((a + leadTarget - grid0) / refresh).rounded(.up) * refresh }  // never in the past
+        }
+        lastTarget = t
+        pending.append(Queued(ring: idx, target: t, arrival: a))
+        while pending.count > Renderer.ringSize - 2 { pending.removeFirst(); pacingDrops += 1 }
+    }
+
+    /// Display link (main thread), once per vsync: present the frame due at this vsync, if any.
+    @objc func tick(_ link: CADisplayLink) {
+        let T = link.targetTimestamp
+        lock.lock()
+        if lastTick > 0 && T - lastTick > refresh * 1.5 { tickGaps += 1 }; lastTick = T
+        refresh = max(1.0 / 240, link.targetTimestamp - link.timestamp)
+        if grid0 == 0 { grid0 = T }
+        var chosen: Queued? = nil
+        while let f = pending.first, f.target <= T + refresh * 0.5 {
+            if chosen != nil { pacingDrops += 1 }
+            chosen = f; pending.removeFirst()
+        }
+        lock.unlock()
+        guard let f = chosen, f.ring < ring.count else { return }
+        drawNow(y: ring[f.ring].0, c: ring[f.ring].1, w: ringW, h: ringH, arrival: f.arrival)
+    }
+
+    func drawNow(y yT: MTLTexture, c cT: MTLTexture, w: Int, h: Int, arrival: Double) {
+        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
+        let rp = MTLRenderPassDescriptor()
+        rp.colorAttachments[0].texture = drawable.texture
+        rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
+        rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
+        let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
+        let scale = min(dw / Double(w), dh / Double(h))
+        let vw = Double(w) * scale, vh = Double(h) * scale
+        enc.setViewport(MTLViewport(originX: (dw - vw) / 2, originY: (dh - vh) / 2, width: vw, height: vh, znear: 0, zfar: 1))
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(yT, index: 0); enc.setFragmentTexture(cT, index: 1)
+        var mode: Int32 = colorMode == .sdr ? 2 : 0
+        enc.setFragmentBytes(&mode, length: 4, index: 0)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
+        drawable.addPresentedHandler { [weak self] d in
+            guard let self = self, d.presentedTime > 0 else { return }
+            self.lock.lock()
+            let lat = d.presentedTime - arrival
+            self.latSum += lat; self.latMax = max(self.latMax, lat); self.latN += 1
+            if self.lastPresented > 0 { let r = Int(((d.presentedTime - self.lastPresented) / self.refresh).rounded()); self.hist[min(max(r, 0), 5)] += 1 }
+            self.lastPresented = d.presentedTime
+            self.lock.unlock()
+        }
+        cb.present(drawable)
+        cb.commit()
+    }
+
+    func takeStats() -> (avgMs: Double, maxMs: Double, n: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let r = (latN > 0 ? latSum / Double(latN) * 1000 : 0, latMax * 1000, latN)
+        log(String(format: "pacing (refresh units 0..5+): %@  k=%d period=%.2f ms refresh=%.2f ms slips=%d drops=%d queue=%d  arrival-jitter(4ms buckets)=%@ tickGaps=%d", hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, refresh * 1000, slips, pacingDrops, pending.count, arrHist.description, tickGaps))
+        slips = 0; pacingDrops = 0; arrHist = [Int](repeating: 0, count: 6); tickGaps = 0
+        latSum = 0; latMax = 0; latN = 0; hist = [Int](repeating: 0, count: 6)
+        return r
+    }
+}
+
+final class MetalView: NSView {
+    let metalLayer = CAMetalLayer()
+    override init(frame: NSRect) { super.init(frame: frame); wantsLayer = true; layer = metalLayer; layerContentsRedrawPolicy = .never }
+    required init?(coder: NSCoder) { fatalError() }
+    override func layout() { super.layout(); updateDrawableSize() }
+    override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); updateDrawableSize() }
+    func updateDrawableSize() {
+        let s = window?.backingScaleFactor ?? 2
+        metalLayer.contentsScale = s
+        metalLayer.drawableSize = CGSize(width: bounds.width * s, height: bounds.height * s)
+    }
+}
 
 // MARK: - Audio playback
 
+/// All AVAudioEngine / player-node mutation happens on `engineQueue`. The main thread never touches
+/// AVFAudio teardown, so an output-device change cannot block it (and thus cannot freeze the display).
 final class AudioPlayer {
     let engine = AVAudioEngine()
     let player = AVAudioPlayerNode()
     let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
-    var queuedFrames: Int = 0           // frames scheduled but not yet played
-    let maxQueuedFrames = 48000 / 5     // ~200 ms latency cap
+    let engineQueue = DispatchQueue(label: "audio-engine")
+    var queuedFrames: Int = 0
+    let maxQueuedFrames = 48000 * 150 / 1000   // trim above 150 ms of backlog
     let lock = NSLock()
-    var muted = false { didSet { engine.mainMixerNode.outputVolume = muted ? 0 : 1 } }
-    var started = false
+    var _muted = false
+    var muted: Bool {
+        get { _muted }
+        set { _muted = newValue; let v: Float = newValue ? 0 : 1; engineQueue.async { [self] in engine.mainMixerNode.outputVolume = v } }
+    }
+    var running = false
+    var rebuildGen = 0
     var pushed = 0, dropped = 0; var lastStat = Date()
 
     init() {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
-        NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in self?.restart() }
+        // queue nil => block runs on the notifying thread; we only redispatch, so it never blocks anyone.
+        NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+            self?.rebuild(reason: "device/format change")
+        }
     }
-    func start() {
+
+    /// Bring the engine up (idempotent). Runs on engineQueue.
+    private func startLocked() {
+        if running && engine.isRunning { return }
         do {
             try engine.start()
-            player.play()
-            started = true
-            engine.mainMixerNode.outputVolume = muted ? 0 : 1
-            log("audio engine running on \(engine.outputNode.outputFormat(forBus: 0).sampleRate) Hz output")
-        } catch { log("audio engine start failed: \(error)"); started = false }
+            if !player.isPlaying { player.play() }
+            engine.mainMixerNode.outputVolume = _muted ? 0 : 1
+            running = true
+        } catch { log("audio engine start failed: \(error)"); running = false }
     }
-    var restartGeneration = 0
-    /// Output device changed (or sample rate changed): tear everything down and rebuild after the device settles.
-    func restart() {
-        restartGeneration += 1; let gen = restartGeneration
-        started = false
-        player.stop(); engine.stop(); engine.reset()
-        engine.disconnectNodeOutput(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-        lock.lock(); queuedFrames = 0; lock.unlock()
-        func attempt(_ n: Int) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + (n == 0 ? 0.25 : 0.5)) { [weak self] in
-                guard let self = self, gen == self.restartGeneration else { return }
-                self.start()
-                if !self.started && n < 10 { attempt(n + 1) }
-            }
-        }
-        attempt(0)
-    }
-    func stop() { player.stop(); engine.stop(); started = false }
+    func ensureStarted() { engineQueue.async { [self] in startLocked() } }
 
-    /// Interleaved signed 16-bit stereo, 48 kHz.
+    /// Rebuild the graph for the new output device. Never called on the main thread's critical path.
+    func rebuild(reason: String) {
+        rebuildGen += 1; let gen = rebuildGen
+        engineQueue.async { [self] in
+            guard gen == rebuildGen else { return }   // collapse a burst of change notifications
+            player.stop(); engine.stop()
+            engine.disconnectNodeOutput(player)
+            engine.connect(player, to: engine.mainMixerNode, format: format)
+            lock.lock(); queuedFrames = 0; lock.unlock()
+            startLocked()
+            log("audio engine rebuilt (\(reason)) on \(engine.outputNode.outputFormat(forBus: 0).sampleRate) Hz")
+        }
+    }
+
+    func stop() { engineQueue.async { [self] in player.stop(); engine.stop(); running = false } }
+
+    /// Interleaved signed 16-bit stereo, 48 kHz. Called on the reader thread.
     func push(_ bytes: UnsafeRawPointer, _ count: Int) {
-        if !started { if restartGeneration == 0 { start() }; if !started { return } }
+        ensureStarted()
         let frames = count / 4
         guard frames > 0, let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { return }
         lock.lock(); let backlog = queuedFrames; lock.unlock()
         pushed += 1
         if Date().timeIntervalSince(lastStat) >= 5 { log(String(format: "audio: %d chunks, %d dropped, backlog %.0f ms", pushed, dropped, Double(backlog) / 48.0)); lastStat = Date() }
-        if backlog > maxQueuedFrames { dropped += 1; return } // drop to bound latency (clock drift / stalls)
+        if backlog > maxQueuedFrames { dropped += 1; return }
         buf.frameLength = AVAudioFrameCount(frames)
         let src = bytes.assumingMemoryBound(to: Int16.self)
         let l = buf.floatChannelData![0], r = buf.floatChannelData![1]
         let scale: Float = 1.0 / 32768.0
         for i in 0..<frames { l[i] = Float(Int16(littleEndian: src[2*i])) * scale; r[i] = Float(Int16(littleEndian: src[2*i+1])) * scale }
-        lock.lock(); queuedFrames += frames; lock.unlock()
-        player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            guard let self = self else { return }
-            self.lock.lock(); self.queuedFrames -= frames; self.lock.unlock()
+        // Schedule on engineQueue so buffer scheduling never races with a rebuild's stop/reconnect.
+        engineQueue.async { [self] in
+            guard running, engine.isRunning else { return }
+            lock.lock(); queuedFrames += frames; lock.unlock()
+            player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                guard let self = self else { return }
+                self.lock.lock(); self.queuedFrames -= frames; self.lock.unlock()   // counter only; no transport calls
+            }
         }
     }
 }
-
 
 // MARK: - HDR recording (HEVC Main10 + HDR10 metadata, AAC audio)
 
@@ -145,8 +409,12 @@ final class Recorder {
     var sessionStarted = false
     var audioAnchor: Double = -1     // seconds (recording time) of the first audio sample written
     var audioSamplesWritten: Int64 = 0
-    var videoFrames = 0, droppedVideo = 0
+    var videoFrames = 0, droppedVideo = 0, dupFrames = 0, gapFrames = 0
     var finished = false
+    let fps: Double
+    let frameDur: Int64          // in 60000 units
+    var lastIndex: Int64 = -1
+    var slewSamples = 0
 
     static func hdr10Metadata() -> (Data, Data) {
         // Mastering display (SEI order G,B,R then white point; 0.00002 units), luminance 1000 / 0.005 nits (0.0001 units)
@@ -160,6 +428,8 @@ final class Recorder {
 
     init(url: URL, width: Int, height: Int, fps: Double, colorMode: ColorMode, startNs: UInt64) throws {
         self.url = url; self.startNs = startNs
+        self.fps = fps
+        frameDur = Int64((60000.0 / fps).rounded())   // 30 -> 2000, 29.97 -> 2002, 60 -> 1000, 120 -> 500
         writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let (prim, tf, mat): (String, String, String)
         switch colorMode {
@@ -212,8 +482,13 @@ final class Recorder {
         let t = time(ns)
         queue.async { [self] in
             guard !finished, writer.status == .writing else { return }
+            // Snap arrival time to the nominal frame grid: removes USB arrival jitter, keeps holes for dropped frames.
+            let index = Int64((t * fps).rounded())
+            if index <= lastIndex { dupFrames += 1; return }
+            if lastIndex >= 0 && index > lastIndex + 1 { gapFrames += Int(index - lastIndex - 1) }
             guard video.isReadyForMoreMediaData else { droppedVideo += 1; return }
-            if adaptor.append(pb, withPresentationTime: CMTime(seconds: t, preferredTimescale: 1_000_000)) { videoFrames += 1 }
+            let pts = CMTime(value: index * frameDur, timescale: 60000)
+            if adaptor.append(pb, withPresentationTime: pts) { videoFrames += 1; lastIndex = index }
             else { log("video append failed: \(writer.error?.localizedDescription ?? "?")"); droppedVideo += 1 }
         }
     }
@@ -234,9 +509,27 @@ final class Recorder {
                 guard n > 0 else { return }
                 audioAnchor = startT; audioSamplesWritten = 0
             }
-            var pts = audioAnchor + Double(audioSamplesWritten) / 48000.0
+            let pts = audioAnchor + Double(audioSamplesWritten) / 48000.0
+            // Slew instead of jumping: if the sample clock drifts from arrival time, drop or repeat a few samples
+            // spread across this chunk (max 1%), keeping audio continuous and locked to the video clock.
             let expected = endT - Double(n) / 48000.0
-            if abs(pts - expected) > 0.08 { log(String(format: "audio re-anchor: drift %.0f ms", (expected - pts) * 1000)); audioAnchor = max(expected, pts); audioSamplesWritten = 0; pts = audioAnchor }
+            let err = expected - pts                       // > 0: audio is behind (need to drop samples)
+            if abs(err) > 0.002 {
+                let want = Int((err * 48000).rounded())
+                let maxAdj = max(1, n / 100)
+                let adj = max(-maxAdj, min(maxAdj, want))
+                if adj != 0 {
+                    var out = Data(capacity: (n + abs(adj)) * 4)
+                    let stride = n / abs(adj)
+                    var i = 0, k = 0
+                    while i < n {
+                        let frame = d.subdata(in: i * 4 ..< i * 4 + 4)
+                        if (i + 1) % stride == 0 && k < abs(adj) { k += 1; if adj > 0 { i += 1; continue } else { out.append(frame) } }
+                        out.append(frame); i += 1
+                    }
+                    d = out; n = out.count / 4; slewSamples += adj
+                }
+            }
             var block: CMBlockBuffer?
             guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: d.count, blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: d.count, flags: 0, blockBufferOut: &block) == noErr, let bb = block else { return }
             d.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: bb, offsetIntoDestination: 0, dataLength: d.count) }
@@ -255,32 +548,33 @@ final class Recorder {
             let frames = videoFrames, dropped = droppedVideo, url = url
             writer.finishWriting {
                 let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-                completion(String(format: "saved %@ (%d frames, %d dropped, %.1f MB)", url.lastPathComponent, frames, dropped, Double(size) / 1e6))
+                completion(String(format: "saved %@ (%d frames, %d dropped, %d gaps, %d dups, audio slew %d samples, %.1f MB)", url.lastPathComponent, frames, dropped, self.gapFrames, self.dupFrames, self.slewSamples, Double(size) / 1e6))
             }
         }
     }
 }
 
-// MARK: - Stream reader
+
+// MARK: - Stream session (socket headers + audio, frames via shared memory)
 
 final class Session {
-    let layer: AVSampleBufferDisplayLayer
     let fd: Int32
-    var pool: CVPixelBufferPool?
-    var fmtDesc: CMVideoFormatDescription?
+    let renderer: Renderer
+    let shm: UnsafeMutableRawPointer
     var w = 0, h = 0, frames = 0
     var lastReport = Date()
-    var colorMode: ColorMode
     var onInfo: ((String) -> Void)?
     var stopped = false
     var audio: AudioPlayer?
     var recorder: Recorder?
     var lastFrameNs: UInt64 = 0
-    var tWait = 0.0, tRead = 0.0, tReadMax = 0.0, poolMisses = 0
+    var latestSeq: UInt32 = 0
     var audioScratch = [UInt8](repeating: 0, count: 1 << 16)
+    var pool: CVPixelBufferPool?
+    let copyQueue = DispatchQueue(label: "record-copy")
+    var tWait = 0.0, tDraw = 0.0, tDrawMax = 0.0
 
-    init(layer: AVSampleBufferDisplayLayer, fd: Int32, colorMode: ColorMode) { self.layer = layer; self.fd = fd; self.colorMode = colorMode }
-
+    init(fd: Int32, renderer: Renderer, shm: UnsafeMutableRawPointer) { self.fd = fd; self.renderer = renderer; self.shm = shm }
     func stop() { stopped = true; shutdown(fd, SHUT_RDWR); close(fd) }
 
     func makePool(w: Int, h: Int) {
@@ -288,27 +582,40 @@ final class Session {
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
             kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
-            kCVPixelBufferMetalCompatibilityKey as String: true,
         ]
         var p: CVPixelBufferPool?
         CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey as String: 4] as CFDictionary, attrs as CFDictionary, &p)
-        pool = p; fmtDesc = nil
+        pool = p
     }
 
-    func tag(_ pb: CVPixelBuffer) {
-        let (prim, tf, mat): (CFString, CFString, CFString)
-        switch colorMode {
-        case .pq:  (prim, tf, mat) = (kCVImageBufferColorPrimaries_ITU_R_2020, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, kCVImageBufferYCbCrMatrix_ITU_R_2020)
-        case .hlg: (prim, tf, mat) = (kCVImageBufferColorPrimaries_ITU_R_2020, kCVImageBufferTransferFunction_ITU_R_2100_HLG, kCVImageBufferYCbCrMatrix_ITU_R_2020)
-        case .sdr: (prim, tf, mat) = (kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
-        }
-        CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, prim, .shouldPropagate)
-        CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, tf, .shouldPropagate)
-        CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, mat, .shouldPropagate)
-        if colorMode == .pq {
-            CVBufferSetAttachment(pb, kCVImageBufferMasteringDisplayColorVolumeKey,
-                "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)" as CFString, .shouldPropagate)
-            CVBufferSetAttachment(pb, kCVImageBufferContentLightLevelInfoKey, "1000,400" as CFString, .shouldPropagate)
+    /// Copy a shared-memory slot into a pixel buffer for the encoder (only while recording).
+    func copyForRecording(slot: Int, seq: UInt32, w: Int, h: Int, ns: UInt64, colorMode: ColorMode) {
+        guard let rec = recorder else { return }
+        copyQueue.async { [self] in
+            if pool == nil { makePool(w: w, h: h) }
+            var pbOpt: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool!, [kCVPixelBufferPoolAllocationThresholdKey as String: 16] as CFDictionary, &pbOpt)
+            guard let pb = pbOpt else { return }
+            let src = shm + slot * shmSlotBytes
+            CVPixelBufferLockBaseAddress(pb, [])
+            let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!, ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+            let c = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!, cs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+            let row = w * 2
+            if ys == row { memcpy(y, src, row * h) } else { for r in 0..<h { memcpy(y + r * ys, src + r * row, row) } }
+            let csrc = src + row * h
+            if cs == row { memcpy(c, csrc, row * (h / 2)) } else { for r in 0..<(h / 2) { memcpy(c + r * cs, csrc + r * row, row) } }
+            CVPixelBufferUnlockBaseAddress(pb, [])
+            if latestSeq &- seq >= UInt32(shmSlots) { return } // slot was overwritten mid-copy; drop
+            let (prim, tf, mat): (CFString, CFString, CFString)
+            switch colorMode {
+            case .pq:  (prim, tf, mat) = (kCVImageBufferColorPrimaries_ITU_R_2020, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, kCVImageBufferYCbCrMatrix_ITU_R_2020)
+            case .hlg: (prim, tf, mat) = (kCVImageBufferColorPrimaries_ITU_R_2020, kCVImageBufferTransferFunction_ITU_R_2100_HLG, kCVImageBufferYCbCrMatrix_ITU_R_2020)
+            case .sdr: (prim, tf, mat) = (kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+            }
+            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, prim, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, tf, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, mat, .shouldPropagate)
+            rec.appendVideo(pb, ns: ns)
         }
     }
 
@@ -320,87 +627,69 @@ final class Session {
             tWait += CFAbsoluteTimeGetCurrent() - t0
             guard hdr[0] == 0x55, hdr[1] == 0x56, hdr[2] == 0x43 else { log("bad stream magic"); break }
             func u32(_ o: Int) -> Int { Int(hdr[o]) | Int(hdr[o+1]) << 8 | Int(hdr[o+2]) << 16 | Int(hdr[o+3]) << 24 }
-            let fw = u32(4), fh = u32(8), size = u32(16)
+            let a = u32(4), b = u32(8), size = u32(16), seq = UInt32(truncatingIfNeeded: u32(28))
             let tNs = hdr[20..<28].enumerated().reduce(UInt64(0)) { $0 | UInt64($1.element) << (8 * UInt64($1.offset)) }
-            if hdr[3] == 0x41 { // "UVCA": audio chunk (rate, channels, bits, size)
+            switch hdr[3] {
+            case 0x41: // "UVCA" audio chunk
                 if size > audioScratch.count { audioScratch = [UInt8](repeating: 0, count: size) }
-                let ok = audioScratch.withUnsafeMutableBytes { readFully(fd, $0.baseAddress!, size) }
-                if !ok { break }
-                if fw == 48000, fh == 2, u32(12) == 16 {
+                guard audioScratch.withUnsafeMutableBytes({ readFully(fd, $0.baseAddress!, size) }) else { return finish() }
+                if a == 48000, b == 2, u32(12) == 16 {
                     if let rec = recorder { rec.appendAudio(Data(audioScratch[0..<size]), ns: tNs) }
                     audioScratch.withUnsafeBytes { audio?.push($0.baseAddress!, size) }
                 }
-                continue
+            case 0x53: // "UVCS" frame in shared memory slot seq % 3
+                guard size == a * b * 3, size <= shmSlotBytes else { log("unexpected frame size"); return finish() }
+                if a != w || b != h { w = a; h = b; pool = nil; onInfo?("\(w)x\(h) P010") }
+                latestSeq = seq; lastFrameNs = tNs
+                let slot = Int(seq % UInt32(shmSlots))
+                let t1 = CFAbsoluteTimeGetCurrent()
+                renderer.submit(slot: slot, w: w, h: h, arrivalNs: tNs)
+                let dd = CFAbsoluteTimeGetCurrent() - t1; tDraw += dd; tDrawMax = max(tDrawMax, dd)
+                if recorder != nil { copyForRecording(slot: slot, seq: seq, w: w, h: h, ns: tNs, colorMode: renderer.colorMode) }
+                frames += 1
+            case 0x46: // "UVCF" inline frame: helper without shared memory; skip payload
+                var junk = [UInt8](repeating: 0, count: size)
+                guard junk.withUnsafeMutableBytes({ readFully(fd, $0.baseAddress!, size) }) else { return finish() }
+                if frames == 0 { log("helper is streaming inline frames (old helper?)"); onInfo?("helper too old: restart helper") }
+            default: log("unknown chunk"); return finish()
             }
-            guard hdr[3] == 0x46 else { log("unknown chunk"); break }
-            guard size == fw * fh * 3 else { log("unexpected frame size"); break }
-            if fw != w || fh != h || pool == nil { w = fw; h = fh; makePool(w: w, h: h) }
-            var pbOpt: CVPixelBuffer?
-            let t1 = CFAbsoluteTimeGetCurrent()
-            let aux = [kCVPixelBufferPoolAllocationThresholdKey as String: 24] as CFDictionary
-            let pr = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool!, aux, &pbOpt)
-            if pr == kCVReturnWouldExceedAllocationThreshold { poolMisses += 1; var junk = [UInt8](repeating: 0, count: size); _ = junk.withUnsafeMutableBytes { readFully(fd, $0.baseAddress!, size) }; continue }
-            guard let pb = pbOpt else { break }
-            CVPixelBufferLockBaseAddress(pb, [])
-            let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!, ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-            let c = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!, cs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
-            var good = true
-            let row = w * 2
-            if ys == row { good = readFully(fd, y, row * h) } else { for r in 0..<h where good { good = readFully(fd, y + r * ys, row) } }
-            if good { if cs == row { good = readFully(fd, c, row * (h / 2)) } else { for r in 0..<(h/2) where good { good = readFully(fd, c + r * cs, row) } } }
-            CVPixelBufferUnlockBaseAddress(pb, [])
-            let dr = CFAbsoluteTimeGetCurrent() - t1; tRead += dr; tReadMax = max(tReadMax, dr)
-            if !good { break }
-            tag(pb)
-            lastFrameNs = tNs
-            recorder?.appendVideo(pb, ns: tNs)
-            if fmtDesc == nil { CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pb, formatDescriptionOut: &fmtDesc) }
-            var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()), decodeTimeStamp: .invalid)
-            var sb: CMSampleBuffer?
-            CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: pb, formatDescription: fmtDesc!, sampleTiming: &timing, sampleBufferOut: &sb)
-            if let sb = sb {
-                if let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) as? [CFMutableDictionary], let d = atts.first {
-                    CFDictionarySetValue(d, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(), Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-                }
-                let layer = self.layer
-                DispatchQueue.main.async { if layer.status == .failed { layer.flush() }; layer.enqueue(sb) }
-            }
-            frames += 1
             let now = Date()
             if now.timeIntervalSince(lastReport) >= 1 {
-                let fps = Double(frames) / now.timeIntervalSince(lastReport)
-                log(String(format: "video: %.1f fps  wait %.0f ms  read %.0f ms (max %.1f ms/frame)  pool-full drops %d", fps, tWait * 1000, tRead * 1000, tReadMax * 1000, poolMisses))
-                frames = 0; lastReport = now; tWait = 0; tRead = 0; tReadMax = 0; poolMisses = 0
-                onInfo?(String(format: "%dx%d 10-bit  %.1f fps", w, h, fps))
+                let dt = now.timeIntervalSince(lastReport)
+                let fps = Double(frames) / dt
+                let (avg, mx, n) = renderer.takeStats()
+                log(String(format: "video: %.1f fps  helper->screen %.1f ms avg / %.1f max (%d)  wait %.0f ms  draw %.1f ms/frame (max %.1f)", fps, avg, mx, n, tWait * 1000, frames > 0 ? tDraw * 1000 / Double(frames) : 0, tDrawMax * 1000))
+                onInfo?(String(format: "%dx%d 10-bit  %.1f fps  •  %.0f ms to screen", w, h, fps, avg))
+                frames = 0; lastReport = now; tWait = 0; tDraw = 0; tDrawMax = 0
             }
         }
-        if !stopped { close(fd); onInfo?("stream ended") }
+        finish()
     }
+    func finish() { if !stopped { close(fd); onInfo?("stream ended") } }
 }
 
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
-    var layer: AVSampleBufferDisplayLayer!
+    var view: MetalView!
+    var renderer: Renderer!
+    var shm: UnsafeMutableRawPointer?
     var session: Session?
     var modeIndex = UserDefaults.standard.object(forKey: "mode") as? Int ?? 0
     var colorMode = ColorMode(rawValue: UserDefaults.standard.string(forKey: "color") ?? "pq") ?? .pq
+    var lowLatency = UserDefaults.standard.object(forKey: "lowLatency") as? Bool ?? false
     var modeItems: [NSMenuItem] = [], colorItems: [NSMenuItem] = []
     let audio = AudioPlayer()
-    var muteItem: NSMenuItem!
-    var recordItem: NSMenuItem!
+    var muteItem: NSMenuItem!, recordItem: NSMenuItem!, lowLatencyItem: NSMenuItem!
     var recorder: Recorder?
     var recStart = Date()
     var recTimer: Timer?
     var measuredFps: Double = 30
+    var lastInfo = ""
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        layer = AVSampleBufferDisplayLayer()
-        layer.videoGravity = .resizeAspect
-        layer.backgroundColor = NSColor.black.cgColor
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
-        view.wantsLayer = true; view.layer = layer; view.layerContentsRedrawPolicy = .never
+        view = MetalView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
         window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.contentView = view
         window.contentAspectRatio = NSSize(width: 16, height: 9)
@@ -412,6 +701,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
         setTitle("connecting…")
         start()
+        if CommandLine.arguments.contains("--fullscreen") { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.window.toggleFullScreen(nil) } }
         if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 self?.startRecording()
@@ -459,6 +749,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        lowLatencyItem = NSMenuItem(title: "Low Latency (no vsync)", action: #selector(toggleLowLatency), keyEquivalent: "l")
+        viewMenu.addItem(lowLatencyItem)
         let rc = NSMenuItem(title: "Reconnect", action: #selector(reconnect), keyEquivalent: "r"); rc.keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(rc)
         viewItem.submenu = viewMenu
@@ -470,6 +762,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for it in modeItems { it.state = it.tag == modeIndex ? .on : .off }
         for it in colorItems { it.state = (it.representedObject as? String) == colorMode.rawValue ? .on : .off }
         muteItem?.state = audio.muted ? .on : .off
+        lowLatencyItem?.state = lowLatency ? .on : .off
     }
 
     func setTitle(_ s: String) {
@@ -479,22 +772,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = t
     }
 
-    @objc func selectMode(_ sender: NSMenuItem) {
-        modeIndex = sender.tag; UserDefaults.standard.set(modeIndex, forKey: "mode"); refreshChecks(); start()
-    }
+    @objc func selectMode(_ sender: NSMenuItem) { modeIndex = sender.tag; UserDefaults.standard.set(modeIndex, forKey: "mode"); refreshChecks(); start() }
     @objc func selectColor(_ sender: NSMenuItem) {
         colorMode = ColorMode(rawValue: sender.representedObject as! String)!; UserDefaults.standard.set(colorMode.rawValue, forKey: "color")
-        refreshChecks(); session?.colorMode = colorMode; session?.fmtDesc = nil
+        refreshChecks(); renderer?.colorMode = colorMode
     }
-    @objc func reconnect() { start() }
     @objc func toggleMute() { audio.muted.toggle(); UserDefaults.standard.set(audio.muted, forKey: "muted"); refreshChecks(); setTitle(lastInfo) }
-    var lastInfo = ""
+    @objc func toggleLowLatency() { lowLatency.toggle(); UserDefaults.standard.set(lowLatency, forKey: "lowLatency"); refreshChecks(); renderer?.lowLatency = lowLatency }
+    @objc func reconnect() { start() }
 
     func start() {
         if recorder != nil { stopRecording() }
         session?.stop(); session = nil
-        layer.flush()
-        let mode = modes[modeIndex], color = colorMode
+        let mode = modes[modeIndex]
         setTitle("connecting…")
         DispatchQueue.global().async { [weak self] in
             var fd = connectHelper()
@@ -505,19 +795,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for _ in 0..<50 { usleep(200_000); fd = connectHelper(); if fd >= 0 { break } }
             }
             guard fd >= 0 else { DispatchQueue.main.async { self?.setTitle("helper not reachable") }; return }
-            let cmd = "START 7 \(mode.frame) \(mode.fps)\n"
-            _ = cmd.withCString { write(fd, $0, strlen($0)) }
             guard let self = self else { return }
-            let s = Session(layer: self.layer, fd: fd, colorMode: color)
+            if self.shm == nil { self.shm = mapSharedFrames() }
+            guard let shm = self.shm else { DispatchQueue.main.async { self.setTitle("shared memory unavailable (old helper?)") }; close(fd); return }
+            DispatchQueue.main.sync {
+                if self.renderer == nil {
+                    self.renderer = Renderer(layer: self.view.metalLayer, shm: shm)
+                    self.renderer?.colorMode = self.colorMode; self.renderer?.lowLatency = self.lowLatency
+                    self.view.updateDrawableSize()
+                    self.renderer?.attachDisplayLink(view: self.view)
+                }
+            }
+            guard let renderer = self.renderer else { DispatchQueue.main.async { self.setTitle("Metal unavailable") }; close(fd); return }
+            let cmd = "START 7 \(mode.frame) \(mode.fps) SHM\n"
+            _ = cmd.withCString { write(fd, $0, strlen($0)) }
+            renderer.resetPacing()
+            let s = Session(fd: fd, renderer: renderer, shm: shm)
             s.audio = self.audio
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
                 if let r = info.range(of: #"([0-9.]+) fps"#, options: .regularExpression), let v = Double(info[r].dropLast(4)) { self?.measuredFps = v }
+                if let self = self, s.w > 0 { self.window.contentAspectRatio = NSSize(width: s.w, height: s.h) }
                 self?.setTitle(info) } }
             DispatchQueue.main.async { self.session = s; self.setTitle("starting…") }
             s.run()
         }
     }
-
 
     static var recordingsDir: URL {
         let d = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0].appendingPathComponent("Elgato HDR")
