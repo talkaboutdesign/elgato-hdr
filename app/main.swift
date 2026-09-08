@@ -109,7 +109,7 @@ final class Renderer {
     var slotBuffers: [MTLBuffer] = []
     var textures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<32 | w<<16 | h
     var colorMode: ColorMode = .pq { didSet { applyColor() } }
-    var lowLatency = true { didSet { layer.displaySyncEnabled = !lowLatency } }
+    var lowLatency = false { didSet { layer.displaySyncEnabled = !lowLatency } }
     // latency stats (seconds)
     var latSum = 0.0, latMax = 0.0, latN = 0
     let statLock = NSLock()
@@ -224,7 +224,10 @@ final class AudioPlayer {
     let player = AVAudioPlayerNode()
     let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
     var queuedFrames: Int = 0           // frames scheduled but not yet played
-    let maxQueuedFrames = 48000 / 25    // ~40 ms latency cap
+    let maxQueuedFrames = 48000 * 80 / 1000    // trim above 80 ms of backlog (delivery jitter is ~10-30 ms)
+    let prefillFrames = 48000 * 30 / 1000       // resume playback once 30 ms is queued after an underrun
+    var needsPrefill = true
+    var underruns = 0
     let lock = NSLock()
     var muted = false { didSet { engine.mainMixerNode.outputVolume = muted ? 0 : 1 } }
     var started = false
@@ -238,8 +241,8 @@ final class AudioPlayer {
     func start() {
         do {
             try engine.start()
-            player.play()
             started = true
+            needsPrefill = true
             engine.mainMixerNode.outputVolume = muted ? 0 : 1
             log("audio engine running on \(engine.outputNode.outputFormat(forBus: 0).sampleRate) Hz output")
         } catch { log("audio engine start failed: \(error)"); started = false }
@@ -271,22 +274,22 @@ final class AudioPlayer {
         guard frames > 0, let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { return }
         lock.lock(); let backlog = queuedFrames; lock.unlock()
         pushed += 1
-        if Date().timeIntervalSince(lastStat) >= 5 { log(String(format: "audio: %d chunks, %d dropped, backlog %.0f ms", pushed, dropped, Double(backlog) / 48.0)); lastStat = Date() }
-        if backlog > maxQueuedFrames { dropped += 1; return } // drop to bound latency (clock drift / stalls)
+        if Date().timeIntervalSince(lastStat) >= 5 { log(String(format: "audio: %d chunks, %d dropped, %d underruns, backlog %.0f ms", pushed, dropped, underruns, Double(backlog) / 48.0)); lastStat = Date() }
+        if backlog > maxQueuedFrames { dropped += 1; return }
         buf.frameLength = AVAudioFrameCount(frames)
         let src = bytes.assumingMemoryBound(to: Int16.self)
         let l = buf.floatChannelData![0], r = buf.floatChannelData![1]
         let scale: Float = 1.0 / 32768.0
         for i in 0..<frames { l[i] = Float(Int16(littleEndian: src[2*i])) * scale; r[i] = Float(Int16(littleEndian: src[2*i+1])) * scale }
-        lock.lock(); queuedFrames += frames; lock.unlock()
+        lock.lock(); queuedFrames += frames; let nowQueued = queuedFrames; lock.unlock()
         player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             guard let self = self else { return }
-            self.lock.lock(); self.queuedFrames -= frames; self.lock.unlock()
+            self.lock.lock(); self.queuedFrames -= frames; let left = self.queuedFrames; self.lock.unlock()
+            if left <= 0 && !self.needsPrefill { self.needsPrefill = true; self.underruns += 1; self.player.pause() }
         }
+        if needsPrefill && nowQueued >= prefillFrames { needsPrefill = false; player.play() }
     }
 }
-
-
 
 // MARK: - HDR recording (HEVC Main10 + HDR10 metadata, AAC audio)
 
@@ -542,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var session: Session?
     var modeIndex = UserDefaults.standard.object(forKey: "mode") as? Int ?? 0
     var colorMode = ColorMode(rawValue: UserDefaults.standard.string(forKey: "color") ?? "pq") ?? .pq
-    var lowLatency = UserDefaults.standard.object(forKey: "lowLatency") as? Bool ?? true
+    var lowLatency = UserDefaults.standard.object(forKey: "lowLatency") as? Bool ?? false
     var modeItems: [NSMenuItem] = [], colorItems: [NSMenuItem] = []
     let audio = AudioPlayer()
     var muteItem: NSMenuItem!, recordItem: NSMenuItem!, lowLatencyItem: NSMenuItem!
@@ -565,6 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
         setTitle("connecting…")
         start()
+        if CommandLine.arguments.contains("--fullscreen") { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.window.toggleFullScreen(nil) } }
         if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 self?.startRecording()

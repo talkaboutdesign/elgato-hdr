@@ -140,8 +140,8 @@ static uint8_t *shm_slot(uint32_t n){ return shm_base + (size_t)(n%SHM_SLOTS)*SH
 #define AU_IFACE 3
 #define AU_EP 0x83
 #define AU_PKT 208
-#define AU_PKTS_PER_XFER 32
-#define NUM_AU_XFERS 8
+#define AU_PKTS_PER_XFER 8
+#define NUM_AU_XFERS 16
 #define AU_FLUSH_BYTES 1920   // 10 ms of 48k stereo s16
 static uint8_t au_buf[65536]; static uint32_t au_fill=0, au_seq=0;
 static uint64_t au_bytes_total=0;
