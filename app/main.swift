@@ -15,6 +15,9 @@ let shmSlots = 3
 let shmSlotBytes = 24883200
 
 enum ColorMode: String { case pq, hlg, sdr }
+/// smooth: frames paced onto an even vsync grid (adds a ~34 ms cushion). game: drawn on arrival, shown at the next
+/// vsync (no tearing). immediate: drawn on arrival without vsync (lowest latency, can tear in full screen).
+enum Presentation: String { case smooth, game, immediate }
 struct Mode { let name: String; let frame: Int; let fps: Double }
 let modes: [Mode] = [
     Mode(name: "4K 30", frame: 5, fps: 30),
@@ -109,7 +112,10 @@ final class Renderer: NSObject {
     var slotBuffers: [MTLBuffer] = []
     var shmTextures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<40 | w<<20 | h
     var colorMode: ColorMode = .pq { didSet { applyColor() } }
-    var lowLatency = false { didSet { layer.displaySyncEnabled = !lowLatency; resetPacing() } }
+    var presentation: Presentation = .smooth { didSet { layer.displaySyncEnabled = presentation != .immediate; resetPacing() } }
+
+    // Game mode: frames drawn on arrival with vsync; dropped only if three drawables are already waiting for the screen.
+    var gameQueued = 0
 
     // App-owned texture ring: frames are blitted here on arrival so shared-memory slots can be reused freely.
     static let ringSize = 8
@@ -209,13 +215,14 @@ final class Renderer: NSObject {
         lock.lock(); pending.removeAll(); lock.unlock()
     }
 
-    func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); lock.unlock() }
+    func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); gameQueued = 0; lock.unlock() }
 
     /// Reader thread: copy the shared-memory slot into the ring on the GPU and schedule it. Never blocks on drawables.
     func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64) {
         guard let (sy, sc) = shmTextures(slot: slot, w: w, h: h) else { return }
         let a = Double(arrivalNs) / 1e9
-        if lowLatency { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }
+        if presentation == .immediate { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }
+        if presentation == .game { gameSubmit(y: sy, c: sc, w: w, h: h, arrival: a); return }
         ensureRing(w: w, h: h)
         guard ring.count == Renderer.ringSize, let cb = queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
         let idx = ringNext; ringNext = (ringNext + 1) % Renderer.ringSize
@@ -241,6 +248,20 @@ final class Renderer: NSObject {
         while pending.count > Renderer.ringSize - 2 { pending.removeFirst(); pacingDrops += 1 }
     }
 
+    /// Game mode, reader thread. Presented handlers only adjust the counter: they run under a Core Animation lock,
+    /// and arrive a refresh or two late, so they must not gate or trigger drawing.
+    func gameSubmit(y: MTLTexture, c: MTLTexture, w: Int, h: Int, arrival: Double) {
+        lock.lock()
+        if gameQueued >= 3 { pacingDrops += 1; lock.unlock(); return }
+        gameQueued += 1
+        lock.unlock()
+        let ok = drawNow(y: y, c: c, w: w, h: h, arrival: arrival, onPresented: { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock(); self.gameQueued = max(0, self.gameQueued - 1); self.lock.unlock()
+        })
+        if !ok { lock.lock(); gameQueued = max(0, gameQueued - 1); lock.unlock() }
+    }
+
     /// Display link (main thread), once per vsync: present the frame due at this vsync, if any.
     @objc func tick(_ link: CADisplayLink) {
         let T = link.targetTimestamp
@@ -248,6 +269,7 @@ final class Renderer: NSObject {
         if lastTick > 0 && T - lastTick > refresh * 1.5 { tickGaps += 1 }; lastTick = T
         refresh = max(1.0 / 240, link.targetTimestamp - link.timestamp)
         if grid0 == 0 { grid0 = T }
+        if presentation == .game { lock.unlock(); return }
         var chosen: Queued? = nil
         while let f = pending.first, f.target <= T + refresh * 0.5 {
             if chosen != nil { pacingDrops += 1 }
@@ -258,13 +280,14 @@ final class Renderer: NSObject {
         drawNow(y: ring[f.ring].0, c: ring[f.ring].1, w: ringW, h: ringH, arrival: f.arrival)
     }
 
-    func drawNow(y yT: MTLTexture, c cT: MTLTexture, w: Int, h: Int, arrival: Double) {
-        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
+    @discardableResult
+    func drawNow(y yT: MTLTexture, c cT: MTLTexture, w: Int, h: Int, arrival: Double, onPresented: (() -> Void)? = nil) -> Bool {
+        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture
         rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return false }
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
         let scale = min(dw / Double(w), dh / Double(h))
         let vw = Double(w) * scale, vh = Double(h) * scale
@@ -276,6 +299,7 @@ final class Renderer: NSObject {
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         enc.endEncoding()
         drawable.addPresentedHandler { [weak self] d in
+            defer { onPresented?() }
             guard let self = self, d.presentedTime > 0 else { return }
             self.lock.lock()
             let lat = d.presentedTime - arrival
@@ -286,12 +310,13 @@ final class Renderer: NSObject {
         }
         cb.present(drawable)
         cb.commit()
+        return true
     }
 
     func takeStats() -> (avgMs: Double, maxMs: Double, n: Int) {
         lock.lock(); defer { lock.unlock() }
         let r = (latN > 0 ? latSum / Double(latN) * 1000 : 0, latMax * 1000, latN)
-        log(String(format: "pacing (refresh units 0..5+): %@  k=%d period=%.2f ms refresh=%.2f ms slips=%d drops=%d queue=%d  arrival-jitter(4ms buckets)=%@ tickGaps=%d", hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, refresh * 1000, slips, pacingDrops, pending.count, arrHist.description, tickGaps))
+        log(String(format: "pacing [%@] (refresh units 0..5+): %@  k=%d period=%.2f ms refresh=%.2f ms slips=%d drops=%d queue=%d  arrival-jitter(4ms buckets)=%@ tickGaps=%d", presentation.rawValue, hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, refresh * 1000, slips, pacingDrops, pending.count, arrHist.description, tickGaps))
         slips = 0; pacingDrops = 0; arrHist = [Int](repeating: 0, count: 6); tickGaps = 0
         latSum = 0; latMax = 0; latN = 0; hist = [Int](repeating: 0, count: 6)
         return r
@@ -676,12 +701,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var renderer: Renderer!
     var shm: UnsafeMutableRawPointer?
     var session: Session?
-    var modeIndex = UserDefaults.standard.object(forKey: "mode") as? Int ?? 0
+    var modeIndex = min(max(UserDefaults.standard.integer(forKey: "mode"), 0), modes.count - 1)   // also accepts `-mode N` on the command line
     var colorMode = ColorMode(rawValue: UserDefaults.standard.string(forKey: "color") ?? "pq") ?? .pq
-    var lowLatency = UserDefaults.standard.object(forKey: "lowLatency") as? Bool ?? false
+    var presentation = Presentation(rawValue: UserDefaults.standard.string(forKey: "presentation") ?? "")
+        ?? (UserDefaults.standard.bool(forKey: "lowLatency") ? .immediate : .smooth)
     var modeItems: [NSMenuItem] = [], colorItems: [NSMenuItem] = []
     let audio = AudioPlayer()
-    var muteItem: NSMenuItem!, recordItem: NSMenuItem!, lowLatencyItem: NSMenuItem!
+    var muteItem: NSMenuItem!, recordItem: NSMenuItem!
+    var presentationItems: [NSMenuItem] = []
     var recorder: Recorder?
     var recStart = Date()
     var recTimer: Timer?
@@ -749,8 +776,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
-        lowLatencyItem = NSMenuItem(title: "Low Latency (no vsync)", action: #selector(toggleLowLatency), keyEquivalent: "l")
-        viewMenu.addItem(lowLatencyItem)
+        viewMenu.addItem(.separator())
+        for (name, p, key) in [("Smooth", Presentation.smooth, "j"), ("Game (low latency, no tearing)", .game, "g"), ("Lowest Latency (may tear)", .immediate, "l")] {
+            let it = NSMenuItem(title: name, action: #selector(selectPresentation(_:)), keyEquivalent: key)
+            it.representedObject = p.rawValue; viewMenu.addItem(it); presentationItems.append(it)
+        }
+        viewMenu.addItem(.separator())
         let rc = NSMenuItem(title: "Reconnect", action: #selector(reconnect), keyEquivalent: "r"); rc.keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(rc)
         viewItem.submenu = viewMenu
@@ -762,7 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for it in modeItems { it.state = it.tag == modeIndex ? .on : .off }
         for it in colorItems { it.state = (it.representedObject as? String) == colorMode.rawValue ? .on : .off }
         muteItem?.state = audio.muted ? .on : .off
-        lowLatencyItem?.state = lowLatency ? .on : .off
+        for it in presentationItems { it.state = (it.representedObject as? String) == presentation.rawValue ? .on : .off }
     }
 
     func setTitle(_ s: String) {
@@ -778,7 +809,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshChecks(); renderer?.colorMode = colorMode
     }
     @objc func toggleMute() { audio.muted.toggle(); UserDefaults.standard.set(audio.muted, forKey: "muted"); refreshChecks(); setTitle(lastInfo) }
-    @objc func toggleLowLatency() { lowLatency.toggle(); UserDefaults.standard.set(lowLatency, forKey: "lowLatency"); refreshChecks(); renderer?.lowLatency = lowLatency }
+    @objc func selectPresentation(_ sender: NSMenuItem) {
+        presentation = Presentation(rawValue: sender.representedObject as! String)!; UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
+        refreshChecks(); renderer?.presentation = presentation
+    }
     @objc func reconnect() { start() }
 
     func start() {
@@ -801,7 +835,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.sync {
                 if self.renderer == nil {
                     self.renderer = Renderer(layer: self.view.metalLayer, shm: shm)
-                    self.renderer?.colorMode = self.colorMode; self.renderer?.lowLatency = self.lowLatency
+                    self.renderer?.colorMode = self.colorMode; self.renderer?.presentation = self.presentation
                     self.view.updateDrawableSize()
                     self.renderer?.attachDisplayLink(view: self.view)
                 }

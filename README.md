@@ -75,10 +75,18 @@ open "dist/Elgato HDR.app"
 | Record | Start / Stop Recording | ⌘R |
 | Record | Show Recordings in Finder | — |
 | View | Toggle Full Screen | ⌘F |
-| View | Low Latency (no vsync) | ⌘L |
+| View | Smooth / Game / Lowest Latency | ⌘J / ⌘G / ⌘L |
 | View | Reconnect | ⇧⌘R |
 
-**Low Latency** trades smoothness for the lowest possible delay by presenting frames without waiting for the display refresh. It has slightly uneven motion and can tear; leave it off for the smoothest picture. It does not affect recordings.
+The **View** menu picks how frames reach the screen. None of these affect recordings.
+
+| Setting | What it does | Measured delay, 1440p60 on a 120 Hz MacBook Pro |
+|---------|--------------|------|
+| **Smooth** (default) | Holds each frame briefly so motion is perfectly even | ~48 ms |
+| **Game** | Shows each frame as soon as it arrives, synced to the display refresh (no tearing) | ~22 ms |
+| **Lowest Latency** | Shows each frame immediately without waiting for the refresh; can tear in full screen | ~5 ms |
+
+Delays are from a frame finishing its USB transfer to it being shown, as reported by macOS; the card's own processing comes on top. For playing, use **1440p 60** or **1080p 120** with Game: 4K 30 is the only 4K HDR mode the USB link has bandwidth for, so a 4K60 source is captured at half its frame rate.
 
 ---
 
