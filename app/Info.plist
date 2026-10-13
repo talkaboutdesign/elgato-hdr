@@ -22,6 +22,10 @@
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Your camera is shown over the game and recorded as its own layer.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Your microphone is recorded as its own layer for commentary.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
 </dict>

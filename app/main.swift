@@ -29,7 +29,18 @@ let modes: [Mode] = [
     Mode(name: "720p 120", frame: 1, fps: 120),
 ]
 
-func log(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
+/// Also kept in ~/Library/Logs/Elgato HDR.log so a normal (Finder) launch can be diagnosed.
+let logFile: FileHandle? = {
+    let url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("Logs/Elgato HDR.log")
+    if (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int).map({ $0 > 5_000_000 }) ?? true {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+    }
+    let h = try? FileHandle(forWritingTo: url); h?.seekToEndOfFile(); return h
+}()
+func log(_ s: String) {
+    let d = (s + "\n").data(using: .utf8)!
+    FileHandle.standardError.write(d); logFile?.write(d)
+}
 
 func readFully(_ fd: Int32, _ p: UnsafeMutableRawPointer, _ n: Int) -> Bool {
     var got = 0
@@ -82,33 +93,21 @@ func mapSharedFrames() -> UnsafeMutableRawPointer? {
     return p == MAP_FAILED ? nil : p
 }
 
-// MARK: - Metal renderer (P010 -> PQ/HLG/709 RGB, zero-copy from shared memory)
+// MARK: - Live renderer (P010 -> PQ/HLG/709 RGB, zero-copy from shared memory, facecam composited on top)
 
-let shaderSource = """
-#include <metal_stdlib>
-using namespace metal;
-struct V { float4 pos [[position]]; float2 uv; };
-vertex V vtx(uint id [[vertex_id]]) {
-    float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };
-    V o; o.pos = float4(p[id], 0, 1); o.uv = float2((p[id].x + 1) * 0.5, 1 - (p[id].y + 1) * 0.5); return o;
+/// What the live view draws over the game: the facecam window as positioned by the user.
+struct LiveOverlay {
+    var camera: CameraCapture?
+    var placement = CameraPlacement()
+    var mirror = false
 }
-fragment float4 frag(V in [[stage_in]], texture2d<float> yT [[texture(0)]], texture2d<float> cT [[texture(1)]], constant int &mode [[buffer(0)]]) {
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float y = yT.sample(s, in.uv).r * (65535.0 / 64.0);      // 10-bit code, MSB-aligned in 16 bits
-    float2 c = cT.sample(s, in.uv).rg * (65535.0 / 64.0);
-    float Y = (y - 64.0) / 876.0, Cb = (c.x - 512.0) / 896.0, Cr = (c.y - 512.0) / 896.0;   // video range
-    float3 rgb = (mode == 2)
-        ? float3(Y + 1.5748 * Cr, Y - 0.1873 * Cb - 0.4681 * Cr, Y + 1.8556 * Cb)       // BT.709
-        : float3(Y + 1.4746 * Cr, Y - 0.16455 * Cb - 0.57135 * Cr, Y + 1.8814 * Cb);    // BT.2020
-    return float4(clamp(rgb, 0.0, 1.0), 1.0);
-}
-"""
 
 final class Renderer: NSObject {
     let device: MTLDevice
     let queue: MTLCommandQueue
-    let pipeline: MTLRenderPipelineState
     let layer: CAMetalLayer
+    private var _overlay = LiveOverlay()
+    var overlay: LiveOverlay { get { lock.lock(); defer { lock.unlock() }; return _overlay } set { lock.lock(); _overlay = newValue; lock.unlock() } }
     var slotBuffers: [MTLBuffer] = []
     var shmTextures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<40 | w<<20 | h
     var colorMode: ColorMode = .pq { didSet { applyColor() } }
@@ -139,15 +138,10 @@ final class Renderer: NSObject {
     var lastTick = 0.0, tickGaps = 0
 
     init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer) {
-        guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else { return nil }
-        device = dev; queue = q; self.layer = layer
-        do {
-            let lib = try dev.makeLibrary(source: shaderSource, options: nil)
-            let d = MTLRenderPipelineDescriptor()
-            d.vertexFunction = lib.makeFunction(name: "vtx"); d.fragmentFunction = lib.makeFunction(name: "frag")
-            d.colorAttachments[0].pixelFormat = .rgb10a2Unorm
-            pipeline = try dev.makeRenderPipelineState(descriptor: d)
-        } catch { log("metal setup failed: \(error)"); return nil }
+        let core = MetalCore.shared
+        let dev = core.device
+        device = dev; queue = core.queue; self.layer = layer
+        _ = core.pipeline("compositeFrag", .rgb10a2Unorm)   // compile up front, not on the first frame
         for i in 0..<shmSlots {
             guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: nil) else { log("no-copy buffer failed"); return nil }
             slotBuffers.append(b)
@@ -283,21 +277,24 @@ final class Renderer: NSObject {
     @discardableResult
     func drawNow(y yT: MTLTexture, c cT: MTLTexture, w: Int, h: Int, arrival: Double, onPresented: (() -> Void)? = nil) -> Bool {
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
-        let rp = MTLRenderPassDescriptor()
-        rp.colorAttachments[0].texture = drawable.texture
-        rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
-        rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return false }
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
         let scale = min(dw / Double(w), dh / Double(h))
         let vw = Double(w) * scale, vh = Double(h) * scale
-        enc.setViewport(MTLViewport(originX: (dw - vw) / 2, originY: (dh - vh) / 2, width: vw, height: vh, znear: 0, zfar: 1))
-        enc.setRenderPipelineState(pipeline)
-        enc.setFragmentTexture(yT, index: 0); enc.setFragmentTexture(cT, index: 1)
-        var mode: Int32 = colorMode == .sdr ? 2 : 0
-        enc.setFragmentBytes(&mode, length: 4, index: 0)
-        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        enc.endEncoding()
+        // Game passes through untouched in its own encoding; only the facecam is converted into it.
+        let ov = overlay
+        var cam: (MTLTexture, MTLTexture)?, camSize: CGSize?, keep: [CVMetalTexture] = [], camBits: Int32 = 8
+        if let pb = ov.camera?.latest, let p = MetalCore.shared.planes(pb) {
+            cam = (p.0, p.1); keep = p.2; camBits = p.3
+            camSize = CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb))
+        }
+        var params = LayoutMath.params(layout: CanvasLayout(kind: .pip, camera: ov.placement), canvas: CGSize(width: vw, height: vh),
+                                       screen: CGSize(width: w, height: h), camera: camSize, mirror: ov.mirror,
+                                       screenTransfer: colorMode.transfer, outTransfer: colorMode.transfer)
+        params.fmt.z = 10; params.fmt.w = camBits
+        MetalCore.shared.encodeComposite(cb, target: drawable.texture,
+                                         viewport: MTLViewport(originX: (dw - vw) / 2, originY: (dh - vh) / 2, width: vw, height: vh, znear: 0, zfar: 1),
+                                         screen: (yT, cT), camera: cam, params: params)
+        if !keep.isEmpty { cb.addCompletedHandler { _ in _ = keep } }
         drawable.addPresentedHandler { [weak self] d in
             defer { onPresented?() }
             guard let self = self, d.presentedTime > 0 else { return }
@@ -323,17 +320,119 @@ final class Renderer: NSObject {
     }
 }
 
+/// The live view. Besides hosting the Metal layer it lets you place the facecam directly: drag to move (snaps to
+/// corners and edges), drag a corner or scroll/pinch to resize.
 final class MetalView: NSView {
     let metalLayer = CAMetalLayer()
-    override init(frame: NSRect) { super.init(frame: frame); wantsLayer = true; layer = metalLayer; layerContentsRedrawPolicy = .never }
+    let outline = CAShapeLayer()
+    var videoSize = CGSize(width: 16, height: 9)
+    /// Current facecam placement, or nil when no camera is shown.
+    var placement: (() -> CameraPlacement?)?
+    var onPlacement: ((CameraPlacement) -> Void)?
+    var contextMenu: (() -> NSMenu?)?
+    private enum Drag { case move(CGPoint, CameraPlacement), resize(CameraPlacement) }
+    private var drag: Drag?
+    private var hovering = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame); wantsLayer = true; layer = metalLayer; layerContentsRedrawPolicy = .never
+        outline.fillColor = nil; outline.strokeColor = NSColor.white.withAlphaComponent(0.9).cgColor
+        outline.lineWidth = 1.5; outline.lineDashPattern = [6, 4]; outline.isHidden = true
+        outline.shadowColor = NSColor.black.cgColor; outline.shadowOpacity = 0.6; outline.shadowRadius = 2; outline.shadowOffset = .zero
+        metalLayer.addSublayer(outline)
+    }
     required init?(coder: NSCoder) { fatalError() }
-    override func layout() { super.layout(); updateDrawableSize() }
+    override func layout() { super.layout(); updateDrawableSize(); updateOutline() }
     override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); updateDrawableSize() }
     func updateDrawableSize() {
         let s = window?.backingScaleFactor ?? 2
         metalLayer.contentsScale = s
         metalLayer.drawableSize = CGSize(width: bounds.width * s, height: bounds.height * s)
     }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    /// The game picture inside the view (points, AppKit coordinates).
+    var videoRect: CGRect {
+        guard videoSize.width > 0, videoSize.height > 0 else { return bounds }
+        let s = min(bounds.width / videoSize.width, bounds.height / videoSize.height)
+        let w = videoSize.width * s, h = videoSize.height * s
+        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+    }
+    /// View point -> canvas point (top-left origin, in points).
+    private func canvasPoint(_ e: NSEvent) -> CGPoint {
+        let p = convert(e.locationInWindow, from: nil), v = videoRect
+        return CGPoint(x: p.x - v.minX, y: v.maxY - p.y)
+    }
+    private func camRect() -> CGRect? { placement?().map { $0.rect(in: videoRect.size) } }
+    private func cornerHit(_ p: CGPoint, _ r: CGRect) -> Bool {
+        let k: CGFloat = 14
+        return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY)]
+            .contains { abs($0.x - p.x) < k && abs($0.y - p.y) < k }
+    }
+
+    func updateOutline() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard (hovering || drag != nil), let pl = placement?(), let r = camRect() else { outline.isHidden = true; return }
+        let v = videoRect
+        let viewRect = CGRect(x: v.minX + r.minX, y: v.maxY - r.maxY, width: r.width, height: r.height)
+        let rad = pl.radius(for: r)
+        outline.frame = bounds
+        outline.path = CGPath(roundedRect: viewRect.insetBy(dx: -3, dy: -3), cornerWidth: rad + 3, cornerHeight: rad + 3, transform: nil)
+        outline.isHidden = false
+    }
+
+    override func mouseMoved(with e: NSEvent) {
+        let p = canvasPoint(e)
+        let r = camRect()
+        let inside = r.map { $0.insetBy(dx: -8, dy: -8).contains(p) } ?? false
+        if inside != hovering { hovering = inside; updateOutline() }
+        if let r = r, cornerHit(p, r) { NSCursor.crosshair.set() } else if inside { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
+    }
+    override func mouseExited(with e: NSEvent) { hovering = false; updateOutline(); NSCursor.arrow.set() }
+
+    override func mouseDown(with e: NSEvent) {
+        let p = canvasPoint(e)
+        guard let pl = placement?(), let r = camRect() else { super.mouseDown(with: e); return }
+        if e.clickCount == 2, r.contains(p) { return }
+        if cornerHit(p, r) { drag = .resize(pl) }
+        else if r.insetBy(dx: -8, dy: -8).contains(p) { drag = .move(CGPoint(x: p.x - r.midX, y: p.y - r.midY), pl); NSCursor.closedHand.set() }
+        else { super.mouseDown(with: e) }
+    }
+    override func mouseDragged(with e: NSEvent) {
+        guard let d = drag else { return }
+        let p = canvasPoint(e), canvas = videoRect.size
+        switch d {
+        case .move(let grab, var pl):
+            pl.move(to: CGPoint(x: p.x - grab.x, y: p.y - grab.y), canvas: canvas, snap: !e.modifierFlags.contains(.option))
+            onPlacement?(pl)
+        case .resize(var pl):
+            let r = pl.rect(in: canvas)
+            // Window size follows the pointer's distance from the centre (keeps the centre fixed).
+            let a = pl.aspect.value
+            let halfShort = max(abs(p.x - r.midX) / (a >= 1 ? a : 1), abs(p.y - r.midY) * (a >= 1 ? 1 : a))
+            pl.size = min(1, max(0.08, Double(2 * halfShort / min(canvas.width, canvas.height))))
+            onPlacement?(pl)
+        }
+        updateOutline()
+    }
+    override func mouseUp(with e: NSEvent) { if drag != nil { drag = nil; NSCursor.openHand.set(); updateOutline() } }
+
+    override func scrollWheel(with e: NSEvent) {
+        guard var pl = placement?(), let r = camRect(), r.contains(canvasPoint(e)) else { super.scrollWheel(with: e); return }
+        pl.size = min(1, max(0.08, pl.size * exp(Double(e.scrollingDeltaY) * (e.hasPreciseScrollingDeltas ? 0.004 : 0.04))))
+        onPlacement?(pl); updateOutline()
+    }
+    override func magnify(with e: NSEvent) {
+        guard var pl = placement?() else { return }
+        pl.size = min(1, max(0.08, pl.size * (1 + Double(e.magnification))))
+        onPlacement?(pl); updateOutline()
+    }
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() ?? super.menu(for: event) }
 }
 
 // MARK: - Audio playback
@@ -695,7 +794,7 @@ final class Session {
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     var window: NSWindow!
     var view: MetalView!
     var renderer: Renderer!
@@ -715,6 +814,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var measuredFps: Double = 30
     var lastInfo = ""
 
+    // Facecam + microphone layers
+    let camera = CameraCapture()
+    var cameraMenu = NSMenu(title: "Camera")
+    var cameraID = UserDefaults.standard.string(forKey: "cameraID")
+    var micID = UserDefaults.standard.string(forKey: "micID")
+    var cameraMirror = UserDefaults.standard.bool(forKey: "cameraMirror")
+    var livePlacement: CameraPlacement = {
+        if let d = UserDefaults.standard.data(forKey: "livePlacement"), let p = try? JSONDecoder().decode(CameraPlacement.self, from: d) { return p }
+        return CameraPlacement()
+    }()
+    var recDoc: ProjectDoc?
+    var camWriter: LayerWriter?, micWriter: LayerWriter?
+    static var activeRecordingDir: URL?
+    static func isRecording(_ dir: URL) -> Bool { activeRecordingDir == dir }
+    var libraryWindow: NSWindow?
+
     func applicationDidFinishLaunching(_ n: Notification) {
         view = MetalView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
         window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
@@ -722,13 +837,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentAspectRatio = NSSize(width: 16, height: 9)
         window.backgroundColor = .black
         window.collectionBehavior = [.fullScreenPrimary]
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         audio.muted = UserDefaults.standard.bool(forKey: "muted")
+        // Development: `--export <project folder> [hdr|sdr] [hd|uhd]` renders both canvases and quits (no capture).
+        if let i = CommandLine.arguments.firstIndex(of: "--export"), i + 1 < CommandLine.arguments.count {
+            let args = CommandLine.arguments
+            runHeadlessExport(dir: URL(fileURLWithPath: args[i + 1]), range: args.contains("sdr") ? .sdr : .hdr, res: args.contains("uhd") ? .uhd : .hd)
+            return
+        }
+        view.placement = { [weak self] in
+            guard let self = self, self.camera.cameraOn else { return nil }
+            return self.livePlacement
+        }
+        view.onPlacement = { [weak self] p in self?.setPlacement(p) }
+        view.contextMenu = { [weak self] in self?.makeCameraMenu(title: "Camera") }
         buildMenu()
         setTitle("connecting…")
-        start()
+        if CommandLine.arguments.contains("--no-capture") { setTitle("capture off (--no-capture)") } else { start() }
+        if cameraID != nil { camera.setCamera(uniqueID: cameraID) { [weak self] e in self?.deviceResult(e) } }
+        if micID != nil { camera.setMicrophone(uniqueID: micID) { [weak self] e in self?.deviceResult(e) } }
         if CommandLine.arguments.contains("--fullscreen") { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.window.toggleFullScreen(nil) } }
+        if CommandLine.arguments.contains("--library") { showLibrary() }
+        #if DEBUG
+        DebugSnapshots.start()
+        #endif
         if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 self?.startRecording()
@@ -743,6 +878,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "Quit Elgato HDR", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
+
+        // Standard Edit menu so text fields (rename, search) get copy/paste/undo.
+        let editItem = NSMenuItem(); main.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
 
         let modeItem = NSMenuItem(); main.addItem(modeItem)
         let modeMenu = NSMenu(title: "Input")
@@ -766,15 +913,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioMenu.addItem(muteItem)
         audioItem.submenu = audioMenu
 
+        let camItem = NSMenuItem(); main.addItem(camItem)
+        cameraMenu.delegate = self   // rebuilt on open so device lists stay current
+        camItem.submenu = cameraMenu
+
         let recItem = NSMenuItem(); main.addItem(recItem)
         let recMenu = NSMenu(title: "Record")
         recordItem = NSMenuItem(title: "Start Recording", action: #selector(toggleRecording), keyEquivalent: "r")
         recMenu.addItem(recordItem)
+        recMenu.addItem(.separator())
+        recMenu.addItem(withTitle: "Recordings Library", action: #selector(showLibraryAction), keyEquivalent: "o")
         recMenu.addItem(withTitle: "Show Recordings in Finder", action: #selector(showRecordings), keyEquivalent: "")
         recItem.submenu = recMenu
 
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Show Live View", action: #selector(showLiveView), keyEquivalent: "0")
         viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         viewMenu.addItem(.separator())
         for (name, p, key) in [("Smooth", Presentation.smooth, "j"), ("Game (low latency, no tearing)", .game, "g"), ("Lowest Latency (may tear)", .immediate, "l")] {
@@ -786,8 +940,139 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(rc)
         viewItem.submenu = viewMenu
         NSApp.mainMenu = main
+        populateCameraMenu(cameraMenu)
         refreshChecks()
     }
+
+    func menuNeedsUpdate(_ menu: NSMenu) { if menu === cameraMenu { populateCameraMenu(menu) } }
+
+    func makeCameraMenu(title: String) -> NSMenu { let m = NSMenu(title: title); populateCameraMenu(m); return m }
+
+    /// Camera menu: devices, then the overlay window's look. Also used as the live view's right-click menu.
+    func populateCameraMenu(_ m: NSMenu) {
+        m.removeAllItems()
+        func item(_ title: String, _ sel: Selector, _ key: String = "", on: Bool = false, obj: Any? = nil, enabled: Bool = true) -> NSMenuItem {
+            let it = NSMenuItem(title: title, action: sel, keyEquivalent: key)
+            it.target = self; it.state = on ? .on : .off; it.representedObject = obj; it.isEnabled = enabled
+            m.addItem(it); return it
+        }
+        _ = item(camera.cameraOn ? "Hide Camera" : "Show Camera", #selector(toggleCamera), "k")
+        m.addItem(.separator())
+        let camHeader = NSMenuItem(title: "Camera", action: nil, keyEquivalent: ""); camHeader.isEnabled = false; m.addItem(camHeader)
+        let cams = CameraCapture.cameras()
+        if cams.isEmpty { _ = item("No cameras found", #selector(noop), enabled: false) }
+        for d in cams { _ = item(d.localizedName, #selector(selectCamera(_:)), on: camera.cameraOn && d.uniqueID == cameraID, obj: d.uniqueID) }
+        m.addItem(.separator())
+        let micHeader = NSMenuItem(title: "Microphone (recorded as its own layer)", action: nil, keyEquivalent: ""); micHeader.isEnabled = false; m.addItem(micHeader)
+        _ = item("None", #selector(selectMic(_:)), on: !camera.micOn, obj: "")
+        for d in CameraCapture.microphones() { _ = item(d.localizedName, #selector(selectMic(_:)), on: camera.micOn && d.uniqueID == micID, obj: d.uniqueID) }
+        m.addItem(.separator())
+        let p = livePlacement
+        _ = item("Circle", #selector(setShape(_:)), on: p.isCircle, obj: "circle")
+        _ = item("Rounded", #selector(setShape(_:)), on: !p.isCircle && p.roundness > 0, obj: "rounded")
+        _ = item("Square Corners", #selector(setShape(_:)), on: p.roundness == 0, obj: "square")
+        let aspectItem = NSMenuItem(title: "Window Shape", action: nil, keyEquivalent: ""); m.addItem(aspectItem)
+        let am = NSMenu()
+        for a in CameraAspect.allCases {
+            let it = NSMenuItem(title: a.rawValue, action: #selector(setAspect(_:)), keyEquivalent: ""); it.target = self
+            it.representedObject = a.rawValue; it.state = p.aspect == a ? .on : .off; am.addItem(it)
+        }
+        aspectItem.submenu = am
+        let posItem = NSMenuItem(title: "Position", action: nil, keyEquivalent: ""); m.addItem(posItem)
+        let pm = NSMenu()
+        for (name, x, y) in [("Top Left", 0, 0), ("Top", 1, 0), ("Top Right", 2, 0), ("Left", 0, 1), ("Right", 2, 1), ("Bottom Left", 0, 2), ("Bottom", 1, 2), ("Bottom Right", 2, 2)] {
+            let it = NSMenuItem(title: name, action: #selector(setPosition(_:)), keyEquivalent: ""); it.target = self
+            it.tag = y * 3 + x; pm.addItem(it)
+        }
+        posItem.submenu = pm
+        _ = item("Bigger", #selector(biggerCamera), "=")
+        _ = item("Smaller", #selector(smallerCamera), "-")
+        m.addItem(.separator())
+        _ = item("Mirror", #selector(toggleMirror), on: cameraMirror)
+        _ = item("Border", #selector(toggleBorder), on: p.border)
+        _ = item("Shadow", #selector(toggleShadow), on: p.shadow)
+        m.addItem(.separator())
+        _ = item("Drag the camera to move it, drag a corner or scroll to resize", #selector(noop), enabled: false)
+    }
+
+    @objc func noop() {}
+
+    /// Camera/mic changes report failures in an alert: the title is rewritten every second by the stream stats.
+    func deviceResult(_ error: String?) {
+        applyOverlay()
+        log("camera: \(camera.cameraName ?? "off"), microphone: \(camera.micName ?? "off")\(error.map { " — \($0)" } ?? "")")
+        guard let error = error else { return }
+        let a = NSAlert()
+        a.messageText = error.prefix(1).uppercased() + error.dropFirst()
+        let privacy = error.contains("access denied")
+        a.informativeText = privacy ? "Allow Elgato HDR under System Settings › Privacy & Security, then select the device again." : "Try another device, or reconnect it."
+        a.addButton(withTitle: "OK")
+        if privacy { a.addButton(withTitle: "Open Privacy Settings") }
+        if a.runModal() == .alertSecondButtonReturn {
+            let pane = error.hasPrefix("camera") ? "Privacy_Camera" : "Privacy_Microphone"
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
+        }
+    }
+
+    func applyOverlay() {
+        renderer?.overlay = LiveOverlay(camera: camera.cameraOn ? camera : nil, placement: livePlacement, mirror: cameraMirror)
+        view.updateOutline()
+        setTitle(lastInfo)
+    }
+    func setPlacement(_ p: CameraPlacement) {
+        livePlacement = p
+        if let d = try? JSONEncoder().encode(p) { UserDefaults.standard.set(d, forKey: "livePlacement") }
+        applyOverlay()
+    }
+
+    @objc func toggleCamera() {
+        if camera.cameraOn { camera.setCamera(uniqueID: nil) { [weak self] _ in self?.applyOverlay() }; return }
+        let id = cameraID.flatMap { id in CameraCapture.cameras().first { $0.uniqueID == id }?.uniqueID } ?? CameraCapture.cameras().first?.uniqueID
+        guard let id = id else { setTitle("no camera found"); return }
+        cameraID = id; UserDefaults.standard.set(id, forKey: "cameraID")
+        camera.setCamera(uniqueID: id) { [weak self] e in self?.deviceResult(e) }
+    }
+    @objc func selectCamera(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if recorder != nil { setTitle("stop recording to switch cameras"); return }
+        cameraID = id; UserDefaults.standard.set(id, forKey: "cameraID")
+        camera.setCamera(uniqueID: id) { [weak self] e in self?.deviceResult(e) }
+    }
+    @objc func selectMic(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if recorder != nil { setTitle("stop recording to switch microphones"); return }
+        micID = id.isEmpty ? nil : id; UserDefaults.standard.set(micID, forKey: "micID")
+        log("microphone: selecting \(micID ?? "none")")
+        camera.setMicrophone(uniqueID: micID) { [weak self] e in self?.deviceResult(e) }
+    }
+    @objc func setShape(_ sender: NSMenuItem) {
+        var p = livePlacement
+        switch sender.representedObject as? String {
+        case "circle": p.aspect = .square; p.roundness = 0.5
+        case "square": p.roundness = 0
+        default: p.roundness = 0.16
+        }
+        setPlacement(p)
+    }
+    @objc func setAspect(_ sender: NSMenuItem) {
+        guard let a = CameraAspect(rawValue: sender.representedObject as? String ?? "") else { return }
+        var p = livePlacement; p.aspect = a
+        if a != .square && p.roundness > 0.3 { p.roundness = 0.16 }   // a circle only makes sense on a square window
+        setPlacement(p)
+    }
+    @objc func setPosition(_ sender: NSMenuItem) {
+        var p = livePlacement
+        let canvas = view.videoRect.size, r = p.rect(in: canvas)
+        let anchors = CameraPlacement.anchors(for: r.size, canvas: canvas)   // 8 anchors in row order, centre omitted
+        let idx = sender.tag > 4 ? sender.tag - 1 : sender.tag
+        if idx < anchors.count { p.move(to: anchors[idx], canvas: canvas, snap: false) }
+        setPlacement(p)
+    }
+    @objc func biggerCamera() { var p = livePlacement; p.size = min(1, p.size * 1.15); setPlacement(p) }
+    @objc func smallerCamera() { var p = livePlacement; p.size = max(0.08, p.size / 1.15); setPlacement(p) }
+    @objc func toggleMirror() { cameraMirror.toggle(); UserDefaults.standard.set(cameraMirror, forKey: "cameraMirror"); applyOverlay() }
+    @objc func toggleBorder() { var p = livePlacement; p.border.toggle(); setPlacement(p) }
+    @objc func toggleShadow() { var p = livePlacement; p.shadow.toggle(); setPlacement(p) }
 
     func refreshChecks() {
         for it in modeItems { it.state = it.tag == modeIndex ? .on : .off }
@@ -799,7 +1084,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func setTitle(_ s: String) {
         lastInfo = s
         var t = "Elgato HDR  •  \(modes[modeIndex].name)  •  \(s)" + (audio.muted ? "  •  muted" : "")
-        if recorder != nil { let e = Int(Date().timeIntervalSince(recStart)); t = String(format: "● REC %02d:%02d  •  ", e / 60, e % 60) + t }
+            + (camera.cameraOn ? "  •  cam" : "") + (camera.micOn ? "  •  mic" : "")
+        if recorder != nil {
+            let e = Int(Date().timeIntervalSince(recStart))
+            let layers = ["game"] + (camWriter != nil ? ["cam"] : []) + (micWriter != nil ? ["mic"] : [])
+            t = String(format: "● REC %02d:%02d [%@]  •  ", e / 60, e % 60, layers.joined(separator: "+")) + t
+        }
         window.title = t
     }
 
@@ -838,6 +1128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.renderer?.colorMode = self.colorMode; self.renderer?.presentation = self.presentation
                     self.view.updateDrawableSize()
                     self.renderer?.attachDisplayLink(view: self.view)
+                    self.applyOverlay()
                 }
             }
             guard let renderer = self.renderer else { DispatchQueue.main.async { self.setTitle("Metal unavailable") }; close(fd); return }
@@ -848,7 +1139,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             s.audio = self.audio
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
                 if let r = info.range(of: #"([0-9.]+) fps"#, options: .regularExpression), let v = Double(info[r].dropLast(4)) { self?.measuredFps = v }
-                if let self = self, s.w > 0 { self.window.contentAspectRatio = NSSize(width: s.w, height: s.h) }
+                if let self = self, s.w > 0 {
+                    self.window.contentAspectRatio = NSSize(width: s.w, height: s.h)
+                    self.view.videoSize = CGSize(width: s.w, height: s.h)
+                }
                 self?.setTitle(info) } }
             DispatchQueue.main.async { self.session = s; self.setTitle("starting…") }
             s.run()
@@ -856,40 +1150,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     static var recordingsDir: URL {
-        let d = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0].appendingPathComponent("Elgato HDR")
+        let d = UserDefaults.standard.string(forKey: "recordingsDir").map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+            ?? FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0].appendingPathComponent("Elgato HDR")
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }
     @objc func toggleRecording() { if recorder == nil { startRecording() } else { stopRecording() } }
     @objc func showRecordings() { NSWorkspace.shared.open(AppDelegate.recordingsDir) }
+    @objc func showLibraryAction() { showLibrary() }
 
+    func showLibrary() {
+        if libraryWindow == nil { libraryWindow = makeLibraryWindow() }
+        Library.shared.reload()
+        libraryWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Each recording is a project folder with one file per layer, all starting at the same instant:
+    /// game.mov (HDR video + game audio), camera.mov (facecam) and mic.m4a (voice), plus project.json.
     func startRecording() {
         guard let s = session, s.w > 0 else { setTitle("not streaming, cannot record"); return }
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        let url = AppDelegate.recordingsDir.appendingPathComponent("Capture \(f.string(from: Date())).mov")
+        let (dir, name) = Library.shared.newProjectDir(date: Date())
         let nominal = modes[modeIndex].fps
         let fps = abs(measuredFps - nominal) < 2 ? nominal : (measuredFps > 1 ? measuredFps : nominal)
+        let startNs = s.lastFrameNs
         do {
-            let r = try Recorder(url: url, width: s.w, height: s.h, fps: fps, colorMode: colorMode, startNs: s.lastFrameNs)
+            let r = try Recorder(url: dir.appendingPathComponent("game.mov"), width: s.w, height: s.h, fps: fps, colorMode: colorMode, startNs: startNs)
+            var proj = Project(name: name, createdAt: Date())
+            proj.state = "recording"
+            proj.width = s.w; proj.height = s.h; proj.fps = fps; proj.colorMode = colorMode.rawValue
+            proj.cameraMirror = cameraMirror
+            proj.wide.camera = livePlacement
+            if camera.cameraOn, let pb = camera.latest {
+                do {
+                    camWriter = try LayerWriter(cameraURL: dir.appendingPathComponent("camera.mov"), width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb), startNs: startNs)
+                    proj.camera = LayerInfo(file: "camera.mov")
+                } catch { log("camera layer failed: \(error)") }
+            }
+            if camera.micOn {
+                do { micWriter = try LayerWriter(micURL: dir.appendingPathComponent("mic.m4a"), startNs: startNs); proj.mic = LayerInfo(file: "mic.m4a") }
+                catch { log("mic layer failed: \(error)") }
+            }
+            if proj.camera == nil { proj.wide.kind = .screenOnly; proj.vertical.kind = .screenOnly }
+            camera.attach(camera: camWriter, mic: micWriter)
+            let doc = ProjectDoc(dir: dir, project: proj); doc.save()
+            recDoc = doc; AppDelegate.activeRecordingDir = dir
             recorder = r; s.recorder = r; recStart = Date()
             recordItem.title = "Stop Recording"
             recTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.setTitle(self?.lastInfo ?? "") }
             setTitle(lastInfo)
         } catch { setTitle("record failed: \(error.localizedDescription)"); log("record failed: \(error)") }
     }
-    func stopRecording() {
+
+    func stopRecording() { finishRecording { [weak self] msg in log(msg); self?.setTitle(msg) } }
+
+    /// Closes every layer, then completes project.json and its thumbnail.
+    func finishRecording(_ done: @escaping (String) -> Void) {
         guard let r = recorder else { return }
         session?.recorder = nil; recorder = nil
+        camera.attach(camera: nil, mic: nil)
         recTimer?.invalidate(); recTimer = nil
         recordItem.title = "Start Recording"
-        r.finish { [weak self] msg in DispatchQueue.main.async { log(msg); self?.setTitle(msg) } }
+        let doc = recDoc, cw = camWriter, mw = micWriter
+        recDoc = nil; camWriter = nil; micWriter = nil
+        let group = DispatchGroup()
+        var msg = ""
+        group.enter(); r.finish { m in msg = m; group.leave() }
+        var camOK = true, micOK = true
+        if let cw = cw { group.enter(); cw.finish { ok in camOK = ok; group.leave() } }
+        if let mw = mw { group.enter(); mw.finish { ok in micOK = ok; group.leave() } }
+        group.notify(queue: .main) {
+            AppDelegate.activeRecordingDir = nil
+            guard let doc = doc else { done(msg); return }
+            if !camOK { doc.project.camera = nil }
+            if !micOK { doc.project.mic = nil }
+            let layers = ["game"] + (doc.project.camera != nil ? ["camera"] : []) + (doc.project.mic != nil ? ["mic"] : [])
+            doc.finalize {
+                Library.shared.reload()
+                done("saved \(doc.project.name) [\(layers.joined(separator: " + "))]")
+            }
+        }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+    /// Closing the live view stops capture (and any recording) but keeps the library and editors open.
+    func windowWillClose(_ n: Notification) {
+        guard (n.object as? NSWindow) === window else { return }
+        if recorder != nil { stopRecording() }
+        session?.stop(); session = nil
+        audio.stop()
+    }
+    @objc func showLiveView() {
+        window.makeKeyAndOrderFront(nil)
+        if session == nil { start() }
+    }
+    var headless = false
+    func runHeadlessExport(dir: URL, range: ExportRange, res: ExportResolution) {
+        headless = true
+        window.orderOut(nil)
+        guard let doc = ProjectDoc.load(dir) else { log("export: no project.json in \(dir.path)"); exit(1) }
+        Task {
+            if doc.project.durationMs == 0 { await withCheckedContinuation { c in doc.finalize { c.resume() } } }
+            for canvas in Canvas.allCases {
+                let t0 = Date()
+                do {
+                    let url = try await Exporter(doc: doc, job: ExportJob(canvas: canvas, resolution: res, range: range, fps: .source)).run { _ in }
+                    log(String(format: "export: %@ in %.1f s", url.path, Date().timeIntervalSince(t0)))
+                } catch { log("export \(canvas.rawValue) failed: \(error)") }
+            }
+            await doc.writeThumbnail()
+            exit(0)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { !headless }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showLiveView() }
+        return true
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let r = recorder else { return .terminateNow }
-        session?.recorder = nil; recorder = nil
-        r.finish { _ in DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) } }
+        guard recorder != nil else { return .terminateNow }
+        finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }
     func applicationWillTerminate(_ n: Notification) { session?.stop() }

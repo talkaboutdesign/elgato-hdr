@@ -4,7 +4,7 @@ A tiny native macOS app that captures the **10-bit HDR** signal from an **Elgato
 
 macOS hides this. The Elgato 4K X advertises a 10-bit `P010` video format over USB, but Apple's built-in webcam driver only ever exposes the 8-bit modes to apps like QuickTime, OBS, or anything using AVFoundation. So on a Mac you normally cannot see or record the capture card's HDR output at all, even though the same card does it fine on Windows. This project reaches the hidden 10-bit format directly and renders it the way macOS renders HDR video.
 
-The whole thing is about 350 KB: a small AppKit app plus a C helper. No Electron, no frameworks, no background services.
+The whole thing is a few MB: a small native AppKit/SwiftUI app plus a C helper. No Electron, no third-party frameworks, no background services.
 
 ![Elgato HDR showing a game capture](docs/screenshot.png)
 
@@ -16,6 +16,9 @@ The whole thing is about 350 KB: a small AppKit app plus a C helper. No Electron
 - **Records HDR10.** Writes a 10-bit HEVC (`Main 10`) `.mov` with BT.2020 / PQ color, HDR10 mastering-display and content-light-level metadata, and AAC audio. The files play back as HDR in QuickTime, Finder, Final Cut, and DaVinci Resolve, and upload correctly to YouTube.
 - **Captures audio too.** Pulls the card's USB audio (48 kHz stereo) alongside the video, plays it live with a mute toggle, and muxes it into the recording locked to the video clock.
 - **Smooth, in-sync playback.** Frames are paced to the display's refresh so motion is even, and recorded files are stamped on a fixed frame grid so they play back perfectly steady regardless of USB timing jitter.
+- **Facecam overlay, like a streamer.** Show any camera (built-in, Studio Display, iPhone Continuity Camera, USB webcam) in a window over the game. Drag it anywhere (it snaps to corners and edges), drag a corner or scroll to resize, and pick circle, rounded or square.
+- **Layered recordings.** Game, camera and microphone are recorded as separate files that start at exactly the same instant, so nothing is baked in. Change the layout, framing, volumes and sync after the fact.
+- **One recording, every format.** The built-in editor lays out a widescreen **16:9** cut and a vertical **9:16** cut (for Shorts, Reels and TikTok) independently, and exports both in one go, as HDR10 HEVC or SDR H.264.
 - **All the card's HDR modes.** 4K30, 1440p60, ultrawide 2560×1080 60, 1080p 120/60/30, and 720p 120, every one of them 10-bit.
 
 ### Color modes
@@ -63,7 +66,30 @@ open "dist/Elgato HDR.app"
 1. Plug an HDR source into the Elgato 4K X and connect the card to your Mac.
 2. Launch **Elgato HDR**. The first launch shows one macOS **administrator prompt** — this is required (see [How it works](#how-it-works)). Enter your password and the live picture appears.
 3. Pick your source resolution from the **Input** menu, and the matching **Color** mode.
-4. Press **⌘R** to start and stop recording. Files are saved to `~/Movies/Elgato HDR/`.
+4. Optional: press **⌘K** to show your camera, and pick a microphone in the **Camera** menu. Drag the camera where you want it.
+5. Press **⌘R** to start and stop recording. Each recording is saved as its own folder in `~/Movies/Elgato HDR/`.
+6. Press **⌘O** to open the **Recordings** library. Double-click a recording to edit and export it.
+
+### Editing and exporting
+
+The editor shows the composite exactly as it will be exported, in HDR when exporting HDR.
+
+- Switch between **16:9** and **9:16** in the toolbar. Each canvas keeps its own layout: **Camera overlay**, **Split** (camera on top, gameplay below, the usual vertical-clip layout), **Game only** or **Camera only**.
+- Drag the camera on the preview to move it and drag its corners to resize it. Drag the game to reframe the crop, and drag the split divider to change the proportions.
+- Trim with the yellow handles or **I** / **O** at the playhead. The timeline shows one lane per layer.
+- **Audio & Sync** sets the game and mic volumes and nudges the camera or mic in milliseconds, if your voice runs ahead of the gameplay because of the card's delay.
+- **Export** renders the canvases you tick at 1080p or 4K, at the source frame rate, 60 or 30. Exports go into the recording's `Exports` folder.
+
+A recording folder contains:
+
+```
+game.mov       10-bit HEVC HDR video + game audio (the card's signal, untouched)
+camera.mov     H.264 facecam (only if the camera was on)
+mic.m4a        AAC microphone (only if a mic was selected)
+project.json   Layouts, trim, volumes and sync; every edit is non-destructive
+thumbnail.jpg  Library preview
+Exports/       Rendered videos
+```
 
 ### Menus and shortcuts
 
@@ -72,8 +98,13 @@ open "dist/Elgato HDR.app"
 | Input | 4K 30 … 720p 120 | ⌘1 – ⌘7 |
 | Color | HDR10 / HLG / SDR | — |
 | Audio | Mute | ⌘M |
+| Camera | Show / Hide Camera | ⌘K |
+| Camera | Bigger / Smaller | ⌘= / ⌘- |
+| Camera | Camera, microphone, shape, position, mirror, border, shadow | — (also on right-click in the live view) |
 | Record | Start / Stop Recording | ⌘R |
+| Record | Recordings Library | ⌘O |
 | Record | Show Recordings in Finder | — |
+| View | Show Live View | ⌘0 |
 | View | Toggle Full Screen | ⌘F |
 | View | Smooth / Game / Lowest Latency | ⌘J / ⌘G / ⌘L |
 | View | Reconnect | ⇧⌘R |
@@ -111,7 +142,11 @@ The recorded files carry standard HDR10 mastering metadata (1000-nit peak, P3 pr
 ## Project layout
 
 ```
-app/main.swift        The macOS app: capture client, Metal HDR renderer, audio, recorder
+app/main.swift        The macOS app: capture client, live renderer, audio, game recorder, menus
+app/Camera.swift      Camera + microphone capture and their layer writers (shared host clock)
+app/Compositor.swift  Metal compositor shared by the live view, editor preview and export (PQ/HLG/SDR)
+app/Project.swift     Project model, layout math, AVComposition builder, exporter, library store
+app/LibraryUI.swift   Recordings library and editor (SwiftUI)
 app/Info.plist        App bundle metadata
 tools/uvc_capture.c   Root helper: libusb UVC bypass, P010 capture, USB audio, shm server
 tools/*.c             USB descriptor dumps used while reverse-engineering the card
