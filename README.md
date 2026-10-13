@@ -36,6 +36,7 @@ The whole thing is a few MB: a small native AppKit/SwiftUI app plus a C helper. 
 - macOS 14 or newer (built and tested on Apple Silicon).
 - An **Elgato 4K X** capture card. Other Elgato cards that expose a `P010` UVC format may work but are untested.
 - An HDR / EDR-capable display to see the HDR preview (SDR displays still work, just tone-mapped by macOS).
+- Optional: any camera and microphone macOS can see, for the facecam and commentary layers. macOS asks for camera and microphone access the first time you turn them on.
 - For building from source: **Xcode Command Line Tools** and **[Homebrew](https://brew.sh)**.
 
 ---
@@ -123,7 +124,7 @@ Delays are from a frame finishing its USB transfer to it being shown, as reporte
 
 ## How it works
 
-Three moving parts:
+Four moving parts:
 
 1. **`tools/uvc_capture.c` — a small root helper.** Using [libusb](https://libusb.info), it detaches Apple's USB video driver from the card and talks the USB Video Class protocol directly. It negotiates the hidden `P010` format (format index 7), reads the video off the card's bulk endpoint, reassembles frames, and also captures the card's USB audio. Detaching the kernel driver requires root on macOS, which is why the app asks for your password once and launches the helper with administrator privileges. The helper runs as a small server, stays alive across resolution changes, and exits on its own about 20 seconds after the app quits, handing the card back to macOS so other apps see it again.
 
@@ -131,11 +132,18 @@ Three moving parts:
 
 3. **`app/main.swift` — the AppKit app.** A Metal shader converts the 10-bit `P010` planes to RGB directly from shared memory and draws into a PQ / HLG / BT.709 layer with the right EDR metadata, so macOS lights it up as HDR. A display-link scheduler paces frames onto the refresh grid for even motion. Audio plays through AVAudioEngine on a dedicated thread. Recording uses the hardware HEVC `Main 10` encoder via AVAssetWriter, stamping video on a fixed frame grid and gently slewing audio to keep A/V sync locked.
 
+4. **`app/Compositor.swift`, `app/Project.swift`, `app/LibraryUI.swift` — layers, editor and export.** The camera and microphone are captured with AVCaptureSession and written to their own files on the same host clock as the game, so the layers line up without any baked-in mix. Each recording's `project.json` stores the 16:9 and 9:16 layouts, trim, volumes and sync offsets. One Metal compositor draws the camera over the game for the live view, the editor preview and the export, decoding each layer by its own color tags and outputting PQ, HLG or tone-mapped SDR, so what you see in the editor is what gets exported.
+
 Measured latency from a frame arriving over USB to it appearing on screen is a few milliseconds of app work on top of the card's own processing; the app favors smooth, in-sync output over shaving off the last milliseconds.
 
 ### A note on HDR metadata
 
 The recorded files carry standard HDR10 mastering metadata (1000-nit peak, P3 primaries). The Elgato does not pass the source's original HDMI HDR metadata over USB, so these are sensible defaults rather than the exact values the source mastered to. Players use them only as a tone-mapping hint; the actual 10-bit pixels are untouched, so the picture is correct either way.
+
+### Troubleshooting
+
+- The app logs to `~/Library/Logs/Elgato HDR.log`. Include it when reporting a problem.
+- If the camera or microphone fails to start, the app shows an alert with a shortcut to **System Settings → Privacy & Security**, where you can grant access.
 
 ---
 
