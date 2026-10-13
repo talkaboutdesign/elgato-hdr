@@ -89,6 +89,9 @@ static int au_enabled;
 static void audio_flush(void);
 static int use_shm;
 static uint8_t *shm_slot(uint32_t n);
+// Per-frame USB timing: first payload byte -> end of frame (how long the card takes to deliver one frame).
+static uint64_t t_first = 0, t_report = 0, t_prev_eof = 0;
+static double xfer_sum = 0, xfer_max = 0, gap_sum = 0; static uint32_t xfer_n = 0;
 
 static int write_all(int fd,const void *p,size_t n){ const uint8_t *b=p; while(n){ ssize_t w=write(fd,b,n); if(w<0){ if(errno==EINTR)continue; return -1;} b+=w; n-=w;} return 0; }
 
@@ -99,6 +102,15 @@ static void emit_frame(void){
     if((frames_ok+frames_bad)%30==1 || !exact)
         fprintf(stderr,"[%6.2fs] frame %u: %u bytes %s (ok=%u bad=%u)\n",(t-t_start)/1e9,seq,frame_fill,exact?"exact":"SHORT/LONG",frames_ok,frames_bad);
     if(!exact) return; // drop incomplete frames
+    if(t_first){
+        double d=(t-t_first)/1e6; xfer_sum+=d; if(d>xfer_max) xfer_max=d; xfer_n++;
+        if(t_prev_eof && t_first>t_prev_eof) gap_sum+=(t_first-t_prev_eof)/1e6;
+    }
+    t_prev_eof=t; t_first=0;
+    if(t-t_report>=1000000000ull){
+        if(xfer_n) fprintf(stderr,"usb timing: first byte -> end of frame %.1f ms avg / %.1f max, idle between frames %.1f ms avg (%u frames)\n",xfer_sum/xfer_n,xfer_max,gap_sum/xfer_n,xfer_n);
+        xfer_sum=0; xfer_max=0; gap_sum=0; xfer_n=0; t_report=t;
+    }
     if(au_enabled) audio_flush();
     if(dump_prefix){
         char name[512]; snprintf(name,sizeof name,"%s.frame%04u.bin",dump_prefix,seq);
@@ -212,8 +224,8 @@ static void parse_transfer(const uint8_t *buf, int len){
         int want=(int)max_payload-hl; if(want>avail) want=avail;
         uint32_t remain = frame_size>frame_fill ? frame_size-frame_fill : 0;
         if((uint32_t)want>remain) want=remain;
-        if(err){ frame_fill=0; }
-        else if(want>0){ memcpy(frame_buf+frame_fill,buf+off+hl,want); frame_fill+=want; }
+        if(err){ frame_fill=0; t_first=0; }
+        else if(want>0){ if(!frame_fill) t_first=now_ns(); memcpy(frame_buf+frame_fill,buf+off+hl,want); frame_fill+=want; }
         off += hl + want;
         if(eof || frame_fill>=frame_size){ emit_frame(); frame_fill=0; cur_fid=-1; }
         // If the payload was shorter than max_payload (short packet), the transfer ended here.
@@ -284,6 +296,7 @@ static int run_session(int fmt, int frm, double fps, int nofps, int want_audio){
         if(frame_size==0||max_payload==0){ fprintf(stderr,"bad probe values\n"); continue; }
         if(use_shm && shm_base && frame_size<=SHM_SLOT_BYTES){ frame_buf=shm_slot(0); } else { use_shm=0; static uint8_t *own=NULL; own=realloc(own,frame_size); frame_buf=own; }
         frame_fill=0; cur_fid=-1; seq=0; frames_ok=0; frames_bad=0; video_bytes_seen=0;
+        t_first=0; t_prev_eof=0; t_report=0; xfer_sum=0; xfer_max=0; gap_sum=0; xfer_n=0;
 
         xfer_len = (int)max_payload*64;
         for(int i=0;i<NUM_XFERS;i++){
