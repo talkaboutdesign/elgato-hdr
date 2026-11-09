@@ -16,8 +16,6 @@ struct LiveOverlay {
 }
 
 final class Renderer: NSObject {
-    // Keep anonymous demo memory alive as long as its no-copy Metal buffers or reader exist.
-    var demoSource: DemoSource?
     let device: MTLDevice
     let queue: MTLCommandQueue
     let layer: CAMetalLayer
@@ -52,13 +50,13 @@ final class Renderer: NSObject {
     var arrHist = [Int](repeating: 0, count: 6)   // |arrival delta - period| in 4 ms buckets
     var lastTick = 0.0, tickGaps = 0
 
-    init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer) {
+    init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer, demoSource: DemoSource? = nil) {
         let core = MetalCore.shared
         let dev = core.device
         device = dev; queue = core.queue; self.layer = layer
         _ = core.pipeline("compositeFrag", .rgb10a2Unorm)   // compile up front, not on the first frame
         for i in 0..<shmSlots {
-            guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: nil) else { log("no-copy buffer failed"); return nil }
+            guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: demoSource.map { source in { _, _ in _ = source } }) else { log("no-copy buffer failed"); return nil }
             slotBuffers.append(b)
         }
         super.init()

@@ -141,8 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             guard let shm = self.shm else { DispatchQueue.main.async { self.setTitle("shared memory unavailable (old helper?)") }; close(fd); return }
             DispatchQueue.main.sync {
                 if self.renderer == nil {
-                    self.renderer = Renderer(layer: self.view.metalLayer, shm: shm)
-                    self.renderer?.demoSource = demo
+                    self.renderer = Renderer(layer: self.view.metalLayer, shm: shm, demoSource: demo)
                     self.renderer?.colorMode = self.colorMode; self.renderer?.presentation = self.presentation
                     self.view.updateDrawableSize()
                     self.renderer?.attachDisplayLink(view: self.view)
