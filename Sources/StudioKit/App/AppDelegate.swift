@@ -64,6 +64,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             runHeadlessExport(dir: URL(fileURLWithPath: args[i + 1]), range: args.contains("sdr") ? .sdr : .hdr, res: args.contains("uhd") ? .uhd : .hd)
             return
         }
+        #if DEBUG
+        if let i = CommandLine.arguments.firstIndex(of: "--make-fixture"), i+1 < CommandLine.arguments.count {
+            let arg = CommandLine.arguments[i+1]
+            let dir = arg.hasPrefix("/") ? URL(fileURLWithPath: arg) : Self.recordingsDir.appendingPathComponent(arg)
+            headless = true
+            Task {
+                do { let doc = try await FixtureProject.make(at: dir); log("fixture: \(doc.dir.path)"); exit(0) }
+                catch { log("fixture failed: \(error)"); exit(1) }
+            }
+            return
+        }
+        #endif
         view.placement = { [weak self] in
             guard let self = self, self.camera.cameraOn else { return nil }
             return self.livePlacement
@@ -120,12 +132,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
             guard fd >= 0 else { DispatchQueue.main.async { self?.setTitle("helper not reachable") }; return }
             guard let self = self else { return }
-            if let demo = demo { self.demoSource = demo; self.shm = demo.memory }
+            if let demo = demo {
+                self.demoSource?.stop()
+                self.demoSource = demo; self.shm = demo.memory
+                DispatchQueue.main.sync { self.renderer?.displayLink?.invalidate(); self.renderer = nil }
+            }
             if self.shm == nil { self.shm = mapSharedFrames() }
             guard let shm = self.shm else { DispatchQueue.main.async { self.setTitle("shared memory unavailable (old helper?)") }; close(fd); return }
             DispatchQueue.main.sync {
                 if self.renderer == nil {
                     self.renderer = Renderer(layer: self.view.metalLayer, shm: shm)
+                    self.renderer?.demoSource = demo
                     self.renderer?.colorMode = self.colorMode; self.renderer?.presentation = self.presentation
                     self.view.updateDrawableSize()
                     self.renderer?.attachDisplayLink(view: self.view)

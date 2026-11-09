@@ -10,6 +10,7 @@ final class DemoSource {
     private let writeFD: Int32
     private let queue = DispatchQueue(label: "demo-source")
     private let lock = NSLock()
+    private let queueKey = DispatchSpecificKey<Bool>()
     private var running = false
     private var started = false
     private let background: [UInt16]
@@ -41,6 +42,7 @@ final class DemoSource {
             }
         }
         background = bg
+        queue.setSpecific(key: queueKey, value: true)
     }
 
     deinit { stop(); close(readFD); close(writeFD); munmap(memory, shmSlots * shmSlotBytes) }
@@ -55,7 +57,7 @@ final class DemoSource {
     func stop() {
         lock.lock(); running = false; lock.unlock()
         shutdown(writeFD, SHUT_RDWR)
-        queue.sync {}
+        if DispatchQueue.getSpecific(key: queueKey) == nil { queue.sync {} }
     }
     private var active: Bool { lock.lock(); defer { lock.unlock() }; return running }
 
@@ -75,7 +77,7 @@ final class DemoSource {
         let phase = Double(frame) / fps
         let side = max(2, height / 12)
         rect(Int(phase.truncatingRemainder(dividingBy: 1) * Double(width-side)), height*3/4, side, side, 940)
-        let flash = frame == Int((floor(phase) * fps).rounded())
+        let flash = frame == Int(ceil(floor(phase) * fps))
         for bit in 0..<8 { rect(bit*width/8, height-height/16, width/8, height/16, flash || (frame >> bit) & 1 != 0 ? 940 : 64) }
     }
 
@@ -98,6 +100,7 @@ final class DemoSource {
     }
     private func run(epoch: UInt64) {
         var frame = 0, audio = 0
+        var fillTotal = 0.0, fillMax = 0.0
         while active {
             let videoTime = epoch + UInt64(Double(frame) * 1e9 / fps)
             let audioTime = epoch + UInt64(audio + 1) * 10_000_000
@@ -110,8 +113,12 @@ final class DemoSource {
             }
             guard active else { break }
             if videoTime <= audioTime {
+                let fillStart = nowNs()
                 fill(memory + frame % shmSlots * shmSlotBytes, frame: frame)
-                guard send(header(0x53, width, height, 0, width*height*3, videoTime, UInt32(truncatingIfNeeded: frame))) else { break }
+                let fillMs = Double(nowNs() - fillStart) / 1e6
+                fillTotal += fillMs; fillMax = max(fillMax, fillMs)
+                if frame == Int(fps * 3) { log(String(format: "demo fill: %.3f ms avg / %.3f max (%dx%d)", fillTotal / Double(frame+1), fillMax, width, height)) }
+                guard send(header(0x53, width, height, 0, width*height*3, nowNs(), UInt32(truncatingIfNeeded: frame))) else { break }
                 frame += 1
             } else {
                 var samples = [Int16](repeating: 0, count: 960)

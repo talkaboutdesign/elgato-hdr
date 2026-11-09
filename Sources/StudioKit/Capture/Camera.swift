@@ -49,8 +49,10 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
     }
 
-    var cameraOn: Bool { videoInput != nil }
-    var micOn: Bool { audioInput != nil }
+    private var demo = false
+    private var demoTimer: DispatchSourceTimer?
+    var cameraOn: Bool { demo || videoInput != nil }
+    var micOn: Bool { demo || audioInput != nil }
     var cameraName: String? { videoInput?.device.localizedName }
     var micName: String? { audioInput?.device.localizedName }
 
@@ -169,5 +171,68 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func attach(camera: LayerWriter?, mic: LayerWriter?) { lock.lock(); cameraRecorder = camera; micRecorder = mic; lock.unlock() }
+
+    func injectDemo() {
+        guard !demo else { return }
+        demo = true
+        if DemoSource.epoch == 0 { DemoSource.epoch = nowNs() }
+        let timer = DispatchSource.makeTimerSource(queue: videoQueue)
+        var frame = 0
+        timer.schedule(deadline: .now(), repeating: 1.0 / 30, leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            let ns = nowNs()
+            let pb = Self.demoPixelBuffer(frame: frame)
+            self.lock.lock(); self._latest = pb; let cw = self.cameraRecorder, mw = self.micRecorder; self.lock.unlock()
+            cw?.appendVideo(pb, ns: ns)
+            let epoch = DemoSource.epoch
+            let start = ns > epoch ? Int((ns - epoch) * 48000 / 1_000_000_000) : 0
+            if let sb = Self.demoAudio(sample: start, count: 1600) { mw?.appendAudio(sb, ns: ns); self.meter(sb) }
+            frame += 1
+        }
+        demoTimer = timer; timer.resume()
+    }
+
+    static func demoPixelBuffer(frame: Int) -> CVPixelBuffer {
+        var out: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary, &out)
+        let pb = out!
+        CVPixelBufferLockBaseAddress(pb, [])
+        let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!, ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let c = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!, cs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        var row = (0..<1280).map { UInt8(16 + ($0 + frame * 8) % 220) }
+        row.withUnsafeMutableBytes { r in for i in 0..<720 { memcpy(y + i * ys, r.baseAddress!, 1280) } }
+        memset(c, 128, cs * 360)
+        CVPixelBufferUnlockBaseAddress(pb, [])
+        for (key,value) in [(kCVImageBufferColorPrimariesKey,kCVImageBufferColorPrimaries_ITU_R_709_2),
+                            (kCVImageBufferTransferFunctionKey,kCVImageBufferTransferFunction_ITU_R_709_2),
+                            (kCVImageBufferYCbCrMatrixKey,kCVImageBufferYCbCrMatrix_ITU_R_709_2)] {
+            CVBufferSetAttachment(pb, key, value, .shouldPropagate)
+        }
+        return pb
+    }
+
+    static func demoAudio(sample: Int, count: Int) -> CMSampleBuffer? {
+        var samples = (0..<count).map { i -> Float in
+            let p = (sample + i) % 48000
+            return p < 2400 ? Float(sin(Double(p) * 2 * .pi / 48) * 0.24) : 0
+        }
+        var block: CMBlockBuffer?
+        CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: count*4, blockAllocator: nil,
+            customBlockSource: nil, offsetToData: 0, dataLength: count*4, flags: 0, blockBufferOut: &block)
+        guard let block = block else { return nil }
+        samples.withUnsafeMutableBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: count*4) }
+        var asbd = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked, mBytesPerPacket: 4, mFramesPerPacket: 1,
+            mBytesPerFrame: 4, mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0,
+            magicCookie: nil, extensions: nil, formatDescriptionOut: &format)
+        var sb: CMSampleBuffer?
+        CMAudioSampleBufferCreateReadyWithPacketDescriptions(allocator: nil, dataBuffer: block, formatDescription: format!,
+            sampleCount: count, presentationTimeStamp: CMTime(value: Int64(sample), timescale: 48000), packetDescriptions: nil, sampleBufferOut: &sb)
+        return sb
+    }
 }
 

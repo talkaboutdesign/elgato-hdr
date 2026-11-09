@@ -29,7 +29,7 @@ extension AppDelegate {
     func startRecording() {
         guard let s = session, s.w > 0 else { setTitle("not streaming, cannot record"); return }
         let (dir, name) = Library.shared.newProjectDir(date: Date())
-        let nominal = modes[modeIndex].fps
+        let nominal = demoSource?.fps ?? modes[modeIndex].fps
         let fps = abs(measuredFps - nominal) < 2 ? nominal : (measuredFps > 1 ? measuredFps : nominal)
         let startNs = s.lastFrameNs
         do {

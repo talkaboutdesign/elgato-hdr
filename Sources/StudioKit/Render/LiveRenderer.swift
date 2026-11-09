@@ -16,6 +16,8 @@ struct LiveOverlay {
 }
 
 final class Renderer: NSObject {
+    // Keep anonymous demo memory alive as long as its no-copy Metal buffers or reader exist.
+    var demoSource: DemoSource?
     let device: MTLDevice
     let queue: MTLCommandQueue
     let layer: CAMetalLayer
