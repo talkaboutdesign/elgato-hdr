@@ -3,6 +3,15 @@ import AVFoundation
 @testable import StudioKit
 
 final class AACEncoderTests: XCTestCase {
+    func testSkippedBlockMovesPacketTimeline() throws {
+        let encoder = try XCTUnwrap(AACEncoder()); let data = [Float](repeating: 0, count: 2048)
+        var pts: [UInt64] = []
+        for i in 0..<30 {
+            let time = UInt64(10e9 + Double(i * 1024) * 1e9 / 48000 + (i >= 10 ? 100e6 : 0))
+            if let packet = data.withUnsafeBufferPointer({ encoder.encode($0.baseAddress!, startHostNs: time) }) { pts.append(packet.ptsNs) }
+        }
+        XCTAssertEqual(zip(pts.dropFirst(), pts).filter { $0.0 - $0.1 > 100_000_000 }.count, 1)
+    }
     func testFiveSecondToneRoundTrip() throws {
         let encoder = try XCTUnwrap(AACEncoder())
         XCTAssertEqual(encoder.audioSpecificConfig, Data([0x11, 0x90]))
