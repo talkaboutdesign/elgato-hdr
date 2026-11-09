@@ -37,10 +37,9 @@ final class CompositorGoldenTests: XCTestCase {
         } } }
         return grid
     }
-    /// Compares with Fixtures/golden/<name>.json, or writes it when RECORD_GOLDENS=1 and `record` is set.
-    func check(_ grid: [Float], _ name: String, record: Bool = true) throws {
+    /// Compares with Fixtures/golden/<name>.json, or writes it when RECORD_GOLDENS=1.
+    func check(_ grid: [Float], _ name: String) throws {
         if recording {
-            guard record else { return }
             let dir = URL(fileURLWithPath:#filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/golden")
             let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted]
             try enc.encode(grid).write(to:dir.appendingPathComponent(name+".json"))
@@ -52,8 +51,8 @@ final class CompositorGoldenTests: XCTestCase {
         }
     }
 
-    /// The four fixed layouts in PQ, HLG and SDR output, through the old shader and through the layer compositor,
-    /// against the same goldens.
+    /// The four fixed layouts in PQ, HLG and SDR output, rendered as layer templates. The goldens were recorded from
+    /// the former fixed two-layer shader; the layer compositor must keep matching them.
     func testGoldens() throws {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("No Metal device") }
         let core = MetalCore.shared
@@ -61,11 +60,6 @@ final class CompositorGoldenTests: XCTestCase {
         for kind in LayoutKind.allCases {
             for transfer: Int32 in 0...2 {
                 var layout = CanvasLayout(kind:kind); layout.camera.border = true; layout.camera.shadow = true
-                let params = LayoutMath.params(layout:layout,canvas:Self.canvas,screen:CGSize(width:64,height:36),
-                                               camera:CGSize(width:32,height:32),mirror:false,screenTransfer:0,outTransfer:transfer)
-                let name = "\(kind.rawValue)-\(transfer)"
-                try check(render { cb, target in core.encodeComposite(cb,target:target,screen:screen,camera:camera,params:params) }, name)
-
                 let comp = Composition.from(layout:layout,canvas:Self.canvas,hasCamera:true,mirror:false)
                 let resolved = SceneResolver.resolve(comp,canvas:Self.canvas,sources:[.game:SourceInfo(size:CGSize(width:64,height:36)),
                                                                                        .camera:SourceInfo(size:CGSize(width:32,height:32))])
@@ -73,7 +67,7 @@ final class CompositorGoldenTests: XCTestCase {
                                                       .camera:.biplanar(y:camera.0,c:camera.1,bits:8,transfer:2,bt709:true)])
                 try check(render { cb, target in
                     core.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer:transfer,layers:layers)
-                }, name, record: false)
+                }, "\(kind.rawValue)-\(transfer)")
             }
         }
     }

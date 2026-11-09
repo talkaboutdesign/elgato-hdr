@@ -1,9 +1,42 @@
 import XCTest
 @testable import StudioKit
 
+/// The layout maths of the former fixed game-plus-camera shader (`LayoutMath.params`, removed with it), frozen as the
+/// reference the layer templates must keep reproducing.
+struct LegacyLayout {
+    var screenDst: CGRect, screenSrc: CGRect, camDst = CGRect.zero, camSrc = CGRect.zero
+    var radius: CGFloat = 0, border: CGFloat = 0, shadow: CGFloat = 0
+    var showScreen = true, showCam: Bool
+
+    init(layout: CanvasLayout, canvas: CGSize, screen: CGSize, camera: CGSize?) {
+        let full = CGRect(origin: .zero, size: canvas)
+        screenDst = full; showCam = camera != nil
+        switch layout.kind {
+        case .pip:
+            camDst = layout.camera.rect(in: canvas)
+            radius = layout.camera.radius(for: camDst)
+            if layout.fit { screenDst = LayoutMath.fitRect(screen, in: full) }
+            border = layout.camera.border ? max(2, camDst.width * 0.018) : 0
+            shadow = layout.camera.shadow ? max(6, camDst.width * 0.08) : 0
+        case .stacked:
+            if showCam {
+                let ch = (canvas.height * layout.split).rounded()
+                camDst = CGRect(x: 0, y: 0, width: canvas.width, height: ch)
+                screenDst = CGRect(x: 0, y: ch, width: canvas.width, height: canvas.height - ch)
+            }
+            if layout.fit { screenDst = LayoutMath.fitRect(screen, in: screenDst) }
+        case .screenOnly: showCam = false; if layout.fit { screenDst = LayoutMath.fitRect(screen, in: full) }
+        case .cameraOnly: showScreen = false; camDst = full
+        }
+        screenSrc = layout.fit ? LayoutMath.fillCrop(sourceSize: screen, dst: screen, zoom: layout.zoom, panX: layout.panX, panY: layout.panY)
+                               : LayoutMath.fillCrop(sourceSize: screen, dst: screenDst.size, zoom: layout.zoom, panX: layout.panX, panY: layout.panY)
+        if let cs = camera, showCam { camSrc = LayoutMath.fillCrop(sourceSize: cs, dst: camDst.size, zoom: 1, panX: 0.5, panY: 0.5) }
+    }
+}
+
 final class SceneTests: XCTestCase {
-    func assertRect(_ a: CGRect, _ b: SIMD4<Float>, _ msg: String, file: StaticString = #filePath, line: UInt = #line) {
-        for (x, y) in zip([a.minX, a.minY, a.width, a.height], [b.x, b.y, b.z, b.w]) { XCTAssertEqual(Double(x), Double(y), accuracy: 0.001, msg, file: file, line: line) }
+    func assertRect(_ a: CGRect, _ b: CGRect, _ msg: String, file: StaticString = #filePath, line: UInt = #line) {
+        for (x, y) in zip([a.minX, a.minY, a.width, a.height], [b.minX, b.minY, b.width, b.height]) { XCTAssertEqual(x, y, accuracy: 0.001, msg, file: file, line: line) }
     }
 
     /// Every template resolves to the rectangles and shape the fixed-layout shader parameters held.
@@ -26,16 +59,15 @@ final class SceneTests: XCTestCase {
                 for hasCamera in [true, false] {
                     for mirror in [false, true] {
                         let name = "\(canvasKind) \(layout.kind) fit=\(layout.fit) zoom=\(layout.zoom) camera=\(hasCamera) mirror=\(mirror)"
-                        let p = LayoutMath.params(layout: layout, canvas: canvas, screen: screen, camera: hasCamera ? cam : nil, mirror: mirror,
-                                                  screenTransfer: 0, outTransfer: 0)
+                        let p = LegacyLayout(layout: layout, canvas: canvas, screen: screen, camera: hasCamera ? cam : nil)
                         var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: screen)]
                         if hasCamera { sources[.camera] = SourceInfo(size: cam) }
                         let comp = Composition.from(layout: layout, canvas: canvas, hasCamera: hasCamera, mirror: mirror)
                         XCTAssertEqual(comp.background, [0.06, 0.06, 0.07, 1])
                         let r = SceneResolver.resolve(comp, canvas: canvas, sources: sources)
                         let game = r.first { $0.key == .game }, camera = r.first { $0.key == .camera }
-                        XCTAssertEqual(game != nil, p.flags.x != 0, name)
-                        XCTAssertEqual(camera != nil, p.flags.y != 0, name)
+                        XCTAssertEqual(game != nil, p.showScreen, name)
+                        XCTAssertEqual(camera != nil, p.showCam, name)
                         XCTAssertEqual(r.count, (game != nil ? 1 : 0) + (camera != nil ? 1 : 0), name)
                         if let g = game {
                             assertRect(g.dst, p.screenDst, name); assertRect(g.src, p.screenSrc, name)
@@ -44,8 +76,8 @@ final class SceneTests: XCTestCase {
                         }
                         if let c = camera {
                             assertRect(c.dst, p.camDst, name); assertRect(c.src, p.camSrc, name)
-                            for (a, b) in zip([c.radius, c.border, c.shadow], [p.shape.x, p.shape.y, p.shape.z]) { XCTAssertEqual(Double(a), Double(b), accuracy: 0.001, name) }
-                            XCTAssertEqual(c.mirror, p.flags.z != 0, name); XCTAssertEqual(c.opacity, 1)
+                            for (a, b) in zip([c.radius, c.border, c.shadow], [p.radius, p.border, p.shadow]) { XCTAssertEqual(a, b, accuracy: 0.001, name) }
+                            XCTAssertEqual(c.mirror, mirror, name); XCTAssertEqual(c.opacity, 1)
                         }
                         if layout.kind == .pip, hasCamera { XCTAssertEqual(r.map(\.key), [.game, .camera], name) }
                     }
