@@ -39,7 +39,14 @@ final class AACEncoderTests: XCTestCase {
             let p = output.audioBufferList.pointee.mBuffers.mData!.assumingMemoryBound(to: Float.self)
             for i in 0..<Int(output.frameLength) { decoded.append(p[i * 2]) }
         }
+        XCTAssertEqual(decoded.count, timestamps.count * 1024)
         XCTAssertGreaterThanOrEqual(decoded.count, toneFrames + 2112)
+        var alignmentError = 0.0
+        for i in 48000..<96000 {
+            let expected = 0.2 * sin(2 * Double.pi * 1000 * Double(i) / 48000)
+            alignmentError += pow(Double(decoded[i + 2112]) - expected, 2)
+        }
+        XCTAssertLessThan(sqrt(alignmentError / 48000), 0.01)
         XCTAssertLessThanOrEqual(decoded.count, (blocks + 8) * 1024 + 2112)
         XCTAssertEqual(timestamps.first!, epoch - 44_000_000, accuracy: 1)
         for i in 1..<timestamps.count { XCTAssertEqual(Double(timestamps[i] - timestamps[i - 1]), 1024e9 / 48000, accuracy: 1) }

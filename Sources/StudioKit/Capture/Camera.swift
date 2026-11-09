@@ -11,6 +11,8 @@ func nowNs() -> UInt64 { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) }
 final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     let session = AVCaptureSession()
     let videoOutput = AVCaptureVideoDataOutput()
+    /// Capture-queue tap with the host time of the last sample. Set before capture starts.
+    var onMicAudio: ((CMSampleBuffer, UInt64) -> Void)?
     let audioOutput = AVCaptureAudioDataOutput()
     let videoQueue = DispatchQueue(label: "camera-video")
     let audioQueue = DispatchQueue(label: "camera-audio")
@@ -156,8 +158,17 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         } else {
             lock.lock(); let rec = micRecorder; lock.unlock()
             rec?.appendAudio(sb, ns: hostNs(pts))
+            if let tap = onMicAudio { tap(sb, audioEndHostNs(sb, startNs: hostNs(pts))) }
             meter(sb)
         }
+    }
+
+    private func audioEndHostNs(_ sb: CMSampleBuffer, startNs: UInt64) -> UInt64 {
+        guard let format = CMSampleBufferGetFormatDescription(sb),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format),
+              asbd.pointee.mSampleRate > 0 else { return startNs }
+        // Mic PTS is the first sample, whereas MixerInput consumes last-sample timestamps.
+        return startNs + UInt64(Double(max(0, CMSampleBufferGetNumSamples(sb) - 1)) * 1e9 / asbd.pointee.mSampleRate)
     }
 
     private func meter(_ sb: CMSampleBuffer) {
@@ -187,7 +198,11 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             cw?.appendVideo(pb, ns: ns)
             let epoch = DemoSource.epoch
             let start = ns > epoch ? Int((ns - epoch) * 48000 / 1_000_000_000) : 0
-            if let sb = Self.demoAudio(sample: start, count: 1600) { mw?.appendAudio(sb, ns: ns); self.meter(sb) }
+            if let sb = Self.demoAudio(sample: start, count: 1600) {
+                mw?.appendAudio(sb, ns: ns)
+                if let tap = self.onMicAudio { tap(sb, self.audioEndHostNs(sb, startNs: ns)) }
+                self.meter(sb)
+            }
             frame += 1
         }
         demoTimer = timer; timer.resume()
