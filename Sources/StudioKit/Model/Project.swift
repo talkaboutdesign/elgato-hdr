@@ -121,7 +121,7 @@ struct LayerInfo: Codable, Equatable {
 }
 
 struct Project: Codable, Equatable {
-    var version = 1
+    var version = 2
     var name: String
     var createdAt: Date
     var state = "complete"          // "recording" while capture is in progress (crash recovery)
@@ -135,12 +135,15 @@ struct Project: Codable, Equatable {
     var trimStartMs = 0.0, trimEndMs = 0.0   // 0 end = full length
     var wide = CanvasLayout.wideDefault
     var vertical = CanvasLayout.verticalDefault
+    var scenes: [Scene] = []
+    var events: [SessionEvent] = []
+    var timeline = Timeline()
     var lastExport: [String: String] = [:]    // canvas raw value -> file name
 
     init(name: String, createdAt: Date) { self.name = name; self.createdAt = createdAt }
     enum CodingKeys: String, CodingKey {
         case version, name, createdAt, state, durationMs, width, height, fps, colorMode, game, camera, mic, cameraMirror
-        case trimStartMs, trimEndMs, wide, vertical, lastExport
+        case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -152,6 +155,71 @@ struct Project: Codable, Equatable {
         game = c.v(.game, z.game); camera = c.v(.camera, nil); mic = c.v(.mic, nil); cameraMirror = c.v(.cameraMirror, false)
         trimStartMs = c.v(.trimStartMs, 0); trimEndMs = c.v(.trimEndMs, 0)
         wide = c.v(.wide, z.wide); vertical = c.v(.vertical, z.vertical); lastExport = c.v(.lastExport, [:])
+        scenes = c.v(.scenes, []); events = c.v(.events, []); timeline = c.v(.timeline, Timeline())
+        if version < 2 { migrateTimeline() }; version = 2
+    }
+
+    mutating func migrateTimeline() {
+        if scenes.isEmpty { scenes = [defaultScene] }
+        if timeline.segments.isEmpty && (trimStartMs > 0 || trimEndMs > 0) {
+            timeline.segments = [Segment(startMs: trimmedRange.0, endMs: trimmedRange.1)]
+        }
+        let sorted = events.sorted { $0.tMs < $1.tMs }
+        if timeline.sceneSpans.isEmpty {
+            timeline.sceneSpans = sorted.compactMap { e in
+                guard e.type == "scene", let id = e.sceneID else { return nil }
+                return SceneSpan(startMs: e.tMs, sceneID: id)
+            }
+            if timeline.sceneSpans.first?.startMs != 0, let scene = scenes.first {
+                timeline.sceneSpans.insert(SceneSpan(startMs: 0, sceneID: scene.id), at: 0)
+            }
+        }
+        if timeline.zooms.isEmpty {
+            var start: SessionEvent?
+            for e in sorted {
+                if e.type == "zoomIn" { if start == nil { start = e } }
+                if e.type == "zoomOut", let a = start {
+                    if e.tMs > a.tMs { timeline.zooms.append(ZoomBlock(startMs: a.tMs, endMs: e.tMs, scale: a.zoom ?? 1.8, focusX: a.focusX ?? 0.5, focusY: a.focusY ?? 0.5)) }
+                    start = nil
+                }
+            }
+            if let a = start, durationMs > a.tMs { timeline.zooms.append(ZoomBlock(startMs: a.tMs, endMs: durationMs, scale: a.zoom ?? 1.8, focusX: a.focusX ?? 0.5, focusY: a.focusY ?? 0.5)) }
+        }
+        if timeline.markers.isEmpty { timeline.markers = sorted.filter { $0.type == "marker" }.map { Marker(tMs: $0.tMs) } }
+    }
+
+    var defaultScene: Scene {
+        Scene(name: "Default", wide: .from(layout: wide, canvas: Canvas.wide.size(.hd), hasCamera: camera != nil, mirror: cameraMirror),
+              vertical: .from(layout: vertical, canvas: Canvas.vertical.size(.hd), hasCamera: camera != nil, mirror: cameraMirror))
+    }
+    var editSegments: [Segment] {
+        if !timeline.segments.isEmpty { return timeline.segments }
+        return trimStartMs > 0 || trimEndMs > 0 ? [Segment(startMs: trimmedRange.0, endMs: trimmedRange.1)] : []
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(2, forKey: .version)
+        try c.encode(name, forKey: .name)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(state, forKey: .state)
+        try c.encode(durationMs, forKey: .durationMs)
+        try c.encode(width, forKey: .width)
+        try c.encode(height, forKey: .height)
+        try c.encode(fps, forKey: .fps)
+        try c.encode(colorMode, forKey: .colorMode)
+        try c.encode(game, forKey: .game)
+        try c.encode(camera, forKey: .camera)
+        try c.encode(mic, forKey: .mic)
+        try c.encode(cameraMirror, forKey: .cameraMirror)
+        try c.encode(wide, forKey: .wide)
+        try c.encode(vertical, forKey: .vertical)
+        try c.encode(lastExport, forKey: .lastExport)
+        try c.encode(scenes, forKey: .scenes)
+        try c.encode(events, forKey: .events)
+        try c.encode(timeline, forKey: .timeline)
+        let bounds = timeline.segments.sorted { $0.startMs < $1.startMs }
+        try c.encode(bounds.first?.startMs ?? trimStartMs, forKey: .trimStartMs)
+        try c.encode(bounds.last?.endMs ?? trimEndMs, forKey: .trimEndMs)
     }
 
     var color: ColorMode { ColorMode(rawValue: colorMode) ?? .pq }

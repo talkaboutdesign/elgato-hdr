@@ -7,7 +7,7 @@ final class ProjectCodingTests: XCTestCase {
         for name in ["minimal","v1"] {
             let url = Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures")!
             let p = try dec.decode(Project.self, from: Data(contentsOf: url))
-            XCTAssertEqual(p.version,1); XCTAssertEqual(p.fps,60); XCTAssertEqual(p.colorMode,"pq")
+            XCTAssertEqual(p.version,2); XCTAssertEqual(p.fps,60); XCTAssertEqual(p.colorMode,"pq")
             XCTAssertEqual(p.game,LayerInfo(file:"game.mov")); XCTAssertEqual(p.vertical,.verticalDefault)
             XCTAssertEqual(p.trimStartMs,0); XCTAssertEqual(p.trimEndMs,0)
             XCTAssertEqual(p.wide.zoom,1); XCTAssertEqual(p.wide.camera.shadow,true)
