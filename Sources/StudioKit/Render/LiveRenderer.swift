@@ -54,7 +54,7 @@ final class Renderer: NSObject {
         let core = MetalCore.shared
         let dev = core.device
         device = dev; queue = core.queue; self.layer = layer
-        _ = core.pipeline("compositeFrag", .rgb10a2Unorm)   // compile up front, not on the first frame
+        _ = core.pipeline("layerFrag", .rgb10a2Unorm, blend: true)   // compile up front, not on the first frame
         for i in 0..<shmSlots {
             guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: demoSource.map { source in { _, _ in _ = source } }) else { log("no-copy buffer failed"); return nil }
             slotBuffers.append(b)
@@ -192,21 +192,25 @@ final class Renderer: NSObject {
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
         let scale = min(dw / Double(w), dh / Double(h))
-        let vw = Double(w) * scale, vh = Double(h) * scale
+        // Whole pixels: layer edges are anti-aliased, so a letterbox at a half-pixel offset would blend the game's
+        // outermost rows with the background.
+        let vw = (Double(w) * scale).rounded(), vh = (Double(h) * scale).rounded()
         // Game passes through untouched in its own encoding; only the facecam is converted into it.
-        let ov = overlay
-        var cam: (MTLTexture, MTLTexture)?, camSize: CGSize?, keep: [CVMetalTexture] = [], camBits: Int32 = 8
+        let ov = overlay, transfer = colorMode.transfer
+        var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: CGSize(width: w, height: h))]
+        var textures: [SourceKey: LayerTextures.Kind] = [.game: .biplanar(y: yT, c: cT, bits: 10, transfer: transfer, bt709: transfer == 2)]
+        var keep: [CVMetalTexture] = []
         if let pb = ov.camera?.latest, let p = MetalCore.shared.planes(pb) {
-            cam = (p.0, p.1); keep = p.2; camBits = p.3
-            camSize = CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb))
+            keep = p.2
+            sources[.camera] = SourceInfo(size: CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb)))
+            textures[.camera] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: 2, bt709: true)
         }
-        var params = LayoutMath.params(layout: CanvasLayout(kind: .pip, camera: ov.placement), canvas: CGSize(width: vw, height: vh),
-                                       screen: CGSize(width: w, height: h), camera: camSize, mirror: ov.mirror,
-                                       screenTransfer: colorMode.transfer, outTransfer: colorMode.transfer)
-        params.fmt.z = 10; params.fmt.w = camBits
-        MetalCore.shared.encodeComposite(cb, target: drawable.texture,
-                                         viewport: MTLViewport(originX: (dw - vw) / 2, originY: (dh - vh) / 2, width: vw, height: vh, znear: 0, zfar: 1),
-                                         screen: (yT, cT), camera: cam, params: params)
+        let canvas = CGSize(width: vw, height: vh)
+        let comp = Composition.from(layout: CanvasLayout(kind: .pip, camera: ov.placement), canvas: canvas, hasCamera: sources[.camera] != nil, mirror: ov.mirror)
+        MetalCore.shared.encodeLayers(cb, target: drawable.texture,
+                                      viewport: MTLViewport(originX: ((dw - vw) / 2).rounded(.down), originY: ((dh - vh) / 2).rounded(.down), width: vw, height: vh, znear: 0, zfar: 1),
+                                      canvas: canvas, background: comp.backgroundColor, outTransfer: transfer,
+                                      layers: DrawLayer.pair(SceneResolver.resolve(comp, canvas: canvas, sources: sources), textures))
         if !keep.isEmpty { cb.addCompletedHandler { _ in _ = keep } }
         drawable.addPresentedHandler { [weak self] d in
             defer { onPresented?() }

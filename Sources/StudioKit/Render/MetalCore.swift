@@ -307,6 +307,19 @@ final class MetalCore {
         return (out[0], out[1], refs, tenBit ? 10 : 8)
     }
 
+    /// How a frame is actually tagged: transfer (0 PQ, 1 HLG, 2 SDR) and whether its matrix is BT.709. AVFoundation
+    /// may hand the compositor a layer already converted into another layer's colour space (e.g. the SDR camera into
+    /// the game's PQ), so the tags on the buffer, not the source file, are what count. Untagged buffers keep
+    /// `transfer` and the matrix that goes with it.
+    static func colorTags(_ pb: CVPixelBuffer, fallback transfer: Int32) -> (transfer: Int32, bt709: Bool) {
+        var t = transfer
+        if let v = CVBufferCopyAttachment(pb, kCVImageBufferTransferFunctionKey, nil) as? String {
+            t = v == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String ? 0 : v == kCVImageBufferTransferFunction_ITU_R_2100_HLG as String ? 1 : 2
+        }
+        let matrix = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, nil) as? String
+        return (t, matrix.map { $0 != kCVImageBufferYCbCrMatrix_ITU_R_2020 as String } ?? (t == 2))
+    }
+
     func texture(_ pb: CVPixelBuffer, _ format: MTLPixelFormat, plane: Int = 0) -> (MTLTexture, CVMetalTexture)? {
         var t: CVMetalTexture?
         let planar = CVPixelBufferIsPlanar(pb)

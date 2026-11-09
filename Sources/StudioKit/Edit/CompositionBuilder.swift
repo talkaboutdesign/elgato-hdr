@@ -77,8 +77,6 @@ enum CompositionBuilder {
     /// The render description alone: cheap to rebuild whenever the layout changes.
     static func videoComposition(_ p: Project, canvas: Canvas, size: CGSize, built: BuiltComposition) -> AVMutableVideoComposition {
         let out = built.outTransfer
-        let params = LayoutMath.params(layout: p.layout(canvas), canvas: size, screen: built.screenSize, camera: built.cameraSize,
-                                       mirror: p.cameraMirror, screenTransfer: p.color.transfer, outTransfer: out)
         let vc = AVMutableVideoComposition()
         vc.customVideoCompositorClass = out == 2 ? SDRLayerCompositor.self : HDRLayerCompositor.self
         vc.renderSize = size
@@ -86,7 +84,8 @@ enum CompositionBuilder {
         // No colour properties on purpose: setting them makes AVFoundation convert every source into that space before
         // the compositor sees it. The compositor converts each layer itself and tags its output buffers.
         vc.instructions = [CompositionInstruction(timeRange: CMTimeRange(start: .zero, duration: built.duration), screenTrack: built.screenTrack,
-                                                  cameraTrack: built.cameraTrack, params: params, hdrOutput: out != 2)]
+                                                  cameraTrack: built.cameraTrack, composition: .from(layout: p.layout(canvas), canvas: size, hasCamera: built.cameraSize != nil, mirror: p.cameraMirror),
+                                                  canvas: size, outTransfer: out, screenTransfer: p.color.transfer, screenSize: built.screenSize, cameraSize: built.cameraSize)]
         return vc
     }
 
