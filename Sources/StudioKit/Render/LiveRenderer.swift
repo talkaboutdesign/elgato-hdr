@@ -107,19 +107,22 @@ final class Renderer: NSObject {
         shmTextures[key] = (y, c); return (y, c)
     }
 
+    /// Reader thread, the only writer of `ring`, `ringW` and `ringH`; it reads them without the lock. `tick` reads them
+    /// on the main thread, so the new ring is built outside the lock and swapped in under it together with its size.
+    /// A partial ring (allocation failed) stops `submit` until the next frame retries.
     func ensureRing(w: Int, h: Int) {
         if ringW == w && ringH == h && ring.count == Renderer.ringSize { return }
-        ring = []
+        var fresh: [(MTLTexture, MTLTexture)] = []
         for _ in 0..<Renderer.ringSize {
             let yd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
             yd.usage = .shaderRead; yd.storageMode = .private
             let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: w / 2, height: h / 2, mipmapped: false)
             cd.usage = .shaderRead; cd.storageMode = .private
-            guard let y = device.makeTexture(descriptor: yd), let c = device.makeTexture(descriptor: cd) else { return }
-            ring.append((y, c))
+            guard let y = device.makeTexture(descriptor: yd), let c = device.makeTexture(descriptor: cd) else { break }
+            fresh.append((y, c))
         }
-        ringW = w; ringH = h; ringNext = 0
-        lock.lock(); pending.removeAll(); lock.unlock()
+        lock.lock(); ring = fresh; ringW = w; ringH = h; pending.removeAll(); lock.unlock()
+        ringNext = 0
     }
 
     func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); gameQueued = 0; lock.unlock() }
@@ -182,9 +185,11 @@ final class Renderer: NSObject {
             if chosen != nil { pacingDrops += 1 }
             chosen = f; pending.removeFirst()
         }
+        // The reader thread may swap in a new ring at any time: take the textures and their size together.
+        let frame = chosen.flatMap { f in f.ring < ring.count ? (ring[f.ring], ringW, ringH, f.arrival) : nil }
         lock.unlock()
-        guard let f = chosen, f.ring < ring.count else { return }
-        drawNow(y: ring[f.ring].0, c: ring[f.ring].1, w: ringW, h: ringH, arrival: f.arrival)
+        guard let (tex, w, h, arrival) = frame else { return }
+        drawNow(y: tex.0, c: tex.1, w: w, h: h, arrival: arrival)
     }
 
     @discardableResult
