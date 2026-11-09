@@ -61,7 +61,6 @@ final class RTMPDechunker {
                 var id = basic & 63
                 if id == 0 { id = Int(try r.uint(1)) + 64 }
                 else if id == 1 { let lo = Int(try r.uint(1)); id = lo + Int(try r.uint(1)) * 256 + 64 }
-                guard fmt == 0 || streams[id] != nil else { throw RTMPError.malformed }
                 var s = streams[id] ?? Stream()
                 let continuing = !s.payload.isEmpty
                 guard !continuing || fmt == 3 else { throw RTMPError.malformed }

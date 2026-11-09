@@ -4,6 +4,7 @@ enum RTMPError: Error { case malformed, truncated }
 
 enum AMFValue: Equatable {
     case number(Double), boolean(Bool), string(String), object([String: AMFValue])
+    case date(Double, Int16)
     case null, undefined, ecmaArray([String: AMFValue]), strictArray([AMFValue])
 
     var string: String? { if case .string(let s) = self { return s }; return nil }
@@ -53,6 +54,7 @@ enum AMF0 {
         }
         func value(_ v: AMFValue) {
             switch v {
+            case .date(let n, let zone): out.append(11); out.rtmpBE(n.bitPattern, 8); out.rtmpBE(UInt64(UInt16(bitPattern: zone)), 2)
             case .number(let n): out.append(0); out.rtmpBE(n.bitPattern, 8)
             case .boolean(let b): out.append(contentsOf: [1, b ? 1 : 0])
             case .string(let s): out.append(2); stringBody(s)
@@ -67,7 +69,7 @@ enum AMF0 {
         return out
     }
 
-    static func decode(_ data: Data) throws -> [AMFValue] {
+    static func decode(_ data: Data, limit: Int = .max) throws -> [AMFValue] {
         var r = RTMPReader(bytes: Array(data))
         func object(_ depth: Int) throws -> [String: AMFValue] {
             var result: [String: AMFValue] = [:]
@@ -88,6 +90,8 @@ enum AMF0 {
             case 5: return .null
             case 6: return .undefined
             case 8: _ = try r.uint(4); return .ecmaArray(try object(depth))
+            case 11: return .date(Double(bitPattern: try r.uint(8)), Int16(bitPattern: UInt16(try r.uint(2))))
+            case 12: return .string(try r.string(Int(r.uint(4))))
             case 10:
                 let count = Int(try r.uint(4))
                 guard count <= r.remaining else { throw RTMPError.truncated }
@@ -98,7 +102,7 @@ enum AMF0 {
             }
         }
         var values: [AMFValue] = []
-        while r.remaining > 0 { values.append(try value(0)) }
+        while r.remaining > 0 && values.count < limit { values.append(try value(0)) }
         return values
     }
 }

@@ -107,4 +107,23 @@ final class RTMPWireTests: XCTestCase {
         XCTAssertEqual(StreamEndpoint(url: "rtmp://host/live2?backup=1")?.app, "live2?backup=1")
         for s in ["https://host/app", "rtmp://host", "rtmp://host/", "rtmp://host:0/app", "rtmp://user:pass@host/app"] { XCTAssertNil(StreamEndpoint(url: s)) }
     }
+    func testDateLongStringAndCompositionRounding() throws {
+        var date = Data([11]); date.rtmpBE(Double(123).bitPattern, 8); date.rtmpBE(60, 2)
+        XCTAssertEqual(try AMF0.decode(date), [.date(123, 60)])
+        let string = String(repeating: "x", count: 70000)
+        var bytes = Data([12]); bytes.rtmpBE(70000, 4); bytes.append(Data(string.utf8))
+        XCTAssertEqual(try AMF0.decode(bytes), [.string(string)])
+        XCTAssertEqual(Array(FLVTags.video(Data(), ptsNs: 2_100_000, dtsNs: 1_900_000, keyframe: true).suffix(3)), [0, 0, 1])
+        XCTAssertEqual(Array(FLVTags.video(Data(), ptsNs: 1_900_000, dtsNs: 2_100_000, keyframe: true, baseNs: 500_000).suffix(3)), [0, 0, 0])
+    }
+    func testUnseenCompactChunkStreamsAndExtendedNewMessage() throws {
+        XCTAssertEqual(try RTMPDechunker().append(Data([0x46, 0, 0, 5, 0, 0, 1, 9, 42])), [RTMPMessage(chunkStreamId: 6, timestamp: 5, type: 9, payload: Data([42]))])
+        XCTAssertEqual(try RTMPDechunker().append(Data([0x86, 0, 0, 5])), [RTMPMessage(chunkStreamId: 6, timestamp: 5, type: 0, payload: Data())])
+        XCTAssertEqual(try RTMPDechunker().append(Data([0xc6])), [RTMPMessage(chunkStreamId: 6, type: 0, payload: Data())])
+        let first = RTMPMessage(chunkStreamId: 6, timestamp: 0x1000000, type: 9, streamId: 1, payload: Data([42]))
+        let wire = chunks(for: first, chunkSize: 128) + Data([0xc6, 1, 0, 0, 0, 43])
+        var result: [RTMPMessage] = []; let parser = RTMPDechunker()
+        for byte in wire { result += try parser.append(Data([byte])) }
+        XCTAssertEqual(result, [first, RTMPMessage(chunkStreamId: 6, timestamp: 0x2000000, type: 9, streamId: 1, payload: Data([43]))])
+    }
 }
