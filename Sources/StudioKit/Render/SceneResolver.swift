@@ -57,3 +57,7 @@ enum SceneResolver {
         return SIMD4(Float(v[0]), Float(v[1]), Float(v[2]), Float(v.count > 3 ? v[3] : 1))
     }
 }
+
+extension Composition {
+    var backgroundColor: SIMD4<Float> { SceneResolver.rgba(background) ?? SIMD4(0, 0, 0, 1) }
+}
