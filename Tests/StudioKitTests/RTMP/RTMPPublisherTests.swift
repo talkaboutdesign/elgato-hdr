@@ -20,6 +20,7 @@ final class RTMPPublisherTests: XCTestCase {
             if m.type == 9, m.payload.starts(with: [0x17, 1]) { frame.fulfill() }
             if m.type == 4, m.payload == Data([0, 7, 1, 2, 3, 4]) { pong.fulfill() }
             if m.type == 3 { ack.fulfill() }
+            if m.type == 20, (try? AMF0.decode(m.payload).first?.string) == "FCUnpublish" { XCTAssertEqual(m.streamId, 0) }
             if m.type == 20, (try? AMF0.decode(m.payload).first?.string) == "deleteStream" { stopped.fulfill() }
         }
         p.onState = { if $0 == .publishing { publishing.fulfill() } }
@@ -35,6 +36,9 @@ final class RTMPPublisherTests: XCTestCase {
         // The acknowledgement window counts incoming wire bytes, including ignored commands.
         server.sendControl(type: 4, payload: Data([0, 0]) + Data(repeating: 0, count: 5000))
         wait(for: [frame, pong, ack], timeout: 3)
+        let acknowledgements = server.messages.map(\.1).filter { $0.type == 3 }
+        var reader = RTMPReader(bytes: Array(try XCTUnwrap(acknowledgements.last).payload))
+        XCTAssertEqual(try reader.uint(4), server.wireBytes)
         p.stop(); wait(for: [stopped], timeout: 3)
         let media = server.messages.map(\.1).filter { [18, 9, 8].contains($0.type) }
         XCTAssertEqual(media.prefix(3).map(\.type), [18, 9, 8])
@@ -96,7 +100,7 @@ final class RTMPPublisherTests: XCTestCase {
         let large = Data(repeating: 0x55, count: 1_000_000)
         // Queue enough bytes to exceed the socket's send buffer without relying on link speed.
         for i in 0..<80 {
-            p.sendVideo(large, ptsNs: UInt64(i) * 33_000_000, dtsNs: UInt64(i) * 33_000_000, keyframe: i % 5 == 0)
+            p.sendVideo(large, ptsNs: UInt64(i) * 33_000_000, dtsNs: UInt64(i) * 33_000_000, keyframe: true)
             p.sendAudio(Data(repeating: 1, count: 100_000), ptsNs: UInt64(i) * 33_000_000)
             Thread.sleep(forTimeInterval: 0.005)
         }

@@ -11,10 +11,20 @@ final class RTMPPublisher {
         var droppedFrames = 0
         var pendingMs: Double = 0
         var reconnects = 0
+        var lastError: String?
     }
 
-    var onState: ((State) -> Void)?
-    var onNeedKeyframe: (() -> Void)?
+    private let callbackLock = NSLock()
+    private var stateCallback: ((State) -> Void)?
+    private var keyframeCallback: (() -> Void)?
+    var onState: ((State) -> Void)? {
+        get { callbackLock.lock(); defer { callbackLock.unlock() }; return stateCallback }
+        set { callbackLock.lock(); defer { callbackLock.unlock() }; stateCallback = newValue }
+    }
+    var onNeedKeyframe: (() -> Void)? {
+        get { callbackLock.lock(); defer { callbackLock.unlock() }; return keyframeCallback }
+        set { callbackLock.lock(); defer { callbackLock.unlock() }; keyframeCallback = newValue }
+    }
     private let endpoint: StreamEndpoint
     private let streamKey: String
     private let metadata: StreamMetadata
@@ -44,7 +54,10 @@ final class RTMPPublisher {
     private var baseNs: UInt64?
     private var firstVideoPTS: UInt64?
     private var needsKeyframe = true
-    private var congested = false
+    private var pressure = RTMPPressure()
+    private var lastMediaTimestamp: UInt32 = 0
+    private var hasPublished = false
+    private var awaited: (id: Double, stage: String)?
 
     init(endpoint: StreamEndpoint, streamKey: String, metadata: StreamMetadata) {
         self.endpoint = endpoint; self.streamKey = streamKey; self.metadata = metadata
@@ -58,7 +71,7 @@ final class RTMPPublisher {
 
     func start() { queue.async { [self] in
         guard !active else { return }
-        active = true; attempt = 0; connect()
+        active = true; attempt = 0; hasPublished = false; connect()
     } }
 
     func stop() { queue.async { [self] in
@@ -66,7 +79,7 @@ final class RTMPPublisher {
         let closing = connection
         if streamId != 0, state == .publishing {
             transaction += 1
-            command([.string("FCUnpublish"), .number(Double(transaction)), .null, .string(streamKey)], stream: streamId)
+            command([.string("FCUnpublish"), .number(Double(transaction)), .null, .string(streamKey)])
             transaction += 1
             let payload = AMF0.encode([.string("deleteStream"), .number(Double(transaction)), .null, .number(Double(streamId))])
             let bytes = chunks(for: RTMPMessage(chunkStreamId: 3, type: 20, payload: payload), chunkSize: outChunkSize)
@@ -79,26 +92,28 @@ final class RTMPPublisher {
     } }
 
     func setVideoConfig(sps: Data, pps: Data) { queue.async { [self] in
-        guard let config = FLVTags.videoConfig(sps: sps, pps: pps) else { return }
+        guard let config = FLVTags.videoConfig(sps: sps, pps: pps), config != videoConfig else { return }
         videoConfig = config
         if state == .publishing {
-            media(type: 9, payload: config, time: 0); needsKeyframe = true; onNeedKeyframe?()
+            media(type: 9, payload: config, time: lastMediaTimestamp); needsKeyframe = true; onNeedKeyframe?()
         }
     } }
     func setAudioConfig(audioSpecificConfig: Data) { queue.async { [self] in
-        audioConfig = FLVTags.audioConfig(audioSpecificConfig)
-        if state == .publishing { media(type: 8, payload: audioConfig!, time: 0) }
+        let config = FLVTags.audioConfig(audioSpecificConfig)
+        guard config != audioConfig else { return }
+        audioConfig = config
+        if state == .publishing { media(type: 8, payload: config, time: lastMediaTimestamp) }
     } }
 
     func sendVideo(_ avcc: Data, ptsNs: UInt64, dtsNs: UInt64, keyframe: Bool) {
         queue.async { [self] in
             guard state == .publishing, videoConfig != nil else { return }
             guard checkPressure() else { return }
-            if needsKeyframe && !keyframe { counters.droppedFrames += 1; return }
+            if pressure.dropping || (needsKeyframe && !keyframe) { counters.droppedFrames += 1; return }
             if needsKeyframe { needsKeyframe = false }
             if baseNs == nil { baseNs = dtsNs; firstVideoPTS = ptsNs }
             guard dtsNs >= baseNs! else { counters.droppedFrames += 1; return }
-            media(type: 9, payload: FLVTags.video(avcc, ptsNs: ptsNs, dtsNs: dtsNs, keyframe: keyframe), time: timestamp(dtsNs))
+            media(type: 9, payload: FLVTags.video(avcc, ptsNs: ptsNs, dtsNs: dtsNs, keyframe: keyframe, baseNs: baseNs!), time: timestamp(dtsNs))
         }
     }
     func sendAudio(_ aac: Data, ptsNs: UInt64) {
@@ -124,9 +139,8 @@ final class RTMPPublisher {
     }
     private func checkPressure() -> Bool {
         if pendingMs > 6000 { reconnect("Upload stalled"); return false }
-        if pendingMs > 1500, !congested {
-            congested = true; needsKeyframe = true; onNeedKeyframe?()
-        } else if pendingMs <= 1500 { congested = false }
+        if pressure.update(pendingMs) { needsKeyframe = true; onNeedKeyframe?() }
+        if pressure.dropping { needsKeyframe = true }
         return true
     }
     private func safe(_ text: String) -> String {
@@ -145,12 +159,17 @@ final class RTMPPublisher {
         let token = generation
         parser = RTMPDechunker(); handshake = Data(); handshaking = true
         outChunkSize = 128; streamId = 0; transaction = 5; baseNs = nil; firstVideoPTS = nil
-        needsKeyframe = true; congested = false; pendingBytes = 0
+        needsKeyframe = true; pressure = RTMPPressure(); pendingBytes = 0
+        lastMediaTimestamp = 0; awaited = (1, "connect")
         received = 0; lastAcknowledged = 0; window = 0
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
         let parameters = NWParameters(tls: endpoint.scheme == "rtmps" ? NWProtocolTLS.Options() : nil, tcp: tcp)
         let host = endpoint.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        let c = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: UInt16(endpoint.port))!, using: parameters)
+        guard let rawPort = UInt16(exactly: endpoint.port), rawPort > 0,
+              let port = NWEndpoint.Port(rawValue: rawPort) else {
+            active = false; transition(.failed("Invalid RTMP port")); return
+        }
+        let c = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
         connection = c
         transition(.connecting)
         log("RTMP connecting to " + safe(endpoint.host + "/" + endpoint.app))
@@ -163,7 +182,7 @@ final class RTMPPublisher {
                 var hello = Data([3]); hello.append(Data(repeating: 0, count: 8))
                 hello.append(contentsOf: (0..<1528).map { _ in UInt8.random(in: .min ... .max) })
                 self.send(hello); self.receive(token)
-            case .failed: self.reconnect("Transport failed")
+            case .failed(let error), .waiting(let error): self.reconnect("TCP/TLS: \(error)")
             default: break
             }
         }
@@ -206,7 +225,8 @@ final class RTMPPublisher {
                     }
                 }
                 guard self.generation == token, self.active else { return }
-                if error != nil || complete { self.reconnect("Connection closed") }
+                if let error { self.reconnect("Receive: \(error)") }
+                else if complete { self.reconnect("Connection closed") }
                 else { self.receive(token) }
             } catch { self.reconnect("Malformed server response") }
         }
@@ -226,36 +246,48 @@ final class RTMPPublisher {
             case 6:
                 let size = try r.uint(4); _ = try r.uint(1)
                 control(5, value: UInt32(size))
-            case 20: try reply(AMF0.decode(message.payload))
+            case 20:
+                do { try reply(AMF0.decode(message.payload)) }
+                catch {
+                    let prefix = try? AMF0.decode(message.payload, limit: 2)
+                    let name = prefix?.first?.string
+                    let tid = prefix.flatMap { $0.count > 1 ? $0[1].number : nil }
+                    if let awaited, ((name == "_result" || name == "_error") && tid == awaited.id) || (name == "onStatus" && awaited.id == 5) {
+                        reconnect("Malformed " + awaited.stage + " response")
+                    }
+                }
             default: break
             }
         }
     }
     private func reply(_ values: [AMFValue]) throws {
         guard let name = values.first?.string else { return }
+        guard ["_result", "_error", "onStatus"].contains(name) else { return }
         let tid = values.count > 1 ? values[1].number : nil
+        if name == "_error", ![1.0, 4, 5].contains(tid ?? -1) { return }
         let info = values.compactMap { $0.properties }.last ?? [:]
         let code = info["code"]?.string ?? ""
         if name == "_error" || code.contains("Rejected") ||
             (code.hasPrefix("NetStream.Publish.") && code != "NetStream.Publish.Start") ||
             (code.hasPrefix("NetConnection.Connect.") && code != "NetConnection.Connect.Success") {
             let description = safe(info["description"]?.string ?? "Server rejected publishing")
-            if code.contains("BadName") || code.contains("Rejected") {
+            if !hasPublished && (code.contains("BadName") || code.contains("Rejected")) {
                 active = false; timeout?.cancel(); generation += 1; connection?.cancel(); connection = nil; pendingBytes = 0
                 transition(.failed(description))
             } else { reconnect(description) }
             return
         }
         if name == "_result", tid == 1, streamId == 0 {
+            awaited = (4, "createStream"); armTimeout("createStream")
             command([.string("releaseStream"), .number(2), .null, .string(streamKey)])
             command([.string("FCPublish"), .number(3), .null, .string(streamKey)])
             command([.string("createStream"), .number(4), .null])
         } else if name == "_result", tid == 4, values.count > 3 {
             guard let id = values[3].number, id.isFinite, id > 0, id <= Double(UInt32.max), id.rounded() == id else { throw RTMPError.malformed }
-            streamId = UInt32(id); armTimeout("publish")
+            streamId = UInt32(id); awaited = (5, "publish"); armTimeout("publish")
             command([.string("publish"), .number(5), .null, .string(streamKey), .string("live")], stream: streamId)
         } else if name == "onStatus", code == "NetStream.Publish.Start", streamId != 0, state != .publishing {
-            timeout?.cancel(); attempt = 0
+            timeout?.cancel(); attempt = 0; awaited = nil; hasPublished = true
             sendMessage(RTMPMessage(chunkStreamId: 5, type: 18, streamId: streamId, payload: AMF0.encode([
                 .string("@setDataFrame"), .string("onMetaData"), .ecmaArray([
                     "width": .number(Double(metadata.width)), "height": .number(Double(metadata.height)),
@@ -279,6 +311,7 @@ final class RTMPPublisher {
     }
     private func media(type: UInt8, payload: Data, time: UInt32) {
         guard payload.count <= 0xFFFFFF else { return }
+        lastMediaTimestamp = time
         sendMessage(RTMPMessage(chunkStreamId: type == 9 ? 6 : 4, timestamp: time, type: type, streamId: streamId, payload: payload))
     }
     private func sendMessage(_ message: RTMPMessage) { send(chunks(for: message, chunkSize: outChunkSize)) }
@@ -289,7 +322,8 @@ final class RTMPPublisher {
         c.send(content: data, completion: .contentProcessed { [weak self] error in
             guard let self, self.generation == token else { return }
             self.pendingBytes -= Int64(data.count)
-            if error != nil { self.reconnect("Send failed"); return }
+            if let error { self.reconnect("Send: \(error)"); return }
+            _ = self.checkPressure()
             self.counters.bytesSent += Int64(data.count)
             let now = ProcessInfo.processInfo.systemUptime
             self.confirmed.removeAll { $0.0 < now - 3 }
@@ -302,6 +336,7 @@ final class RTMPPublisher {
         timeout?.cancel(); generation += 1; connection?.cancel(); connection = nil; pendingBytes = 0
         attempt += 1; counters.reconnects += 1
         let delay = [1.0, 2, 4, 8, 15, 30][min(attempt - 1, 5)]
+        counters.lastError = safe(reason)
         log("RTMP " + safe(endpoint.host) + ": " + safe(reason))
         transition(.reconnecting(attempt: attempt, inSeconds: delay))
         let token = generation
@@ -312,4 +347,14 @@ final class RTMPPublisher {
     }
 
     deinit { timeout?.cancel(); retry?.cancel(); connection?.cancel() }
+}
+
+// Hysteresis prevents an IDR from reopening the gate while the upload is still backed up.
+struct RTMPPressure {
+    private(set) var dropping = false
+    mutating func update(_ pendingMs: Double) -> Bool {
+        if pendingMs > 1500 { dropping = true }
+        else if dropping && pendingMs < 750 { dropping = false; return true }
+        return false
+    }
 }
