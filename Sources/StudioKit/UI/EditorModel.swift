@@ -61,12 +61,20 @@ final class EditorModel: ObservableObject {
         let old = project
         var p = project; f(&p)
         guard p != old else { return }
+        // Existing layout controls edit the default scene while plan 31 supplies scene selection.
+        if p.wide != old.wide || p.vertical != old.vertical {
+            if !p.scenes.isEmpty {
+                let template = p.defaultScene
+                if p.wide != old.wide { p.scenes[0].wide = template.wide }
+                if p.vertical != old.vertical { p.scenes[0].vertical = template.vertical }
+            }
+        }
         project = p
         doc.project = p
         dirty = true
         scheduleSave()
-        if p.game != old.game || p.camera != old.camera || p.mic != old.mic { rebuild() }
-        else if p.wide != old.wide || p.vertical != old.vertical || p.cameraMirror != old.cameraMirror { restyle() }
+        if p.game != old.game || p.camera != old.camera || p.mic != old.mic || p.timeline.segments != old.timeline.segments { rebuild() }
+        else if p.wide != old.wide || p.vertical != old.vertical || p.cameraMirror != old.cameraMirror || p.scenes != old.scenes || p.timeline != old.timeline { restyle() }
         if p.trimStartMs != old.trimStartMs || p.trimEndMs != old.trimEndMs { applyTrim() }
     }
 
@@ -99,7 +107,7 @@ final class EditorModel: ObservableObject {
         let keep = player.currentTime()
         Task {
             do {
-                let b = try await CompositionBuilder.build(doc, canvas: canvas, resolution: .hd, range: range, trimmed: false)
+                let b = try await CompositionBuilder.build(doc, canvas: canvas, resolution: .hd, range: range, ignoreCuts: true)
                 await MainActor.run {
                     guard gen == self.buildGen else { return }
                     self.built = b
@@ -144,6 +152,25 @@ final class EditorModel: ObservableObject {
     }
     func setIn() { let t = time; update { $0.trimStartMs = t * 1000; if $0.trimEndMs > 0 && $0.trimEndMs <= $0.trimStartMs { $0.trimEndMs = 0 } } }
     func setOut() { let t = time; update { $0.trimEndMs = t * 1000; if $0.trimStartMs >= $0.trimEndMs { $0.trimStartMs = 0 } } }
+
+    func split() {
+        update { p in
+            var map = TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
+            let frameMs = 1000 / max(1, p.fps)
+            map.split(atSourceMs: (time * 1000 / frameMs).rounded() * frameMs)
+            p.timeline.segments = map.storedSegments
+        }
+    }
+    func deleteSection() {
+        update { p in
+            // In/Out selects the range to remove; it must not first restrict the kept ranges to that selection.
+            var map = TimeMap(segments: p.timeline.segments, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
+            map.remove(sourceRange: Segment(startMs: trimStart * 1000, endMs: trimEnd * 1000))
+            p.timeline.segments = map.storedSegments
+            p.trimStartMs = 0; p.trimEndMs = 0
+        }
+    }
+    func addZoom() { let s = time * 1000; update { $0.timeline.zooms.append(ZoomBlock(startMs: s, endMs: min($0.durationMs, s + 3000))) } }
 
     // Export
 
