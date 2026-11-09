@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import VideoToolbox
 
 // MARK: - Export
 
