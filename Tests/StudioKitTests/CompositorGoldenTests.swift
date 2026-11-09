@@ -143,12 +143,12 @@ final class CompositorGoldenTests: XCTestCase {
         func near(_ a: [Float], _ b: [Float], _ what: String) { for (u, v) in zip(a, b) { XCTAssertEqual(u,v,accuracy:0.002,what) } }
         near(px(sdr["color"],2,4),[0.2,0.4,0.6],"opaque color layer")
         // Half-alpha orange over its own full-strength shadow (0.45): cc·a + bg·(1 − a)(1 − s).
-        near(px(sdr["color"],11,4),[0.5+0.9*0.275,0.25+0.85*0.275,0.2*0.275],"half-alpha color with shadow over background")
+        near(px(sdr["color"],11,4),[Float(0.5+0.9*0.275),Float(0.25+0.85*0.275),Float(0.2*0.275)],"half-alpha color with shadow over background")
         near(px(sdr["color"],0,0),[0.9,0.85,0.2],"background")
         let screenOnly = try JSONDecoder().decode([Float].self,from:Data(contentsOf:XCTUnwrap(Bundle.module.url(forResource:"screenOnly-2",withExtension:"json",subdirectory:"Fixtures/golden"))))
         let a: Float = 128.0/255
         near(px(sdr["rgba"],5,3),zip(px(screenOnly,5,3),[1,0,0]).map { $0 * (1-a) + $1 * a },"premultiplied red at half alpha over game")
-        near(px(sdr["rgba"],10,5),[0,64.0/255,0],"opaque rgba texel")
+        near(px(sdr["rgba"],10,5),[0,Float(64.0/255),0],"opaque rgba texel")
         near(px(sdr["rgba"],1,1),px(screenOnly,1,1),"game outside the image layer")
     }
 }

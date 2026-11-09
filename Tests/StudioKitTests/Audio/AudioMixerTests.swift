@@ -24,15 +24,19 @@ final class AudioMixerTests: XCTestCase {
         var squaredError = 0.0; var missesAtOne = 0
         var lagSum = 0.0; var lagCount = 0
         mixer.onBlock = { (p: UnsafePointer<Float>, frames: Int, start: UInt64) -> Void in
-            XCTAssertEqual(start, input.startNs! + UInt64(Double(outputFrames) * 1e9 / 48000))
+            let elapsedNs: Double = Double(outputFrames) * 1e9 / 48000
+            let expectedStart: UInt64 = input.startNs! + UInt64(elapsedNs)
+            XCTAssertEqual(start, expectedStart)
             for i in 0..<frames {
                 if let previous, outputFrames > 48000 { maxStep = max(maxStep, abs(p[i * 2] - previous)) }
                 previous = p[i * 2]
-                let expected = 0.2 * sin(2 * .pi * 440 * Double(outputFrames + i) / 48000)
-                squaredError += pow(Double(p[i * 2]) - expected, 2)
+                let phase: Double = 2 * Double.pi * 440 * Double(outputFrames + i) / 48000
+                let diff: Double = Double(p[i * 2]) - 0.2 * sin(phase)
+                squaredError += diff * diff
             }
             if Double(outputFrames) > min(60, seconds / 2) * 48000, let position = input.readPosition {
-                let expected = (Double(start - self.origin) / 1e9 + Double(frames) / 48000) * rate
+                let blockEnd: Double = Double(start - self.origin) / 1e9 + Double(frames) / 48000
+                let expected: Double = blockEnd * rate
                 lagSum += abs(position - expected) / rate * 1000; lagCount += 1
                 XCTAssertEqual(input.driftPPM, ppm, accuracy: 50)
             }
