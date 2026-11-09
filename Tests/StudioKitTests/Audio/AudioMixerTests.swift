@@ -23,7 +23,7 @@ final class AudioMixerTests: XCTestCase {
         var next = 0; var outputFrames = 0; var maxStep: Float = 0; var previous: Float?
         var squaredError = 0.0; var missesAtOne = 0
         var lagSum = 0.0; var lagCount = 0
-        mixer.onBlock = { p, frames, start in
+        mixer.onBlock = { (p: UnsafePointer<Float>, frames: Int, start: UInt64) -> Void in
             XCTAssertEqual(start, input.startNs! + UInt64(Double(outputFrames) * 1e9 / 48000))
             for i in 0..<frames {
                 if let previous, outputFrames > 48000 { maxStep = max(maxStep, abs(p[i * 2] - previous)) }
@@ -93,7 +93,7 @@ final class AudioMixerTests: XCTestCase {
         let values = (0..<1440).flatMap { i in [Float(i) / 10000, Float(i) / 10000] }
         values.withUnsafeBufferPointer { input.push($0.baseAddress!, frames: 1440, endHostNs: ns(1439)) }
         var blocks = 0
-        mixer.onBlock = { p, _, _ in
+        mixer.onBlock = { (p: UnsafePointer<Float>, _: Int, _: UInt64) -> Void in
             if blocks == 0 { XCTAssertEqual(p[200], 0) }
             if blocks == 1 { XCTAssertEqual(p[200], 0.01, accuracy: 0.00001) }
             blocks += 1
