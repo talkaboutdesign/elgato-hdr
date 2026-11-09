@@ -42,6 +42,10 @@ final class DemoSource {
             }
         }
         background = bg
+        // Fault in all slots before pacing starts, so first-use VM work cannot delay a frame.
+        bg.withUnsafeBytes { bytes in
+            for slot in 0..<shmSlots { memcpy(memory + slot * shmSlotBytes, bytes.baseAddress!, width * height * 3) }
+        }
         queue.setSpecific(key: queueKey, value: true)
     }
 
@@ -67,11 +71,13 @@ final class DemoSource {
         let y = dst.assumingMemoryBound(to: UInt16.self)
         let c = y + width * height
         func rect(_ x: Int, _ top: Int, _ w: Int, _ h: Int, _ code: UInt16) {
+            let luma = (code << 6).littleEndian, neutral = UInt16(512 << 6).littleEndian
             for row in top..<min(height, top+h) {
-                for col in x..<min(width, x+w) { y[row * width + col] = code << 6 }
+                (y + row * width + x).update(repeating: luma, count: min(width, x+w)-x)
             }
+            let left = x/2*2, right = min(width, (x+w+1)/2*2)
             for row in top/2..<min(height/2, (top+h+1)/2) {
-                for col in stride(from: x/2*2, to: min(width, (x+w+1)/2*2), by: 2) { c[row*width+col] = 512 << 6; c[row*width+col+1] = 512 << 6 }
+                (c + row * width + left).update(repeating: neutral, count: right-left)
             }
         }
         let phase = Double(frame) / fps
