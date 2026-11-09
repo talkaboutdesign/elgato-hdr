@@ -15,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var shm: UnsafeMutableRawPointer?
     var demoSource: DemoSource?
     let demoCamera = CommandLine.arguments.contains("--demo-camera")
+    let streamMixer = AudioMixer()
+    var streamSession: StreamSession?
+    var streamItem: NSMenuItem?
     var session: Session?
     var modeIndex = min(max(UserDefaults.standard.integer(forKey: "mode"), 0), modes.count - 1)   // also accepts `-mode N` on the command line
     var colorMode = ColorMode(rawValue: UserDefaults.standard.string(forKey: "color") ?? "pq") ?? .pq
@@ -85,11 +88,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         buildMenu()
         setTitle("connecting…")
         if CommandLine.arguments.contains("--no-capture") { setTitle("capture off (--no-capture)") } else { start() }
+        let micInput = streamMixer.addInput("mic")
+        camera.onMicAudio = { buffer, ns in micInput.push(buffer, endHostNs: ns) }
         if demoCamera { camera.injectDemo(); applyOverlay() }
         if !demoCamera && cameraID != nil { camera.setCamera(uniqueID: cameraID) { [weak self] e in self?.deviceResult(e) } }
         if !demoCamera && micID != nil { camera.setMicrophone(uniqueID: micID) { [weak self] e in self?.deviceResult(e) } }
         if CommandLine.arguments.contains("--fullscreen") { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.window.toggleFullScreen(nil) } }
         if CommandLine.arguments.contains("--library") { showLibrary() }
+        scheduleStreaming()
         #if DEBUG
         DebugSnapshots.start()
         #endif
@@ -115,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func start() {
+        endStream()
         if recorder != nil { stopRecording() }
         if demoSource != nil, session != nil { return }
         session?.stop(); session = nil
@@ -154,6 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             renderer.resetPacing()
             let s = Session(fd: fd, renderer: renderer, shm: shm)
             s.audio = self.audio
+            let gameInput = self.streamMixer.addInput("game")
+            s.onGameAudio = { bytes, count, ns in gameInput.pushInt16Stereo(bytes, byteCount: count, endHostNs: ns) }
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
                 if let r = info.range(of: #"([0-9.]+) fps"#, options: .regularExpression), let v = Double(info[r].dropLast(4)) { self?.measuredFps = v }
                 if let self = self, s.w > 0 {
@@ -169,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func windowWillClose(_ n: Notification) {
         guard (n.object as? NSWindow) === window else { return }
         if recorder != nil { stopRecording() }
+        endStream()
         session?.stop(); session = nil
         audio.stop()
     }
@@ -182,9 +192,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        endStream()
         guard recorder != nil else { return .terminateNow }
         finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }
-    func applicationWillTerminate(_ n: Notification) { session?.stop(); demoSource?.stop() }
+    func applicationWillTerminate(_ n: Notification) { endStream(); session?.stop(); demoSource?.stop() }
 }

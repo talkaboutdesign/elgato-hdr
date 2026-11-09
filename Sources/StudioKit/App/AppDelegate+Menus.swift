@@ -61,6 +61,8 @@ extension AppDelegate {
         recMenu.addItem(withTitle: "Show Recordings in Finder", action: #selector(showRecordings), keyEquivalent: "")
         recItem.submenu = recMenu
 
+        addStreamMenu(to: main)
+
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Show Live View", action: #selector(showLiveView), keyEquivalent: "0")
