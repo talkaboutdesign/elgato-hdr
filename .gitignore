@@ -6,3 +6,5 @@ tools/*
 !tools/*.swift
 !tools/*.py
 .DS_Store
+
+.build/

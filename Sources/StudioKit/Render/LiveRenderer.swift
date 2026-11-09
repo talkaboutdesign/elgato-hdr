@@ -1,0 +1,234 @@
+import AppKit
+import AVFoundation
+import CoreMedia
+import CoreVideo
+import VideoToolbox
+import Metal
+import QuartzCore
+
+// MARK: - Live renderer (P010 -> PQ/HLG/709 RGB, zero-copy from shared memory, facecam composited on top)
+
+/// What the live view draws over the game: the facecam window as positioned by the user.
+struct LiveOverlay {
+    var camera: CameraCapture?
+    var placement = CameraPlacement()
+    var mirror = false
+}
+
+final class Renderer: NSObject {
+    let device: MTLDevice
+    let queue: MTLCommandQueue
+    let layer: CAMetalLayer
+    private var _overlay = LiveOverlay()
+    var overlay: LiveOverlay { get { lock.lock(); defer { lock.unlock() }; return _overlay } set { lock.lock(); _overlay = newValue; lock.unlock() } }
+    var slotBuffers: [MTLBuffer] = []
+    var shmTextures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<40 | w<<20 | h
+    var colorMode: ColorMode = .pq { didSet { applyColor() } }
+    var presentation: Presentation = .smooth { didSet { layer.displaySyncEnabled = presentation != .immediate; resetPacing() } }
+
+    // Game mode: frames drawn on arrival with vsync; dropped only if three drawables are already waiting for the screen.
+    var gameQueued = 0
+
+    // App-owned texture ring: frames are blitted here on arrival so shared-memory slots can be reused freely.
+    static let ringSize = 8
+    var ring: [(MTLTexture, MTLTexture)] = []
+    var ringW = 0, ringH = 0, ringNext = 0
+    struct Queued { let ring: Int; let target: Double; let arrival: Double }
+    var pending: [Queued] = []
+    let lock = NSLock()
+
+    // Pacing: fixed vsync grid, k refreshes per source frame, lead budget for jitter.
+    var displayLink: CADisplayLink?
+    var refresh = 1.0 / 60
+    var grid0 = 0.0, nextTarget = 0.0, period = 0.0, lastArrival = 0.0
+    var lastTarget = 0.0, slips = 0, pacingDrops = 0
+    let minLead = 0.030, leadTarget = 0.034
+
+    // stats
+    var latSum = 0.0, latMax = 0.0, latN = 0, lastPresented = 0.0
+    var hist = [Int](repeating: 0, count: 6)
+    var arrHist = [Int](repeating: 0, count: 6)   // |arrival delta - period| in 4 ms buckets
+    var lastTick = 0.0, tickGaps = 0
+
+    init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer) {
+        let core = MetalCore.shared
+        let dev = core.device
+        device = dev; queue = core.queue; self.layer = layer
+        _ = core.pipeline("compositeFrag", .rgb10a2Unorm)   // compile up front, not on the first frame
+        for i in 0..<shmSlots {
+            guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: nil) else { log("no-copy buffer failed"); return nil }
+            slotBuffers.append(b)
+        }
+        super.init()
+        layer.device = dev
+        layer.pixelFormat = .rgb10a2Unorm
+        layer.framebufferOnly = true
+        layer.isOpaque = true
+        layer.presentsWithTransaction = false
+        layer.maximumDrawableCount = 3
+        layer.displaySyncEnabled = true
+        layer.backgroundColor = NSColor.black.cgColor
+        applyColor()
+    }
+
+    func attachDisplayLink(view: NSView) {
+        displayLink?.invalidate()
+        let link = view.displayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    func applyColor() {
+        switch colorMode {
+        case .pq:
+            layer.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
+            layer.wantsExtendedDynamicRangeContent = true
+            layer.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005, maxLuminance: 1000, opticalOutputScale: 10000)
+        case .hlg:
+            layer.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_HLG)
+            layer.wantsExtendedDynamicRangeContent = true
+            layer.edrMetadata = CAEDRMetadata.hlg
+        case .sdr:
+            layer.colorspace = CGColorSpace(name: CGColorSpace.itur_709)
+            layer.wantsExtendedDynamicRangeContent = false
+            layer.edrMetadata = nil
+        }
+    }
+
+    func shmTextures(slot: Int, w: Int, h: Int) -> (MTLTexture, MTLTexture)? {
+        let key = slot << 40 | w << 20 | h
+        if let t = shmTextures[key] { return t }
+        let yd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
+        yd.usage = .shaderRead; yd.storageMode = .shared
+        let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: w / 2, height: h / 2, mipmapped: false)
+        cd.usage = .shaderRead; cd.storageMode = .shared
+        guard let y = slotBuffers[slot].makeTexture(descriptor: yd, offset: 0, bytesPerRow: w * 2),
+              let c = slotBuffers[slot].makeTexture(descriptor: cd, offset: w * h * 2, bytesPerRow: w * 2) else { return nil }
+        shmTextures[key] = (y, c); return (y, c)
+    }
+
+    func ensureRing(w: Int, h: Int) {
+        if ringW == w && ringH == h && ring.count == Renderer.ringSize { return }
+        ring = []
+        for _ in 0..<Renderer.ringSize {
+            let yd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: w, height: h, mipmapped: false)
+            yd.usage = .shaderRead; yd.storageMode = .private
+            let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: w / 2, height: h / 2, mipmapped: false)
+            cd.usage = .shaderRead; cd.storageMode = .private
+            guard let y = device.makeTexture(descriptor: yd), let c = device.makeTexture(descriptor: cd) else { return }
+            ring.append((y, c))
+        }
+        ringW = w; ringH = h; ringNext = 0
+        lock.lock(); pending.removeAll(); lock.unlock()
+    }
+
+    func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); gameQueued = 0; lock.unlock() }
+
+    /// Reader thread: copy the shared-memory slot into the ring on the GPU and schedule it. Never blocks on drawables.
+    func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64) {
+        guard let (sy, sc) = shmTextures(slot: slot, w: w, h: h) else { return }
+        let a = Double(arrivalNs) / 1e9
+        if presentation == .immediate { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }
+        if presentation == .game { gameSubmit(y: sy, c: sc, w: w, h: h, arrival: a); return }
+        ensureRing(w: w, h: h)
+        guard ring.count == Renderer.ringSize, let cb = queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
+        let idx = ringNext; ringNext = (ringNext + 1) % Renderer.ringSize
+        blit.copy(from: sy, to: ring[idx].0); blit.copy(from: sc, to: ring[idx].1)
+        blit.endEncoding(); cb.commit()
+
+        lock.lock(); defer { lock.unlock() }
+        if lastArrival > 0 { let d = a - lastArrival; if d > 0.002 && d < 0.5 { if period > 0 { arrHist[min(5, Int(abs(d - period) / 0.004))] += 1 }; period = period == 0 ? d : period * 0.9 + d * 0.1 } }
+        lastArrival = a
+        // Schedule from THIS frame's arrival, snapped to the vsync grid. Arrival jitter is <4 ms, so a direct
+        // snap gives an even cadence with no accumulator that can run away. Monotonic guard keeps frames on
+        // distinct vsyncs; if the schedule ever falls too far behind wall time, it re-bases on arrival.
+        var t: Double
+        if grid0 == 0 {
+            t = a
+        } else {
+            t = grid0 + ((a + leadTarget - grid0) / refresh).rounded() * refresh
+            if t <= lastTarget + refresh * 0.5 { t = lastTarget + refresh; slips += 1 }   // collision: next vsync
+            if t < a { t = grid0 + ((a + leadTarget - grid0) / refresh).rounded(.up) * refresh }  // never in the past
+        }
+        lastTarget = t
+        pending.append(Queued(ring: idx, target: t, arrival: a))
+        while pending.count > Renderer.ringSize - 2 { pending.removeFirst(); pacingDrops += 1 }
+    }
+
+    /// Game mode, reader thread. Presented handlers only adjust the counter: they run under a Core Animation lock,
+    /// and arrive a refresh or two late, so they must not gate or trigger drawing.
+    func gameSubmit(y: MTLTexture, c: MTLTexture, w: Int, h: Int, arrival: Double) {
+        lock.lock()
+        if gameQueued >= 3 { pacingDrops += 1; lock.unlock(); return }
+        gameQueued += 1
+        lock.unlock()
+        let ok = drawNow(y: y, c: c, w: w, h: h, arrival: arrival, onPresented: { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock(); self.gameQueued = max(0, self.gameQueued - 1); self.lock.unlock()
+        })
+        if !ok { lock.lock(); gameQueued = max(0, gameQueued - 1); lock.unlock() }
+    }
+
+    /// Display link (main thread), once per vsync: present the frame due at this vsync, if any.
+    @objc func tick(_ link: CADisplayLink) {
+        let T = link.targetTimestamp
+        lock.lock()
+        if lastTick > 0 && T - lastTick > refresh * 1.5 { tickGaps += 1 }; lastTick = T
+        refresh = max(1.0 / 240, link.targetTimestamp - link.timestamp)
+        if grid0 == 0 { grid0 = T }
+        if presentation == .game { lock.unlock(); return }
+        var chosen: Queued? = nil
+        while let f = pending.first, f.target <= T + refresh * 0.5 {
+            if chosen != nil { pacingDrops += 1 }
+            chosen = f; pending.removeFirst()
+        }
+        lock.unlock()
+        guard let f = chosen, f.ring < ring.count else { return }
+        drawNow(y: ring[f.ring].0, c: ring[f.ring].1, w: ringW, h: ringH, arrival: f.arrival)
+    }
+
+    @discardableResult
+    func drawNow(y yT: MTLTexture, c cT: MTLTexture, w: Int, h: Int, arrival: Double, onPresented: (() -> Void)? = nil) -> Bool {
+        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
+        let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
+        let scale = min(dw / Double(w), dh / Double(h))
+        let vw = Double(w) * scale, vh = Double(h) * scale
+        // Game passes through untouched in its own encoding; only the facecam is converted into it.
+        let ov = overlay
+        var cam: (MTLTexture, MTLTexture)?, camSize: CGSize?, keep: [CVMetalTexture] = [], camBits: Int32 = 8
+        if let pb = ov.camera?.latest, let p = MetalCore.shared.planes(pb) {
+            cam = (p.0, p.1); keep = p.2; camBits = p.3
+            camSize = CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb))
+        }
+        var params = LayoutMath.params(layout: CanvasLayout(kind: .pip, camera: ov.placement), canvas: CGSize(width: vw, height: vh),
+                                       screen: CGSize(width: w, height: h), camera: camSize, mirror: ov.mirror,
+                                       screenTransfer: colorMode.transfer, outTransfer: colorMode.transfer)
+        params.fmt.z = 10; params.fmt.w = camBits
+        MetalCore.shared.encodeComposite(cb, target: drawable.texture,
+                                         viewport: MTLViewport(originX: (dw - vw) / 2, originY: (dh - vh) / 2, width: vw, height: vh, znear: 0, zfar: 1),
+                                         screen: (yT, cT), camera: cam, params: params)
+        if !keep.isEmpty { cb.addCompletedHandler { _ in _ = keep } }
+        drawable.addPresentedHandler { [weak self] d in
+            defer { onPresented?() }
+            guard let self = self, d.presentedTime > 0 else { return }
+            self.lock.lock()
+            let lat = d.presentedTime - arrival
+            self.latSum += lat; self.latMax = max(self.latMax, lat); self.latN += 1
+            if self.lastPresented > 0 { let r = Int(((d.presentedTime - self.lastPresented) / self.refresh).rounded()); self.hist[min(max(r, 0), 5)] += 1 }
+            self.lastPresented = d.presentedTime
+            self.lock.unlock()
+        }
+        cb.present(drawable)
+        cb.commit()
+        return true
+    }
+
+    func takeStats() -> (avgMs: Double, maxMs: Double, n: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let r = (latN > 0 ? latSum / Double(latN) * 1000 : 0, latMax * 1000, latN)
+        log(String(format: "pacing [%@] (refresh units 0..5+): %@  k=%d period=%.2f ms refresh=%.2f ms slips=%d drops=%d queue=%d  arrival-jitter(4ms buckets)=%@ tickGaps=%d", presentation.rawValue, hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, refresh * 1000, slips, pacingDrops, pending.count, arrHist.description, tickGaps))
+        slips = 0; pacingDrops = 0; arrHist = [Int](repeating: 0, count: 6); tickGaps = 0
+        latSum = 0; latMax = 0; latN = 0; hist = [Int](repeating: 0, count: 6)
+        return r
+    }
+}
