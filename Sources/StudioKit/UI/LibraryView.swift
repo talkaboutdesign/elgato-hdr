@@ -86,7 +86,7 @@ struct LibraryView: View {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 340), spacing: 20, alignment: .top)], alignment: .leading, spacing: 24) {
                         ForEach(filtered) { doc in
-                            ProjectCard(doc: doc, selected: selection == doc.dir)
+                            ProjectCard(doc: doc, project: doc.project, selected: selection == doc.dir)
                                 .onTapGesture(count: 2) { EditorWindows.shared.open(doc) }
                                 .simultaneousGesture(TapGesture().onEnded { selection = doc.dir })
                                 .contextMenu { menu(for: doc) }
@@ -133,12 +133,13 @@ struct LibraryView: View {
 
 struct ProjectCard: View {
     let doc: ProjectDoc
+    let project: Project   // by value: ProjectDoc compares by folder only, so SwiftUI would skip state changes (recovery)
     let selected: Bool
     @State private var thumb: NSImage?
     @State private var hover = false
 
     var body: some View {
-        let p = doc.project
+        let p = project
         VStack(alignment: .leading, spacing: 8) {
             ZStack {
                 Rectangle().fill(Color.black.opacity(0.85))
@@ -151,6 +152,7 @@ struct ProjectCard: View {
                 HStack(spacing: 4) {
                     if p.color != .sdr { Badge(text: p.color == .pq ? "HDR" : "HLG") }
                     if p.state == "recording" { Badge(text: "RECOVERING", tint: .orange) }
+                    if p.state == "damaged" { Badge(text: "DAMAGED", tint: .red) }
                     if !p.lastExport.isEmpty { Badge(text: "EXPORTED", tint: .green) }
                 }.padding(8)
             }
@@ -175,7 +177,7 @@ struct ProjectCard: View {
         .animation(.easeOut(duration: 0.15), value: hover)
         .onHover { hover = $0 }
         .contentShape(Rectangle())
-        .task(id: "\(doc.dir.path)/\(p.durationMs)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+.task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
     }
 }
 
