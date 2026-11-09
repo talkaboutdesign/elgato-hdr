@@ -34,6 +34,14 @@ swift test                          # unit tests, must pass before you open a pu
 - Keep `project.json` backward compatible: decode with the lenient `c.v(key, fallback)` helper, add fields, do not
   rename or remove them without a migration and a fixture test.
 
+**Older compiler on CI.** GitHub builds with Xcode 16.4 (Swift 6.1), which is stricter and slower at type inference
+than the Swift on the development machine. Code that compiles locally has failed there three ways so far: a missing
+framework import that a newer SDK pulled in transitively (import every framework whose symbols a file uses, for
+example `VideoToolbox` for `kVT…`), long arithmetic inside closures ("unable to type-check this expression in
+reasonable time": give closure parameters explicit types and split arithmetic into typed `let`s), and array literals
+mixing `Float` context with `Double` arithmetic (wrap in `Float(...)`). Check the CI result of your pull request and
+fix it before reporting done.
+
 **Proving your work**
 
 - Every plan ends with acceptance checks. Run them and paste the real output in the pull request. If a check fails
