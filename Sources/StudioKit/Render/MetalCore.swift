@@ -156,6 +156,16 @@ struct DrawLayer {
     static func pair(_ resolved: [ResolvedLayer], _ textures: [SourceKey: LayerTextures.Kind]) -> [DrawLayer] {
         resolved.compactMap { r in r.color != nil ? DrawLayer(resolved: r, textures: .none) : textures[r.key].map { DrawLayer(resolved: r, textures: $0) } }
     }
+
+    /// Fully opaque over all of `rect`.
+    func covers(_ rect: CGRect) -> Bool {
+        guard resolved.opacity >= 1, resolved.radius == 0, resolved.dst.contains(rect) else { return false }
+        switch textures {
+        case .biplanar: return true
+        case .rgba: return false
+        case .none: return (resolved.color?.w ?? 0) >= 1
+        }
+    }
 }
 
 extension ColorMode {
@@ -264,7 +274,8 @@ final class MetalCore {
         guard canvas.width > 0, canvas.height > 0 else { return }
         let vp = viewport ?? MTLViewport(originX: 0, originY: 0, width: Double(target.width), height: Double(target.height), znear: 0, zfar: 1)
         enc.setViewport(vp)
-        enc.setRenderPipelineState(pipeline("layerFrag", target.pixelFormat, blend: true))
+        let blended = pipeline("layerFrag", target.pixelFormat, blend: true)
+        enc.setRenderPipelineState(blended)
         let sx = vp.width / canvas.width, sy = vp.height / canvas.height
         func draw(_ u: LayerParams, area: CGRect, _ t0: MTLTexture, _ t1: MTLTexture) {
             func px(_ v: Double, _ limit: Int) -> Int { Int(min(max(v, 0), Double(limit))) }
@@ -281,10 +292,19 @@ final class MetalCore {
         var base = LayerParams()
         base.canvas = SIMD4(Float(canvas.width), Float(canvas.height), 0, 0)
         base.fmt.z = outTransfer
-        var bg = base
-        bg.dst = SIMD4(full); bg.color = background; bg.fmt.x = 2
-        draw(bg, area: full, blank8, blank8c)
-        for l in layers {
+        // Nothing beneath an opaque layer that covers the canvas can show, so start there (the live game usually
+        // does), and draw it without blending. Exact when canvas pixels are target pixels: every pixel centre then
+        // sits half a pixel inside the canvas, where such a layer's coverage and alpha are 1.
+        let aligned = vp.originX == vp.originX.rounded() && vp.originY == vp.originY.rounded() && vp.width == canvas.width && vp.height == canvas.height
+        let cover = aligned ? layers.lastIndex { $0.covers(full) } : nil
+        if cover == nil {
+            var bg = base
+            bg.dst = SIMD4(full); bg.color = background; bg.fmt.x = 2
+            draw(bg, area: full, blank8, blank8c)
+        }
+        let opaque = cover.map { _ in pipeline("layerFrag", target.pixelFormat) }
+        for (i, l) in layers.enumerated() where i >= cover ?? 0 {
+            if let o = opaque { enc.setRenderPipelineState(i == cover ? o : blended) }
             let r = l.resolved
             var u = base, t0 = blank8, t1 = blank8c
             u.dst = SIMD4(r.dst); u.src = SIMD4(r.src)

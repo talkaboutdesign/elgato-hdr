@@ -54,7 +54,7 @@ final class Renderer: NSObject {
         let core = MetalCore.shared
         let dev = core.device
         device = dev; queue = core.queue; self.layer = layer
-        _ = core.pipeline("layerFrag", .rgb10a2Unorm, blend: true)   // compile up front, not on the first frame
+        for blend in [false, true] { _ = core.pipeline("layerFrag", .rgb10a2Unorm, blend: blend) }   // compile up front, not on the first frame
         for i in 0..<shmSlots {
             guard let b = dev.makeBuffer(bytesNoCopy: shm + i * shmSlotBytes, length: shmSlotBytes, options: .storageModeShared, deallocator: demoSource.map { source in { _, _ in _ = source } }) else { log("no-copy buffer failed"); return nil }
             slotBuffers.append(b)
@@ -198,7 +198,7 @@ final class Renderer: NSObject {
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
         let scale = min(dw / Double(w), dh / Double(h))
         // Whole pixels: layer edges are anti-aliased, so a letterbox at a half-pixel offset would blend the game's
-        // outermost rows with the background.
+        // outermost rows with the background. Aligned, the game also takes encodeLayers' opaque path.
         let vw = (Double(w) * scale).rounded(), vh = (Double(h) * scale).rounded()
         // Game passes through untouched in its own encoding; only the facecam is converted into it.
         let ov = overlay, transfer = colorMode.transfer

@@ -72,6 +72,31 @@ final class CompositorGoldenTests: XCTestCase {
         }
     }
 
+    /// Layers under an opaque full-canvas layer are skipped; the picture must be the one drawing them would give.
+    func testOpaqueLayerHidesWhatIsBeneath() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("No Metal device") }
+        let (screen, camera) = sources()
+        func grid(gameOpacity: Double, transfer: Int32) -> [Float] {
+            let comp = Composition(background:[1,0,1,1],layers:[
+                Layer(source:LayerSource(type:"color",color:[0,1,0,1])),
+                Layer(source:.game,opacity:gameOpacity),
+                Layer(source:.camera,frame:NRect(x:0.6,y:0.5,w:0.3,h:0.4),roundness:0.2,shadow:true)])
+            let layers = DrawLayer.pair(SceneResolver.resolve(comp,canvas:Self.canvas,sources:[.game:SourceInfo(size:CGSize(width:64,height:36)),
+                                                                                                .camera:SourceInfo(size:CGSize(width:32,height:32))]),
+                                        [.game:.biplanar(y:screen.0,c:screen.1,bits:10,transfer:0,bt709:false),
+                                         .camera:.biplanar(y:camera.0,c:camera.1,bits:8,transfer:2,bt709:true)])
+            XCTAssertEqual(layers[1].covers(CGRect(origin:.zero,size:Self.canvas)),gameOpacity == 1)
+            return render { cb, target in
+                MetalCore.shared.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer:transfer,layers:layers)
+            }
+        }
+        for transfer: Int32 in 0...2 {
+            for (i,pair) in zip(grid(gameOpacity:1,transfer:transfer),grid(gameOpacity:0.9999,transfer:transfer)).enumerated() {
+                XCTAssertEqual(pair.0,pair.1,accuracy:0.002,"transfer \(transfer) channel \(i)")
+            }
+        }
+    }
+
     /// What the fixed layouts could not express. `RECORD_GOLDENS=1 swift test --filter CompositorGoldenTests/testLayerGoldens`
     /// records only these.
     func testLayerGoldens() throws {
