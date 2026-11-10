@@ -17,6 +17,8 @@ final class MetalView: NSView {
     var placement: (() -> CameraPlacement?)?
     var onPlacement: ((CameraPlacement) -> Void)?
     var contextMenu: (() -> NSMenu?)?
+    /// Pointer moved over the picture: the studio window shows its auto-hiding status pill.
+    var onMouseActivity: (() -> Void)?
     private enum Drag { case move(CGPoint, CameraPlacement), resize(CameraPlacement) }
     private var drag: Drag?
     private var hovering = false
@@ -73,7 +75,9 @@ final class MetalView: NSView {
         outline.isHidden = false
     }
 
+    override func mouseEntered(with e: NSEvent) { onMouseActivity?() }
     override func mouseMoved(with e: NSEvent) {
+        onMouseActivity?()
         let p = canvasPoint(e)
         let r = camRect()
         let inside = r.map { $0.insetBy(dx: -8, dy: -8).contains(p) } ?? false
