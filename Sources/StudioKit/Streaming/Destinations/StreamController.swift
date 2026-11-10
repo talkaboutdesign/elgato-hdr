@@ -10,6 +10,7 @@ protocol StreamSessionDriving: AnyObject {
     var onLaneError: ((Canvas, String) -> Void)? { get set }
     var onRecovery: ((Canvas) -> Void)? { get set }
     func replaceRenderer(_ renderer: Renderer)
+    func refreshLoad()
     var activeCanvases: [Canvas] { get }
     func start() -> Bool
     func stop()
@@ -17,6 +18,7 @@ protocol StreamSessionDriving: AnyObject {
     func addPublisher(_ publisher: RTMPPublisher, to output: StreamSession.Output) throws
     func removePublisher(_ publisher: RTMPPublisher)
 }
+extension StreamSessionDriving { func refreshLoad() {} }
 extension StreamSession: StreamSessionDriving {}
 
 final class StreamController {
@@ -66,6 +68,7 @@ final class StreamController {
     }
 
     var isActive: Bool { session != nil || pendingStart != nil }
+    func refreshLoad() { session?.refreshLoad() }
 
     func replaceRenderer(_ renderer: Renderer) {
         guard let session else { return }
@@ -399,6 +402,7 @@ final class StreamController {
     private func finish(reason: String?) {
         generation += 1
         pendingStart = nil; pendingSingle = [:]
+        state.reducedRates = [:]
         let s = session; session = nil
         for r in runtimes.values { r.publisher.onState = nil }
         runtimes = [:]
@@ -417,6 +421,7 @@ final class StreamController {
                              rateSkipped: stats.renderSkips.rateSkipped, contention: stats.renderSkips.contention,
                              capacity: stats.renderSkips.capacity, stale: stats.renderSkips.stale, gpu: stats.renderSkips.gpu,
                              inactive: stats.renderSkips.inactive, encoderDropped: stats.encoderDropped)
+        state.reducedRates = state.reducedRates.filter { session.activeCanvases.contains($0.key) }
         var canvases = state.canvases.filter { $0.canvas != stats.canvas && session.activeCanvases.contains($0.canvas) }
         canvases.append(c); canvases.sort { $0.canvas == .wide && $1.canvas == .vertical }
         if state.canvases != canvases { state.canvases = canvases }

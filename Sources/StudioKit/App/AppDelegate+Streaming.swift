@@ -15,7 +15,21 @@ extension AppDelegate {
         c.makeSession = { [weak self] outputs, settings in
             guard let self, let renderer = self.renderer else { return nil }
             self.streamMixer.addInput("mic").delayMs = settings.micDelayMs
-            return StreamSession(outputs: outputs, audioBitrate: settings.audioKbps * 1000, renderer: renderer, mixer: self.streamMixer)
+            let session = StreamSession(outputs: outputs, audioBitrate: settings.audioKbps * 1000, renderer: renderer, mixer: self.streamMixer)
+            session.loadPolicy.preference = settings.overloadPolicy
+            session.load = { [weak self] in
+                guard let self else { return (false, 0) }
+                return (self.recorder != nil, Double(self.session?.w ?? 0) * Double(self.session?.h ?? 0) * self.nominalFps)
+            }
+            session.onRateChange = { [weak self] canvas, divisor, fps in
+                guard let self else { return }
+                self.state.streaming.reducedRates[canvas] = divisor == 2 ? fps / 2 : nil
+                let name = canvas == .vertical ? "Vertical" : "Horizontal"
+                let message = divisor == 2 ? "\(name) stream at \(Int(fps / 2)) fps — the video encoder is at capacity" : "\(name) stream restored to \(Int(fps)) fps"
+                log(message)
+                self.toast(message, style: .warning)
+            }
+            return session
         }
         c.toast = { [weak self] text, detail, style in self?.toast(text, detail: detail, style: style) }
         c.onMicDelay = { [weak self] ms in self?.streamMixer.addInput("mic").delayMs = ms }

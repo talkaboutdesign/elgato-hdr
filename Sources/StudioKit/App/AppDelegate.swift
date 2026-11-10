@@ -121,13 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         DebugSnapshots.start()
         startDebugChecks()
-        if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]) {
+        #endif
+        if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]), secs.isFinite, secs > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 self?.startRecording()
                 DispatchQueue.main.asyncAfter(deadline: .now() + secs) { self?.stopRecording() }
             }
         }
-        #endif
     }
 
     var headless = false
@@ -138,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if info == "stream ended" { setConnection(.noSignal("The stream ended")); return }
         if info.hasPrefix("helper too old") { setConnection(.noSignal("The capture helper is out of date: quit and reopen the app")); return }
         guard let s = session, s.w > 0, let stats = StudioFormat.parseStats(info) else { return }
+        state.streaming.sourcePixelsPerSecond = Double(s.w) * Double(s.h) * nominalFps
         state.applyStats(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: stats.fps, nominal: nominalFps), latencyMs: stats.latencyMs, demo: demoSource != nil)
     }
 

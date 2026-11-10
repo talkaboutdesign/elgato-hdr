@@ -97,8 +97,8 @@ extension AppDelegate {
             camera.attach(camera: camWriter, mic: micWriter)
             let doc = ProjectDoc(dir: dir, project: proj); doc.save()
             recDoc = doc; AppDelegate.activeRecordingDir = dir
-            recorder = r; s.recorder = r; recStart = Date()
-            state.recording = true; state.recordingElapsed = 0
+            recorder = r; streamController.refreshLoad(); s.recorder = r; recStart = Date()
+            state.streaming.recording = true; state.recording = true; state.recordingElapsed = 0
             state.recordingLayers = ["game"] + (camWriter != nil ? ["camera"] : []) + (micWriter != nil ? ["mic"] : [])
             refreshChecks()
             var ticks = 0
@@ -125,10 +125,10 @@ extension AppDelegate {
     func finishRecording(_ done: @escaping (RecordingOutcome) -> Void) {
         guard let r = recorder else { return }
         endSceneLog()
-        session?.recorder = nil; recorder = nil
+        session?.recorder = nil; recorder = nil; streamController.refreshLoad()
         camera.attach(camera: nil, mic: nil)
         recTimer?.invalidate(); recTimer = nil
-        state.recording = false; state.recordingElapsed = 0; state.recordingLayers = []
+        state.streaming.recording = false; state.recording = false; state.recordingElapsed = 0; state.recordingLayers = []
         refreshChecks()
         let doc = recDoc, cw = camWriter, mw = micWriter
         recDoc = nil; camWriter = nil; micWriter = nil

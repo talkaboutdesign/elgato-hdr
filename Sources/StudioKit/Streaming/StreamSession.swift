@@ -17,6 +17,27 @@ final class StreamSession {
     }
     /// A lane that could not start: only the destinations of that canvas are affected.
     struct LaneFailure: Error, Equatable, CustomStringConvertible { let description: String }
+    var loadPolicy = EncoderLoadPolicy()
+    var onRateChange: ((Canvas, Int, Double) -> Void)?
+    var load: () -> (recording: Bool, pixelsPerSecond: Double) = { (false, 0) }
+    private var previousLoad: String?
+    func refreshLoad() {
+        let value = load()
+        let signature = "\(value.recording):\(value.pixelsPerSecond):\(activeCanvases)"
+        guard previousLoad != signature else { return }
+        previousLoad = signature
+        let first = lanes.first
+        let initial = EncoderLoadPolicy.initialLane(recording: value.recording, sourcePixelsPerSecond: value.pixelsPerSecond,
+            lanes: lanes.count, resolution: Int(first.map { min($0.program.size.width, $0.program.size.height) } ?? 0),
+            fps: Int(first?.program.fps ?? 0), preference: loadPolicy.preference)
+        let old = loadPolicy.reduced
+        loadPolicy.loadChanged(initial: initial)
+        for lane in lanes {
+            let reduced = loadPolicy.reduced.contains(lane.canvas)
+            lane.program.setRateDivisor(reduced ? 2 : 1)
+            if old.contains(lane.canvas) != reduced { onRateChange?(lane.canvas, reduced ? 2 : 1, lane.program.fps) }
+        }
+    }
     var onStats: ((Stats) -> Void)?
     /// Failures that stop everything: no audio encoder, or no lane could start.
     var onError: ((String) -> Void)?
@@ -64,6 +85,7 @@ final class StreamSession {
         }
         running = true
         for (lane, output) in started { output.publishers.forEach { attach($0, to: lane) } }
+        refreshLoad()
         lanes.forEach { $0.program.start() }; renderer.programOutputs = lanes.map(\.program); mixer.start()
         var last = nowNs()
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -71,13 +93,20 @@ final class StreamSession {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let now = nowNs(), dt = Double(now - last) / 1e9; last = now
+            self.refreshLoad()
+            var rejected: [Canvas: Int] = [:]
             for lane in self.lanes {
                 let p = lane.program.takeStats(), e = lane.encoder.takeStats(), n = Double(max(1, e.frames))
+                rejected[lane.canvas] = e.queueRejected
                 let publishers = lane.publishers.snapshot.items
                 self.onStats?(Stats(canvas: lane.canvas, fps: Double(e.frames) / dt,
                     renderMs: p.renderMs / Double(max(1, p.frames)), encodeMs: e.encodeMs / n, latencyMs: e.latencyMs / n,
                     renderDropped: p.dropped, encoderDropped: e.dropped, publishers: publishers.map(\.stats),
                     publisherIDs: publishers.map(ObjectIdentifier.init), renderSkips: p, queueRejected: e.queueRejected, inFlightRejected: e.inFlightRejected, latency: e.latency))
+            }
+            if let canvas = self.loadPolicy.sample(rejections: rejected), let lane = self.lanes.first(where: { $0.canvas == canvas }) {
+                lane.program.setRateDivisor(2)
+                self.onRateChange?(canvas, 2, lane.program.fps)
             }
         }
         self.timer = timer; timer.resume()
@@ -98,6 +127,7 @@ final class StreamSession {
         lanes.forEach { $0.encoder.finish() }
         for lane in lanes { lane.publishers.snapshot.items.forEach { $0.onNeedKeyframe = nil; $0.stop() } }
         lanes = []; audioTargets.removeAll(); audio = nil
+        previousLoad = nil; loadPolicy.loadChanged()
     }
 
     /// Canvases currently rendering and encoding.
@@ -115,6 +145,7 @@ final class StreamSession {
         }
         guard let lane = makeLane(output) else { throw LaneFailure(description: Self.encoderUnavailable) }
         lanes.append(lane); attach(publisher, to: lane)
+        refreshLoad()
         lane.program.start(); renderer.programOutputs = lanes.map(\.program)
     }
 
@@ -128,6 +159,7 @@ final class StreamSession {
         lanes.remove(at: i)
         renderer.programOutputs = lanes.map(\.program)
         lane.program.stop(); lane.encoder.finish()
+        refreshLoad()
     }
 
     func invalidateEncoderForTesting(_ canvas: Canvas, fatal: Bool = false) {

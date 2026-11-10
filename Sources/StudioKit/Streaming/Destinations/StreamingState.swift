@@ -68,6 +68,17 @@ struct StreamActions {
 
 @Observable
 final class StreamingState {
+    var sourcePixelsPerSecond = 0.0
+    var recording = false
+    var goLiveSummary: String {
+        let canvases = Set(destinations.filter(\.enabled).map(\.canvas))
+        guard !canvases.isEmpty else { return "No destinations on" }
+        let names = canvases.count == 2 ? "horizontal and vertical" : canvases.contains(.vertical) ? "vertical" : "horizontal"
+        let initial = EncoderLoadPolicy.initialLane(recording: recording, sourcePixelsPerSecond: sourcePixelsPerSecond, lanes: canvases.count, resolution: settings.resolution, fps: settings.fps, preference: settings.overloadPolicy)
+        let suffix = initial.map { " · \($0 == .vertical ? "vertical" : "horizontal") at 30 fps while recording" } ?? ""
+        return "Streaming \(names) · \(uploadSummary)" + suffix
+    }
+    var reducedRates: [Canvas: Double] = [:]
     var encoderRecoveryEvents = 0
     var phase: StreamUIState = .idle
     var destinations: [Destination] = []

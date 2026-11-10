@@ -4,11 +4,17 @@ import CoreVideo
 import Metal
 
 struct FramePhase {
+    private(set) var rateDivisor = 1
+    mutating func setRateDivisor(_ divisor: Int) {
+        let next = max(1, divisor)
+        guard next != rateDivisor else { return }
+        rateDivisor = next; nextDue = nil
+    }
     var nextDue: Double?
     var last: UInt64?
     mutating func accept(_ ns: UInt64, fps: Double) -> Bool {
         if let last, ns <= last { return false }
-        let period = 1e9 / fps, time = Double(ns)
+        let period = 1e9 * Double(rateDivisor) / fps, time = Double(ns)
         let due = nextDue ?? time
         // Under half a period rejects alternate 120 Hz arrivals; 0.45 also tolerates a
         // first frame 4 ms late followed by a 3 ms early frame at 60 Hz.
@@ -89,6 +95,7 @@ final class ProgramOutput {
 
     }
     var isReady: Bool { slots.count == EncodeAdmission.inFlightLimit + 2 && (!nv12 || (intermediate != nil && conversion != nil)) }
+    func setRateDivisor(_ divisor: Int) { lock.lock(); phase.setRateDivisor(divisor); lock.unlock() }
     func start() {
         lock.lock(); defer { lock.unlock() }
         guard !active else { return }
