@@ -31,7 +31,7 @@ extension AppDelegate {
             outputs.append(output(canvas == .wide ? .vertical : .wide, endpoint))
         }
         let stream = StreamSession(outputs: outputs, audioBitrate: 160_000, renderer: renderer, mixer: streamMixer)
-        stream.onError = { error in log("stream: \(error)") }
+        stream.onError = { [weak self] error in log("stream: \(error)"); self?.endStream() }
         stream.onStats = { [weak self] stats in
             log(String(format: "stream %@: %.1f fps render %.3f ms encode %.3f ms callback %.3f ms dropped render=%d encoder=%d", stats.canvas.rawValue,
                        stats.fps, stats.renderMs, stats.encodeMs, stats.latencyMs, stats.renderDropped, stats.encoderDropped))
@@ -49,10 +49,18 @@ extension AppDelegate {
               let seconds = Double(args[i + 1]), seconds.isFinite, seconds > 0 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.goLive()
+            if let i = args.firstIndex(of: "--stream-restart-after"), i + 1 < args.count,
+               let delay = Double(args[i + 1]), delay > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.start() }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
                 self?.endStream()
-                // Termination drains any layered recording through the existing delegate path.
-                if args.contains("--demo-source") { NSApp.terminate(nil) }
+                // terminateLater enters a nested AppKit loop inside this dispatch callback. Finish first
+                // so the recording's main-queue completion can run before requesting termination.
+                if args.contains("--demo-source") {
+                    if self?.recorder != nil { self?.finishRecording { _ in NSApp.terminate(nil) } }
+                    else { NSApp.terminate(nil) }
+                }
             }
         }
     }

@@ -14,13 +14,19 @@ final class StreamSession {
     var onError: ((String) -> Void)?
     let mixer: AudioMixer
     var mic: MixerInput { mixer.addInput("mic") }
-    private let outputs: [Output], renderer: Renderer, audioBitrate: Int
+    private let outputs: [Output], audioBitrate: Int
+    private let rendererLock = NSLock()
+    private var currentRenderer: Renderer
+    private var renderer: Renderer {
+        get { rendererLock.lock(); defer { rendererLock.unlock() }; return currentRenderer }
+        set { rendererLock.lock(); currentRenderer = newValue; rendererLock.unlock() }
+    }
     private var programs: [ProgramOutput] = [], encoders: [VideoEncoder] = []
     private var timer: DispatchSourceTimer?
     private var running = false
 
     init(outputs: [Output], audioBitrate: Int, renderer: Renderer, mixer: AudioMixer) {
-        self.outputs = outputs; self.audioBitrate = audioBitrate; self.renderer = renderer; self.mixer = mixer
+        self.outputs = outputs; self.audioBitrate = audioBitrate; self.currentRenderer = renderer; self.mixer = mixer
     }
     /// Lifecycle and stats callbacks run on main; all media callbacks stay on their producer queues.
     @discardableResult func start() -> Bool {
@@ -33,16 +39,16 @@ final class StreamSession {
                 onError?("Hardware H.264 encoder unavailable"); return false
             }
             let program = ProgramOutput(canvas: output.canvas, size: output.size, fps: output.fps)
-            program.composition = { [weak renderer] in
-                let overlay = renderer?.overlay ?? LiveOverlay()
+            program.composition = { [weak self] in
+                let overlay = self?.renderer.overlay ?? LiveOverlay()
                 let layout = output.canvas == .wide ? CanvasLayout(kind: .pip, camera: overlay.placement) : .verticalDefault
                 return Composition.from(layout: layout, canvas: output.size, hasCamera: overlay.camera?.latest != nil, mirror: overlay.mirror)
             }
-            program.camera = { [weak renderer] in renderer?.overlay.camera?.latest }
+            program.camera = { [weak self] in self?.renderer.overlay.camera?.latest }
             program.onFrame = { [weak encoder] pb, ns in encoder?.encode(pb, hostNs: ns) }
             encoder.onConfig = { sps, pps in output.publishers.forEach { $0.setVideoConfig(sps: sps, pps: pps) } }
             encoder.onFrame = { bytes, ns, key in output.publishers.forEach { $0.sendVideo(bytes, ptsNs: ns, dtsNs: ns, keyframe: key) } }
-            encoder.onError = { [weak self] status in DispatchQueue.main.async { self?.onError?("H.264 encode failed (\(status))") } }
+            encoder.onError = { [weak self] status in DispatchQueue.main.async { self?.stop(); self?.onError?("H.264 recovery failed; stream ended (\(status))") } }
             for publisher in output.publishers { publisher.onNeedKeyframe = { [weak encoder] in encoder?.requestKeyframe() } }
             programs.append(program); encoders.append(encoder)
         }
@@ -68,6 +74,11 @@ final class StreamSession {
             }
         }
         self.timer = timer; timer.resume(); return true
+    }
+    func replaceRenderer(_ next: Renderer) {
+        renderer.programOutputs = []
+        renderer = next
+        if running { next.programOutputs = programs }
     }
     func stop() {
         guard running else { return }; running = false
