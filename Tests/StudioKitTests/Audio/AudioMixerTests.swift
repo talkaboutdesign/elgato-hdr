@@ -129,8 +129,10 @@ final class AudioMixerTests: XCTestCase {
         }
         let ms = elapsed / 1000 / 1e6
         print(String(format: "two-input render average: %.6f ms/block", ms))
-        // The work order's budget is for optimized code; debug timing varies with CI host load.
-        #if !DEBUG
+#if DEBUG
+        // Unoptimized build on a shared CI machine: catch gross regressions.
+        XCTAssertLessThan(ms, 5)
+        #else
         XCTAssertLessThan(ms, 0.2)
         #endif
     }
