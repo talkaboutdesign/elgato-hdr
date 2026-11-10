@@ -549,11 +549,13 @@ extension AppDelegate {
         if wait == 0 {
             rt.pendingProjectSave?.cancel(); rt.pendingProjectSave = nil
             doc.save(); l.didSave(atNs: now); rt.eventLog = l
+            log("events: project.json saved with \(doc.project.events.count) events")
         } else if rt.pendingProjectSave == nil {
             let work = DispatchWorkItem { [weak self, weak doc] in
                 guard let self = self, let doc = doc, self.recDoc === doc, var l = self.sceneRuntime.eventLog else { return }
                 self.sceneRuntime.pendingProjectSave = nil
                 doc.save(); l.didSave(atNs: nowNs()); self.sceneRuntime.eventLog = l
+                log("events: project.json saved with \(doc.project.events.count) events")
             }
             rt.pendingProjectSave = work
             DispatchQueue.main.asyncAfter(deadline: .now() + .nanoseconds(Int(wait)), execute: work)

@@ -12,6 +12,23 @@ extension AppDelegate {
         let env = ProcessInfo.processInfo.environment
         if let dir = env["EHDR_MORPH_DUMP"] { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.dumpTransitions(to: dir) } }
         if let dir = env["EHDR_SCENE_DEMO"] { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.runSceneDemo(dir) } }
+        if env["EHDR_EVENT_DEMO"] != nil { runEventDemo() }
+    }
+
+    /// With `--record 15` (recording from 4 s to 19 s): three switches, one punch-in and a marker while recording.
+    func runEventDemo() {
+        let m = scenes
+        let script: [(Double, String, () -> Void)] = [
+            (6, "switch to scene 2", { m.actions.switchTo(m.collection.scenes[1].id) }),
+            (8, "punch in", { self.setPunchIn(true) }),
+            (10, "punch out", { self.setPunchIn(false) }),
+            (11, "switch to scene 3", { m.actions.switchTo(m.collection.scenes[2].id) }),
+            (13, "marker", { self.addMarker() }),
+            (15, "switch to scene 1", { m.actions.switchTo(m.collection.scenes[0].id) }),
+        ]
+        for (t, name, f) in script {
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) { log("event-demo: \(name) (recording: \(self.recorder != nil))"); f() }
+        }
     }
 
     // MARK: Offscreen rendering
@@ -141,7 +158,11 @@ extension AppDelegate {
         func rect(_ type: String) -> CGRect? { m.composition.layers.last { $0.source.type == type }?.frame.rect(in: m.canvasSize) }
         var steps: [(Double, () -> Void)] = []
         func step(_ wait: Double, _ f: @escaping () -> Void) { steps.append((wait, f)) }
-        step(1.5) { self.snapshotAll(dir, "01-strip-and-scene-tab") }
+        step(1.5) {
+            // The Edit menu's Undo goes to the first responder; the studio window must answer it for scene undo.
+            log("scene-demo: window answers undo: \(self.window.responds(to: Selector(("undo:"))))")
+            self.snapshotAll(dir, "01-strip-and-scene-tab")
+        }
         step(0.1) { if let r = rect("camera") { self.pictureMouse(.mouseMoved, CGPoint(x: r.midX, y: r.midY)); self.pictureMouse(.leftMouseDown, CGPoint(x: r.midX, y: r.midY)); self.pictureMouse(.leftMouseUp, CGPoint(x: r.midX, y: r.midY)) } }
         step(1.2) { self.snapshotAll(dir, "02-camera-selected") }
         // Drag the camera towards the middle, a few pixels off, so it snaps to the centre lines.
