@@ -114,10 +114,11 @@ extension ProgramOutputTests {
         let gate = DispatchSemaphore(value: 0)
         var timestamps: [UInt64] = []
         output.onFrame = { _, ns in timestamps.append(ns); gate.signal() }
+        output.setRateDivisor(2)
         output.start()
         let base = nowNs()
-        for (segment, divisor) in [1, 2, 1].enumerated() {
-            output.setRateDivisor(divisor)
+        for (segment, divisor) in [2, 1, 2, 1].enumerated() {
+            if segment > 0 { output.setRateDivisor(divisor) }
             let before = timestamps.count
             for n in 0..<120 {
                 let ns = base + UInt64(segment * 120 + n) * 1_000_000_000 / 60

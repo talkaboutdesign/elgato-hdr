@@ -99,7 +99,9 @@ final class ProgramOutput {
     func start() {
         lock.lock(); defer { lock.unlock() }
         guard !active else { return }
-        statsLock.lock(); active = true; generation += 1; statsLock.unlock(); phase = FramePhase(); lastGameNs = nowNs()
+        statsLock.lock(); active = true; generation += 1; statsLock.unlock()
+        let divisor = phase.rateDivisor
+        phase = FramePhase(); phase.setRateDivisor(divisor); lastGameNs = nowNs()
         let timer = DispatchSource.makeTimerSource(queue: timerQueue)
         timer.schedule(deadline: .now() + .milliseconds(150), repeating: .nanoseconds(33_333_333))
         timer.setEventHandler { [weak self] in self?.noSignal() }

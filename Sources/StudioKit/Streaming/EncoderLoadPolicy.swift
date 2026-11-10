@@ -17,6 +17,7 @@ struct EncoderLoadPolicy {
     var preference: EncoderOverloadPolicy = .verticalFirst
     private(set) var reduced: Set<Canvas> = []
     private var streaks: [Canvas: Int] = [:]
+    init(preference: EncoderOverloadPolicy = .verticalFirst) { self.preference = preference }
     mutating func loadChanged(initial: Canvas? = nil) {
         streaks = [:]; reduced = []
         if preference != .never, let initial { reduced.insert(initial) }
