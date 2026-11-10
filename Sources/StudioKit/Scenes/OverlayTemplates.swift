@@ -37,8 +37,8 @@ extension SceneTemplate {
         let wide = Canvas.wide.size(.hd), tall = Canvas.vertical.size(.hd)
         /// The background in two steps lighter towards the bottom: reads as a soft gradient on any screen.
         func tones(_ v: Bool) -> [Layer] {
-            [.color(ScreenStyle.toneA, name: "Lower Tone", frame: NRect(x: 0, y: v ? 0.62 : 0.66, w: 1, h: v ? 0.38 : 0.34)),
-             .color(ScreenStyle.toneB, name: "Bottom Tone", frame: NRect(x: 0, y: v ? 0.82 : 0.84, w: 1, h: v ? 0.18 : 0.16))]
+            [.color(ScreenStyle.toneA, name: "Lower Tone", frame: NRect(x: 0, y: v ? 0.70 : 0.66, w: 1, h: v ? 0.30 : 0.34)),
+             .color(ScreenStyle.toneB, name: "Bottom Tone", frame: NRect(x: 0, y: v ? 0.86 : 0.84, w: 1, h: v ? 0.14 : 0.16))]
         }
         /// Accent rule, title and subtitle: left-aligned on 16:9, centred on 9:16.
         func headline(_ title: String, _ subtitle: String, accent: [Double], v: Bool, x: Double = 0.08) -> [Layer] {
