@@ -352,7 +352,11 @@ struct ProjectCard: View {
         .onHover { hover = $0 }
         .onChange(of: ScrubFrames.fingerprint(project)) { _, _ in if hover { loadFrames() } }
         .contentShape(Rectangle())
-        .task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+        .task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") {
+            thumb = NSImage(contentsOf: doc.thumbnailURL)
+            // A thumbnail from an older composite (before overlays) is shown until its replacement is ready.
+            if await doc.refreshStaleThumbnail() { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+        }
         #if DEBUG
         .onAppear {
             // EHDR_LIBRARY_SCRUB="<name prefix>:<frame>" shows a card mid-scrub for screenshots (no pointer in CI).
@@ -412,12 +416,15 @@ enum ScrubFrames {
         var mirror: Bool; var cameraOffsetMs: Double?; var micOffsetMs: Double?
         var game: String; var camera: String?; var color: String; var durationMs: Double
         var trimStartMs: Double; var trimEndMs: Double; var fps: Double
+        /// `ProjectDoc.renderVersion`; nil gives the fingerprints of builds before it existed.
+        var render: Int?
     }
     /// FNV-1a over the sorted-key JSON: stable across launches (Swift's `Hasher` is seeded per process).
-    static func fingerprint(_ p: Project) -> String {
+    static func fingerprint(_ p: Project, renderVersion: Int? = ProjectDoc.renderVersion) -> String {
         let state = RenderState(scenes: p.scenes, timeline: p.timeline, wide: p.wide, vertical: p.vertical, mirror: p.cameraMirror,
                                 cameraOffsetMs: p.camera?.offsetMs, micOffsetMs: p.mic?.offsetMs, game: p.game.file, camera: p.camera?.file,
-                                color: p.colorMode, durationMs: p.durationMs, trimStartMs: p.trimStartMs, trimEndMs: p.trimEndMs, fps: p.fps)
+                                color: p.colorMode, durationMs: p.durationMs, trimStartMs: p.trimStartMs, trimEndMs: p.trimEndMs, fps: p.fps,
+                                render: renderVersion)
         let e = JSONEncoder(); e.outputFormatting = .sortedKeys
         var h: UInt64 = 0xcbf29ce484222325
         for b in (try? e.encode(state)) ?? Data() { h = (h ^ UInt64(b)) &* 0x100000001b3 }
