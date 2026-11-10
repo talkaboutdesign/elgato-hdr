@@ -321,10 +321,16 @@ final class EditorModel {
         var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: gameSize)]
         if let c = built?.cameraSize { sources[.camera] = SourceInfo(size: c) }
         let sourceMs = built?.sourceDurationMs ?? project.durationMs, frameMs = built?.sourceFrameMs ?? 1000 / max(1, project.fps)
-        return RenderPlan(scenes: project.scenes.isEmpty ? [project.defaultScene] : project.scenes, timeline: project.timeline,
+        var plan = RenderPlan(scenes: project.scenes.isEmpty ? [project.defaultScene] : project.scenes, timeline: project.timeline,
                           map: TimeMap(segments: [], sourceDurationMs: sourceMs, frameMs: frameMs), canvas: canvas, canvasSize: size,
                           sources: sources, mirrorCamera: project.cameraMirror,
                           cuts: CompositionBuilder.editMap(project, sourceDurationMs: sourceMs, frameMs: frameMs))
+        if let built, let track = built.asset.track(withTrackID: built.cameraTrack) {
+            plan.cameraRanges = track.segments.filter { !$0.isEmpty }.map {
+                Segment(startMs: $0.timeMapping.target.start.seconds * 1000, endMs: $0.timeMapping.target.end.seconds * 1000)
+            }
+        }
+        return plan
     }
     var gameSize: CGSize { built?.screenSize ?? (project.width > 0 ? CGSize(width: project.width, height: project.height) : CGSize(width: 1920, height: 1080)) }
 

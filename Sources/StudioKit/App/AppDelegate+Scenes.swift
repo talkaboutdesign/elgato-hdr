@@ -10,6 +10,7 @@ final class SceneRuntime {
     var menuStructure = ""
     var keyMonitor: Any?
     var spaceHeld = false
+    var cameraAvailable = false
     let thumbnailer = SceneThumbnailer()
     var thumbnailTimer: Timer?
     /// The collection when the current drag or slider began; its edits become one undo step at the end.

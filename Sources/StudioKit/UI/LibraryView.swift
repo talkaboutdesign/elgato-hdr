@@ -374,7 +374,11 @@ struct ProjectCard: View {
         let doc = self.doc, p = project
         Task {
             let f = await ScrubFrames.load(doc, project: p)
-            await MainActor.run { if framesKey == key { frames = f }; loadingFrames = false }
+            await MainActor.run {
+                loadingFrames = false
+                if framesKey == key { frames = f }
+                else { loadFrames() }
+            }
         }
     }
 }

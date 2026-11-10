@@ -11,7 +11,7 @@ final class ExportQueueIntegrationTests: XCTestCase {
         try t.requireHardware()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Queue-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir, frameCount: 180)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 180)
         let game = Composition(layers: [Layer(source: .game, fit: true)])
         let pip = Composition(layers: [Layer(source: .game, fit: true), Layer(source: .camera, frame: NRect(x: 0.65, y: 0.1, w: 0.3, h: 0.3))])
         let a = Scene(name: "Game", wide: game, vertical: game), b = Scene(name: "Camera", wide: pip, vertical: pip)

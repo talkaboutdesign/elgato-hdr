@@ -25,10 +25,11 @@ struct ResolvedLayer: Equatable {
 enum SceneResolver {
     static func resolve(_ c: Composition, canvas: CGSize, sources: [SourceKey: SourceInfo]) -> [ResolvedLayer] {
         // Source availability changes rendering only; authored frames and overlay placement remain intact.
-        let gameOnly = sources[.camera] == nil && c.layers.contains { $0.source.type == "camera" }
+        let gameOnly = sources[.camera] == nil && c.layers.contains { $0.source.type == "camera" && $0.visible && $0.opacity > 0 }
+        let mainGame = c.layers.filter { $0.source.type == "game" && $0.visible && $0.opacity > 0 }.max { $0.frame.w * $0.frame.h < $1.frame.w * $1.frame.h }?.id
         return c.layers.compactMap { original in
             var l = original
-            if gameOnly && l.source.type == "game" { l.frame = NRect(x: 0, y: 0, w: 1, h: 1) }
+            if gameOnly && l.id == mainGame { l.frame = NRect(x: 0, y: 0, w: 1, h: 1) }
             guard l.visible, l.opacity > 0 else { return nil }
             var dst = l.frame.rect(in: canvas), src = CGRect(x: 0, y: 0, width: 1, height: 1), color: SIMD4<Float>?
             let key: SourceKey

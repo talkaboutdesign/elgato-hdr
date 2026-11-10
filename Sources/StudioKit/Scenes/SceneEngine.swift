@@ -155,6 +155,15 @@ struct LiveSceneState {
         return next
     }
 
+    func changingSources(atNs t: UInt64, transition: SceneTransition, previous: [SourceKey: SourceInfo]) -> LiveSceneState {
+        var next = self
+        next.snapshot = Snapshot(wide: rawFrame(canvas: .wide, size: Snapshot.reference(.wide), sources: previous, atNs: t),
+                                 vertical: rawFrame(canvas: .vertical, size: Snapshot.reference(.vertical), sources: previous, atNs: t),
+                                 wideOverlays: overlayLayers(canvas: .wide, atNs: t), verticalOverlays: overlayLayers(canvas: .vertical, atNs: t))
+        next.from = nil; next.startNs = t; next.transition = transition
+        return next
+    }
+
     /// The image and text layers that can be in the picture at `t`: the scene's own and, while a transition runs, those
     /// of the picture it starts from. A layer id in both (a morph match) is the target's definition.
     func overlayLayers(canvas: Canvas, atNs t: UInt64) -> [Layer] {

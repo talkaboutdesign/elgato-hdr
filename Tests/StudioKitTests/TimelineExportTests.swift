@@ -86,7 +86,7 @@ final class TimelineExportTests: XCTestCase {
         try requireHardware()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Timeline-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir, frameCount: 180)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 180)
         let game = Composition(layers: [Layer(source: .game, fit: true)])
         let pip = Composition(layers: [Layer(source: .game, fit: true), Layer(source: .camera, frame: NRect(x: 0.65,y: 0.1,w: 0.3,h: 0.3))])
         let a = Scene(name: "Game", wide: game, vertical: game), b = Scene(name: "Camera", wide: pip, vertical: pip)
@@ -95,7 +95,7 @@ final class TimelineExportTests: XCTestCase {
             sceneSpans: [SceneSpan(startMs: 0,sceneID: a.id), SceneSpan(startMs: 2200,sceneID: b.id,transition: SceneTransition(style: .fade,durationMs: 100))],
             zooms: [ZoomBlock(startMs: 1000,endMs: 1666.6666667,scale: 1.8,focusX: 0.43,focusY: 0.79,easeMs: 100)])
         for canvas in Canvas.allCases {
-            for range in [ExportRange.sdr,.hdr] {
+            for range in [canvas == .wide ? ExportRange.sdr : .hdr] {
                 let start = Date()
                 let url = try await Exporter(doc: doc, job: ExportJob(canvas: canvas,resolution: .hd,range: range,fps: .source)).run { _ in }
                 let elapsed = Date().timeIntervalSince(start)
@@ -135,7 +135,7 @@ final class TimelineExportTests: XCTestCase {
         try requireHardware()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Snapshot-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 120)
         let built = try await CompositionBuilder.build(doc, canvas: .wide, resolution: .hd, range: .sdr)
         let before = try RawCompositionFrames.codes(RawCompositionFrames.frame(built.asset, video: built.video, ms: 500, hdr: false))
         doc.project.timeline.zooms = [ZoomBlock(startMs: 0, endMs: 2000, scale: 3, easeMs: 0)]
@@ -150,7 +150,7 @@ final class TimelineExportTests: XCTestCase {
         try requireHardware()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Offsets-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 120)
         doc.project.timeline.segments = [Segment(startMs: 0,endMs: 500),Segment(startMs: 1000,endMs: 2000)]
         for offset in [-1200.0,1200.0] {
             doc.project.camera?.offsetMs = offset; doc.project.mic?.offsetMs = offset

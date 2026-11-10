@@ -7,7 +7,7 @@ clang -O2 -Wall -I/opt/homebrew/include/libusb-1.0 -L/opt/homebrew/lib -lusb-1.0
 cp /opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib "$APP/Contents/Frameworks/"
 install_name_tool -change /opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib @executable_path/../Frameworks/libusb-1.0.0.dylib "$APP/Contents/MacOS/uvc_capture"
 CONFIG="${1:-release}"
-swift build -c "$CONFIG" --arch arm64
+if [[ "${EHDR_SKIP_BUILD:-0}" != 1 ]]; then swift build -c "$CONFIG" --arch arm64; fi
 BIN="$(swift build -c "$CONFIG" --arch arm64 --show-bin-path)"
 cp "$BIN/ElgatoHDR" "$APP/Contents/MacOS/ElgatoHDR"
 cp Resources/Info.plist "$APP/Contents/"

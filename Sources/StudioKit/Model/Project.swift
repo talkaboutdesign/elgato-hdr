@@ -214,6 +214,10 @@ struct Project: Codable, Equatable {
         if timeline.markers.isEmpty { timeline.markers = sorted.filter { $0.type == "marker" }.map { Marker(tMs: $0.tMs) } }
     }
 
+    mutating func ensureRecordingScene() {
+        if scenes.isEmpty { scenes = [defaultScene] }
+    }
+
     var defaultScene: Scene {
         var w = Composition.from(layout: wide, canvas: Canvas.wide.size(.hd), hasCamera: true, mirror: cameraMirror)
         var v = Composition.from(layout: vertical, canvas: Canvas.vertical.size(.hd), hasCamera: true, mirror: cameraMirror)

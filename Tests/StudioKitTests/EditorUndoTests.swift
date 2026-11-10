@@ -79,6 +79,20 @@ final class EditorScriptTests: XCTestCase {
     static func normalize(_ json: String) -> String {
         var map: [String: String] = [:]
         let re = try! NSRegularExpression(pattern: "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
+        // Ignore only explicitly known additive defaults; non-default values still fail the fixture comparison.
+        func canonical(_ value: Any) -> Any {
+            if let array = value as? [Any] { return array.map(canonical) }
+            guard var object = value as? [String: Any] else { return value }
+            if object["frameWidth"] as? Double == 0 { object.removeValue(forKey: "frameWidth") }
+            if object["frameColor"] as? [Double] == [0.42, 0.49, 1, 1] { object.removeValue(forKey: "frameColor") }
+            if let transition = object["sceneTransition"] as? [String: Any],
+               transition["style"] as? String == "morph", transition["durationMs"] as? Double == 380 {
+                object.removeValue(forKey: "sceneTransition")
+            }
+            return object.mapValues(canonical)
+        }
+        let data = try! JSONSerialization.data(withJSONObject: canonical(try! JSONSerialization.jsonObject(with: Data(json.utf8))), options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        let json = String(decoding: data, as: UTF8.self)
         var out = json
         for m in re.matches(in: json, range: NSRange(json.startIndex..., in: json)) {
             let id = String(json[Range(m.range, in: json)!])
@@ -114,6 +128,6 @@ final class EditorScriptTests: XCTestCase {
         let saved = try String(contentsOf: m.doc.dir.appendingPathComponent("project.json"), encoding: .utf8)
         let url = try XCTUnwrap(Bundle.module.url(forResource: "editor-script-expected", withExtension: "json", subdirectory: "Fixtures"))
         if let path = ProcessInfo.processInfo.environment["EHDR_RECORD_FIXTURE"] { try Self.normalize(saved).write(toFile: path, atomically: true, encoding: .utf8) }
-        XCTAssertEqual(Self.normalize(saved), try String(contentsOf: url, encoding: .utf8))
+        XCTAssertEqual(Self.normalize(saved), Self.normalize(try String(contentsOf: url, encoding: .utf8)))
     }
 }

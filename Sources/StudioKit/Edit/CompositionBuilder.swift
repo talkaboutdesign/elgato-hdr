@@ -124,9 +124,14 @@ enum CompositionBuilder {
         if let size = built.cameraSize { sources[.camera] = SourceInfo(size: size) }
         // Cuts come from the project being rendered, not the assembled asset: the preview plays the uncut source but
         // finishes a transition at a cut exactly as the export does, and follows cut edits without a rebuild.
-        let plan = RenderPlan(scenes: p.scenes.isEmpty ? [p.defaultScene] : p.scenes, timeline: p.timeline, map: built.map,
+        var plan = RenderPlan(scenes: p.scenes.isEmpty ? [p.defaultScene] : p.scenes, timeline: p.timeline, map: built.map,
                               canvas: canvas, canvasSize: size, sources: sources, mirrorCamera: p.cameraMirror,
                               cuts: editMap(p, sourceDurationMs: built.sourceDurationMs, frameMs: built.sourceFrameMs))
+        if let track = built.asset.track(withTrackID: built.cameraTrack) {
+            plan.cameraRanges = track.segments.filter { !$0.isEmpty }.map {
+                Segment(startMs: $0.timeMapping.target.start.seconds * 1000, endMs: $0.timeMapping.target.end.seconds * 1000)
+            }
+        }
         vc.instructions = [CompositionInstruction(timeRange: CMTimeRange(start: .zero, duration: built.duration), screenTrack: built.screenTrack,
                                                   cameraTrack: built.cameraTrack, plan: plan,
                                                   outTransfer: out, screenTransfer: p.color.transfer, screenSize: built.screenSize, cameraSize: built.cameraSize)]

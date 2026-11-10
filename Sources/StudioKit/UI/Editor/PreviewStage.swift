@@ -61,7 +61,7 @@ struct LayerStageInteraction: View {
             let controls = model.sceneControls
             ZStack(alignment: .topLeading) {
                 if controls.game, let g = model.sceneLayer(.game) {
-                    let r = g.frame.rect(in: size)
+                    let r = model.renderPlan(size: size).layers(atTimelineMs: model.playheadMs).first { $0.key == .game }?.dst ?? g.frame.rect(in: size)
                     Color.clear.contentShape(Rectangle())
                         .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
                         .gesture(DragGesture(minimumDistance: 2)
@@ -74,7 +74,7 @@ struct LayerStageInteraction: View {
                         .help("Drag to reframe the game")
                 }
                 if controls.camera, let cam = model.sceneLayer(.camera) {
-                    let r = cam.frame.rect(in: size)
+                    let r = model.renderPlan(size: size).layers(atTimelineMs: model.playheadMs).first { $0.key == .camera }?.dst ?? cam.frame.rect(in: size)
                     let radius = CGFloat(min(0.5, max(0, cam.roundness))) * min(r.width, r.height)
                     RoundedRectangle(cornerRadius: radius + 3, style: .circular)
                         .strokeBorder(.white.opacity(hover || cameraStart != nil ? 0.9 : 0), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
