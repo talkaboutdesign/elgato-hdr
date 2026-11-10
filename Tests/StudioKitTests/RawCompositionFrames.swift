@@ -68,10 +68,17 @@ enum RawCompositionFrames {
     }
     static func assertEncoding(_ reference: CVPixelBuffer, _ decoded: CVPixelBuffer, file: StaticString = #filePath, line: UInt = #line) {
         for (plane, pair) in zip(yuv(reference), yuv(decoded)).enumerated() {
-            let errors = zip(pair.0, pair.1).map { abs($0-$1) }.sorted()
-            let mse = errors.reduce(0) { $0 + $1*$1 } / Double(errors.count)
-            let psnr = -10*log10(max(1e-20, mse)), percentile = errors[min(errors.count-1, Int(Double(errors.count)*0.999))]
-            XCTAssertTrue(percentile <= (plane == 0 ? 3 : 8)/255.0 || psnr >= (plane == 0 ? 40 : 35), "plane \(plane): p99.9 \(percentile*255)/255, PSNR \(psnr)", file: file, line: line)
+            let limit = (plane == 0 ? 3.0 : 8.0) / 255
+            var squared = 0.0, over = 0
+            for (a, b) in zip(pair.0, pair.1) {
+                let error = abs(a-b); squared += error*error
+                if error > limit { over += 1 }
+            }
+            let count = pair.0.count
+            let psnr = -10*log10(max(1e-20, squared / Double(count)))
+            // Counting threshold exceedances is the same percentile check, without sorting millions of pixels.
+            let allowed = count - 1 - Int(Double(count)*0.999)
+            XCTAssertTrue(over <= allowed || psnr >= (plane == 0 ? 40 : 35), "plane \(plane): \(over)/\(count) exceed \(limit*255)/255, PSNR \(psnr)", file: file, line: line)
         }
     }
 }

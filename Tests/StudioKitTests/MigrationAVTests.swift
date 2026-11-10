@@ -2,15 +2,22 @@ import XCTest
 import AVFoundation
 import CoreMedia
 import CoreVideo
+import Metal
 @testable import StudioKit
 
 // Full-HD game baselines: pre-engine 092984d plus the prerequisite hard-edge fix, through AVFoundation.
 final class MigrationAVTests: XCTestCase {
     func testMigratedProjectFirstFrames() async throws {
-        try TimelineExportTests().requireHardware()
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("No Metal device") }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Migration-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir)
+        // Golden comparisons need identical encoded inputs, independent of hardware encoder rate-control/load.
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for name in ["game", "camera"] {
+            let source = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "mov", subdirectory: "Fixtures/migration-media"))
+            try FileManager.default.copyItem(at: source, to: dir.appendingPathComponent(name+".mov"))
+        }
+        let doc = ProjectDoc(dir: dir, project: Project(name: "Migration", createdAt: Date()))
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         for name in ["minimal", "v1", "v1-trim"] {
             let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures"))
