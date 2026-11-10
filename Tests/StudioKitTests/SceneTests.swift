@@ -73,11 +73,12 @@ final class SceneTests: XCTestCase {
                             assertRect(g.dst, p.screenDst, name); assertRect(g.src, p.screenSrc, name)
                             XCTAssertEqual([g.radius, g.border, g.shadow], [0, 0, 0], name)
                             XCTAssertFalse(g.mirror, name); XCTAssertEqual(g.opacity, 1); XCTAssertNil(g.color)
+                            XCTAssertTrue(g.hardEdge, name)
                         }
                         if let c = camera {
                             assertRect(c.dst, p.camDst, name); assertRect(c.src, p.camSrc, name)
                             for (a, b) in zip([c.radius, c.border, c.shadow], [p.radius, p.border, p.shadow]) { XCTAssertEqual(a, b, accuracy: 0.001, name) }
-                            XCTAssertEqual(c.mirror, mirror, name); XCTAssertEqual(c.opacity, 1)
+                            XCTAssertEqual(c.mirror, mirror, name); XCTAssertEqual(c.opacity, 1); XCTAssertFalse(c.hardEdge, name)
                         }
                         if layout.kind == .pip, hasCamera { XCTAssertEqual(r.map(\.key), [.game, .camera], name) }
                     }
@@ -104,10 +105,15 @@ final class SceneTests: XCTestCase {
         XCTAssertEqual(r[1].dst, CGRect(x: 0, y: 25, width: 100, height: 50))
         XCTAssertEqual(r[1].src, CGRect(x: 0, y: 0, width: 1, height: 1))
         XCTAssertEqual([r[1].radius, r[1].border, r[1].shadow], [0, 0, 0])
+        XCTAssertFalse(r[1].hardEdge)
         // A bigger layer gets proportional border and shadow.
         let big = SceneResolver.resolve(Composition(layers: [Layer(source: .game, border: true, shadow: true)]), canvas: CGSize(width: 1920, height: 1080),
                                         sources: [.game: SourceInfo(size: CGSize(width: 1920, height: 1080))])
         XCTAssertEqual(big[0].border, 1920 * 0.018, accuracy: 1e-9); XCTAssertEqual(big[0].shadow, 1920 * 0.08, accuracy: 1e-9)
+        // Only a plain game is hard-edged; a styled game window is anti-aliased like any other layer.
+        XCTAssertFalse(big[0].hardEdge)
+        XCTAssertTrue(SceneResolver.resolve(Composition(layers: [Layer(source: .game, frame: NRect(x: 0.1, y: 0.1, w: 0.5, h: 0.5), opacity: 0.5)]),
+                                            canvas: canvas, sources: [.game: SourceInfo(size: canvas)])[0].hardEdge)
     }
 
     func testLenientCoding() throws {
