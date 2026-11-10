@@ -392,12 +392,13 @@ enum ScrubFrames {
         var scenes: [Scene]; var timeline: Timeline; var wide: CanvasLayout; var vertical: CanvasLayout
         var mirror: Bool; var cameraOffsetMs: Double?; var micOffsetMs: Double?
         var game: String; var camera: String?; var color: String; var durationMs: Double
+        var trimStartMs: Double; var trimEndMs: Double; var fps: Double
     }
     /// FNV-1a over the sorted-key JSON: stable across launches (Swift's `Hasher` is seeded per process).
     static func fingerprint(_ p: Project) -> String {
         let state = RenderState(scenes: p.scenes, timeline: p.timeline, wide: p.wide, vertical: p.vertical, mirror: p.cameraMirror,
                                 cameraOffsetMs: p.camera?.offsetMs, micOffsetMs: p.mic?.offsetMs, game: p.game.file, camera: p.camera?.file,
-                                color: p.colorMode, durationMs: p.durationMs)
+                                color: p.colorMode, durationMs: p.durationMs, trimStartMs: p.trimStartMs, trimEndMs: p.trimEndMs, fps: p.fps)
         let e = JSONEncoder(); e.outputFormatting = .sortedKeys
         var h: UInt64 = 0xcbf29ce484222325
         for b in (try? e.encode(state)) ?? Data() { h = (h ^ UInt64(b)) &* 0x100000001b3 }

@@ -96,7 +96,7 @@ struct LayerStageInteraction: View {
                             .frame(width: 22, height: 22).contentShape(Rectangle())
                             .position(c)
                             .onHover { h in hover = h || hover; h ? NSCursor.crosshair.push() : NSCursor.pop() }
-                            .gesture(DragGesture()
+                            .gesture(DragGesture(coordinateSpace: .named("sceneStage"))
                                 .onChanged { v in
                                     model.beginGesture()
                                     if cameraStart == nil { cameraStart = model.sceneLayer(.camera)?.frame }
@@ -105,7 +105,7 @@ struct LayerStageInteraction: View {
                                 .onEnded { _ in cameraStart = nil; model.endGesture() })
                     }
                 }
-            }
+            }.coordinateSpace(name: "sceneStage")
         }
     }
 }

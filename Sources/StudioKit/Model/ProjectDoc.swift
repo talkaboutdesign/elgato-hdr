@@ -52,10 +52,10 @@ final class ProjectDoc: Identifiable, Hashable {
             if let f = try? await t.load(.nominalFrameRate), f > 0 { project.fps = Double(f) }
             if let c = project.camera, await !layerReadable(c) { log("finalize: dropping unreadable camera layer \(c.file)"); project.camera = nil }
             if let m = project.mic, await !layerReadable(m) { log("finalize: dropping unreadable mic layer \(m.file)"); project.mic = nil }
-            // Thumbnail first: the library reloads a card's image when its state changes, so it must exist by then.
-            await writeThumbnail()
             project.state = "complete"
             project.importEvents()
+            // Import before choosing the thumbnail time; notify the library only after it exists.
+            await writeThumbnail()
             save()
             await MainActor.run { completion() }
         }

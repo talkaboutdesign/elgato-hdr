@@ -98,8 +98,8 @@ enum CompositionBuilder {
         // The instruction covers what was assembled, not a recomputation of it.
         let duration = comp.duration
 
-        let sourceFps = max(1, (frameRate > 0 ? Double(frameRate) : p.fps).rounded())
-        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps == .source ? sourceFps : min(sourceFps, Double(fps.rawValue))))
+        let outputFrame = fps == .source ? frame : max(frame, frameTicks(rate: Double(fps.rawValue)))
+        let frameDuration = CMTime(value: outputFrame, timescale: ticks)
         let gameTransfer = p.color.transfer
         let outTransfer: Int32 = range == .sdr || gameTransfer == 2 ? 2 : gameTransfer
         let mix = AVMutableAudioMix(); mix.inputParameters = mixParams
