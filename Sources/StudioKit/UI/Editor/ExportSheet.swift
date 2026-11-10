@@ -86,6 +86,20 @@ struct ExportNotices: View {
     private var missing: [MissingAsset] { model.missingAssets }
     var any: Bool { activity.recording || activity.live || !missing.isEmpty }
 
+    /// One line per missing file: "Logo in “Gameplay” and “Camera Focus”".
+    static func byFile(_ missing: [MissingAsset]) -> [String] {
+        var order: [String] = [], scenes: [String: [String]] = [:], names: [String: String] = [:]
+        for m in missing {
+            if scenes[m.file] == nil { order.append(m.file); names[m.file] = m.layer }
+            if !(scenes[m.file] ?? []).contains(m.scene) { scenes[m.file, default: []].append(m.scene) }
+        }
+        return order.map { f in
+            let s = (scenes[f] ?? []).map { "“\($0)”" }
+            let list = s.count > 1 ? s.dropLast().joined(separator: ", ") + " and " + s.last! : s.first ?? ""
+            return "\(names[f] ?? f) in \(list)"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Space.s) {
             let a = activity
@@ -94,9 +108,10 @@ struct ExportNotices: View {
                         detail: "\(a.live && a.recording ? "Streaming and recording use" : a.live ? "The stream uses" : "The recording uses") the Mac's video encoder first, so exports run slower until \(a.live ? "you end the stream" : "the recording stops"). Nothing is lost.",
                         systemImage: a.live ? "dot.radiowaves.left.and.right" : "record.circle")
             }
-            if !missing.isEmpty {
-                Callout(style: .warning, title: missing.count == 1 ? "1 image is missing and will be left out" : "\(missing.count) images are missing and will be left out",
-                        detail: missing.prefix(4).map { "\($0.layer) in “\($0.scene)”" }.joined(separator: ", ") + (missing.count > 4 ? ", and \(missing.count - 4) more" : "")
+            let files = ExportNotices.byFile(missing)
+            if !files.isEmpty {
+                Callout(style: .warning, title: files.count == 1 ? "1 image is missing and will be left out" : "\(files.count) images are missing and will be left out",
+                        detail: files.prefix(3).joined(separator: "; ") + (files.count > 3 ? "; and \(files.count - 3) more" : "")
                             + ". Put the file back in the recording's Assets folder to include it.")
             }
         }

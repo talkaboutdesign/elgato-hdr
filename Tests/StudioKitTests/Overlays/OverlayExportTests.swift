@@ -159,3 +159,11 @@ final class OverlayExportTests: XCTestCase {
         XCTAssertFalse(cache.overlays(for: missing, canvas: canvas, assets: [dir]).pending, "known missing")
     }
 }
+
+final class ExportNoticeTests: XCTestCase {
+    func testMissingImagesAreListedOncePerFile() {
+        let m = [MissingAsset(file: "a.png", layer: "Logo", scene: "Gameplay"), MissingAsset(file: "a.png", layer: "Logo", scene: "Camera Focus"),
+                 MissingAsset(file: "b.png", layer: "Badge", scene: "Ending")]
+        XCTAssertEqual(ExportNotices.byFile(m), ["Logo in “Gameplay” and “Camera Focus”", "Badge in “Ending”"])
+    }
+}

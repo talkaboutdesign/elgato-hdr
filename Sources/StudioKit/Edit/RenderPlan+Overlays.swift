@@ -5,6 +5,7 @@
 //
 // Tokens in an edit: `{timer}` is the time on the edited timeline (the position in the exported video, so cuts and a
 // trimmed start do not show), not the time in the recording; `{time}` is the wall clock when that moment was recorded.
+import CoreGraphics
 import Foundation
 
 /// Where a plan's overlays come from and whether a frame waits for them.

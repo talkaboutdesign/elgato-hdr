@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 // The editor's side of layer editing: the scene at the playhead with its layer list (as in the live Scene tab), and
