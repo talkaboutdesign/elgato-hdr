@@ -89,6 +89,10 @@ fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]],
     float2 h = u.dst.zw * 0.5, c = u.dst.xy + h;
     float r = min(u.shape.x, min(h.x, h.y)), border = u.shape.y, shadow = u.shape.z, opacity = u.shape.w;
     float d = sdRoundRect(p, c, h, r);
+    if (u.fmt.x == 3) {
+        float ring = clamp(0.5 - d + border, 0.0, 1.0) - clamp(0.5 - d, 0.0, 1.0);
+        return float4(convert(u.color.rgb, 2, out), ring * opacity * u.color.a);
+    }
     // Hard edge: the former shader's inclusive clip of the game to its rectangle, so no row is half covered.
     float2 e = (p - u.dst.xy) / u.dst.zw;
     float a = (u.flags.z != 0 ? (all(e >= 0.0) && all(e <= 1.0) ? 1.0 : 0.0) : clamp(0.5 - d, 0.0, 1.0)) * opacity;
@@ -130,6 +134,26 @@ fragment float2 chromaFrag(V in [[stage_in]], texture2d<float> rgb [[texture(0)]
     float Cb = (c.b - Y) / 1.8814, Cr = (c.r - Y) / 1.4746;
     return float2(512.0 + 896.0 * Cb, 512.0 + 896.0 * Cr) * 64.0 / 65535.0;
 }
+// The same BT.709 video-range luma/chroma math as the planar render passes, fused into one
+// dispatch. Each thread owns a 2x2 luma block and its centre-sited chroma sample.
+kernel void streamNV12(texture2d<float, access::read> rgb [[texture(0)]],
+                       texture2d<float, access::write> yPlane [[texture(1)]],
+                       texture2d<float, access::write> cPlane [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
+    if (p.x >= cPlane.get_width() || p.y >= cPlane.get_height()) return;
+    float3 sum = float3(0.0);
+    for (uint dy = 0; dy < 2; ++dy) for (uint dx = 0; dx < 2; ++dx) {
+        uint2 q = p * 2 + uint2(dx, dy);
+        float3 c = rgb.read(q).rgb;
+        float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+        yPlane.write(float4((16.0 + 219.0 * y) / 255.0), q);
+        sum += c;
+    }
+    float3 c = sum * 0.25;
+    float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+    float2 uv = (128.0 + 224.0 * float2((c.b - y) / 1.8556, (c.r - y) / 1.5748)) / 255.0;
+    cPlane.write(float4(uv, 0, 1), p);
+}
+
 """
 
 /// Uniforms for `layerFrag`; layout matches the Metal `LayerU` struct.
@@ -321,6 +345,12 @@ final class MetalCore {
             // Half a pixel of edge coverage, plus the shadow: it reaches `shadow` past the frame and 0.35·shadow lower.
             let grow = r.shadow * 1.35 + 1
             draw(u, area: r.dst.insetBy(dx: -grow, dy: -grow), t0, t1)
+            if r.frameWidth > 0 {
+                enc.setRenderPipelineState(blended)
+                u.fmt.x = 3; u.shape.y = Float(r.frameWidth); u.color = r.frameColor
+                let margin = r.frameWidth + 1
+                draw(u, area: r.dst.insetBy(dx: -margin, dy: -margin), blank8, blank8c)
+            }
         }
     }
 

@@ -65,8 +65,8 @@ final class VideoEncoderTests: XCTestCase {
         XCTAssertTrue(admission.admit()); XCTAssertTrue(admission.admit())
         XCTAssertFalse(admission.admit())
         admission.queued -= 2
-        for _ in 0..<6 { XCTAssertTrue(admission.admit()); admission.queued -= 1 }
-        XCTAssertEqual(admission.pending, 8)
+        for _ in 0..<62 { XCTAssertTrue(admission.admit()); admission.queued -= 1 }
+        XCTAssertEqual(admission.pending, 64)
         XCTAssertFalse(admission.admit())
         admission.pending -= 1
         XCTAssertTrue(admission.admit())

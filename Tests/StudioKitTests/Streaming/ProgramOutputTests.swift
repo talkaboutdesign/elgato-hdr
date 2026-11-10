@@ -26,7 +26,7 @@ final class ProgramOutputTests: XCTestCase {
         let core = MetalCore.shared
         let y = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: 64, height: 36, mipmapped: false)))
         let c = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: 32, height: 18, mipmapped: false)))
-        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60)
+        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60, nv12: false)
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), submitted = DispatchSemaphore(value: 0)
         output.picture = { _, _, _ in entered.signal(); _ = release.wait(timeout: .now() + 2); return LivePicture() }
         output.start()
@@ -50,7 +50,7 @@ final class ProgramOutputTests: XCTestCase {
         let core = MetalCore.shared
         let y = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: 64, height: 36, mipmapped: false)))
         let c = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: 32, height: 18, mipmapped: false)))
-        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60)
+        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60, nv12: false)
         output.picture = { size, sources, _ in
             LivePicture(frame: SceneFrame(background: SIMD4(0, 0, 0, 1), layers: SceneResolver.resolve(Composition(layers: [Layer(source: .game)]), canvas: size, sources: sources)))
         }
@@ -82,7 +82,7 @@ final class ProgramOutputTests: XCTestCase {
         let y = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: 64, height: 36, mipmapped: false)))
         let c = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: 32, height: 18, mipmapped: false)))
         for rate in [30, 60] {
-            let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60)
+            let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60, nv12: false)
             let gate = DispatchSemaphore(value: 0)
             var timestamps: [UInt64] = []
             output.onFrame = { _, ns in timestamps.append(ns); gate.signal() }

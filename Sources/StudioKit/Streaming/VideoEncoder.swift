@@ -3,17 +3,37 @@ import CoreMedia
 import CoreVideo
 import VideoToolbox
 
+/// Fixed-memory latency distribution: 0.1 ms buckets up to 2 s, with an exact maximum.
+struct EncodeLatency: Equatable {
+    private var buckets = [Int](repeating: 0, count: 20001)
+    private(set) var count = 0
+    private(set) var maxMs = 0.0
+    mutating func add(_ ms: Double) {
+        buckets[min(20000, max(0, Int(ms * 10)))] += 1
+        count += 1; maxMs = max(maxMs, ms)
+    }
+    func percentile(_ fraction: Double) -> Double {
+        guard count > 0 else { return 0 }
+        let rank = max(1, Int(ceil(Double(count) * fraction)))
+        var n = 0
+        for (i, v) in buckets.enumerated() { n += v; if n >= rank { return Double(i) / 10 } }
+        return maxMs
+    }
+}
+
 struct EncodeAdmission {
+    // Measured BGRA callback bursts reached 46 outstanding frames; retain headroom without unbounded memory.
+    static let inFlightLimit = 64
     var queued = 0, pending = 0
     mutating func admit() -> Bool {
-        guard queued < 2, pending < 8 else { return false }
+        guard queued < 2, pending < Self.inFlightLimit else { return false }
         queued += 1; pending += 1; return true
     }
 }
 
 final class VideoEncoder {
     struct Settings { var width, height: Int; var fps: Double; var bitrate: Int }
-    struct Stats { var frames = 0, dropped = 0; var encodeMs = 0.0, latencyMs = 0.0 }
+    struct Stats { var frames = 0, dropped = 0, queueRejected = 0, inFlightRejected = 0; var encodeMs = 0.0, latencyMs = 0.0; var latency = EncodeLatency() }
     var onConfig: ((Data, Data) -> Void)?
     var onFrame: ((Data, UInt64, Bool) -> Void)?
     var onError: ((OSStatus) -> Void)?
@@ -24,6 +44,7 @@ final class VideoEncoder {
     private var admission = EncodeAdmission()
     private var accepting = true, forceKeyframe = false
     private var counters = Stats()
+    private var lifetime = EncodeLatency(), totalQueueRejected = 0, totalInFlightRejected = 0, totalDropped = 0
     private var config: [Data] = []
     private let duration: CMTime
     private let settings: Settings
@@ -65,11 +86,11 @@ final class VideoEncoder {
     }
 
     func requestKeyframe() { lock.lock(); forceKeyframe = true; lock.unlock() }
-    func encode(_ pb: CVPixelBuffer, hostNs: UInt64) {
+    func encode(_ pb: CVPixelBuffer, hostNs: UInt64, onComplete: @escaping () -> Void = {}) {
         lock.lock()
-        guard accepting, admission.admit() else { if accepting { counters.dropped += 1 }; lock.unlock(); return }
+        guard accepting, admission.admit() else { if accepting { counters.dropped += 1; totalDropped += 1; if admission.queued >= 2 { counters.queueRejected += 1; totalQueueRejected += 1 } else { counters.inFlightRejected += 1; totalInFlightRejected += 1 } }; lock.unlock(); onComplete(); return }
         queue.async { [self] in
-            guard let session else { lock.lock(); admission.queued -= 1; lock.unlock(); completed(); return }
+            guard let session else { lock.lock(); admission.queued -= 1; lock.unlock(); completed(); onComplete(); return }
             lock.lock(); let force = forceKeyframe; forceKeyframe = false; lock.unlock()
             let begin = nowNs(), token = epoch
             let options = force ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
@@ -78,7 +99,7 @@ final class VideoEncoder {
                 frameProperties: options, infoFlagsOut: nil) { [self] status, _, sample in
                     // VT may invoke this inline or on an internal queue. Preserve callback/config order on our queue.
                     queue.async { [self] in
-                        defer { completed(token: token) }
+                        defer { completed(token: token); onComplete() }
                         guard token == epoch else { return }
                         guard status == noErr, let sample else { failed(status); return }
                         failures = 0
@@ -87,7 +108,7 @@ final class VideoEncoder {
                 }
             let elapsed = Double(nowNs() - begin) / 1e6
             lock.lock(); admission.queued -= 1; counters.encodeMs += elapsed; lock.unlock()
-            if status != noErr { completed(token: token); failed(status) }
+            if status != noErr { completed(token: token); onComplete(); failed(status) }
         }
         lock.unlock()
     }
@@ -95,7 +116,7 @@ final class VideoEncoder {
     func invalidateForTesting(fatal: Bool = false) { queue.sync { failRecoveryForTesting = fatal; if let session { VTCompressionSessionInvalidate(session) } } }
     func drainForTesting() { queue.sync {} }
     private func failed(_ status: OSStatus) {
-        lock.lock(); counters.dropped += 1; lock.unlock()
+        lock.lock(); counters.dropped += 1; totalDropped += 1; lock.unlock()
         failures += 1
         let ns = nowNs()
         if ns - lastErrorNs >= 1_000_000_000 { log("stream: H.264 failure (\(status)); recovering"); lastErrorNs = ns }
@@ -133,7 +154,8 @@ final class VideoEncoder {
         let status = data.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: $0.count, destination: $0.baseAddress!) }
         guard status == noErr else { onError?(status); return }
         let pts = CMTimeConvertScale(CMSampleBufferGetPresentationTimeStamp(sample), timescale: 1_000_000_000, method: .default).value
-        lock.lock(); counters.frames += 1; counters.latencyMs += Double(nowNs() - begin) / 1e6; lock.unlock()
+        let ms = Double(nowNs() - begin) / 1e6
+        lock.lock(); counters.frames += 1; counters.latencyMs += ms; counters.latency.add(ms); lifetime.add(ms); lock.unlock()
         onFrame?(data, UInt64(max(0, pts)), keyframe)
     }
     func takeStats() -> Stats { lock.lock(); defer { lock.unlock() }; let result = counters; counters = Stats(); return result }
@@ -142,6 +164,7 @@ final class VideoEncoder {
         queue.sync { if let session { VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid) } }
         // CompleteFrames schedules the last callbacks; drain them before invalidating.
         queue.sync { if let session { VTCompressionSessionInvalidate(session) }; session = nil }
+        log("encoder summary \(settings.width)x\(settings.height): frames=\(lifetime.count) dropped render=0 encoder=\(totalDropped) queueRejected=\(totalQueueRejected) inFlightRejected=\(totalInFlightRejected) latency p50=\(lifetime.percentile(0.50)) p95=\(lifetime.percentile(0.95)) p99=\(lifetime.percentile(0.99)) max=\(lifetime.maxMs) ms")
     }
     deinit { if let session { VTCompressionSessionInvalidate(session) } }
 }

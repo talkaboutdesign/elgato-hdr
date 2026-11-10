@@ -73,15 +73,17 @@ struct Layer: Codable, Equatable, Identifiable {
     var border = false, shadow = false, mirror = false
     var opacity = 1.0
     var visible = true
+    var frameWidth = 0.0 // outer ring width as a fraction of the canvas shorter side
+    var frameColor: [Double] = [0.42, 0.49, 1, 1]
 }
 extension Layer {
-    enum CodingKeys: String, CodingKey { case id, name, source, frame, fit, zoom, panX, panY, roundness, border, shadow, mirror, opacity, visible }
+    enum CodingKeys: String, CodingKey { case id, name, source, frame, fit, zoom, panX, panY, roundness, border, shadow, mirror, opacity, visible, frameWidth, frameColor }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = Layer(source: LayerSource(type: ""))
         self.init(id: c.v(.id, UUID()), name: c.v(.name, z.name), source: c.v(.source, z.source), frame: c.v(.frame, z.frame),
                   fit: c.v(.fit, z.fit), zoom: c.v(.zoom, z.zoom), panX: c.v(.panX, z.panX), panY: c.v(.panY, z.panY),
                   roundness: c.v(.roundness, z.roundness), border: c.v(.border, z.border), shadow: c.v(.shadow, z.shadow),
-                  mirror: c.v(.mirror, z.mirror), opacity: c.v(.opacity, z.opacity), visible: c.v(.visible, z.visible))
+                  mirror: c.v(.mirror, z.mirror), opacity: c.v(.opacity, z.opacity), visible: c.v(.visible, z.visible), frameWidth: c.v(.frameWidth, 0), frameColor: c.v(.frameColor, z.frameColor))
     }
 }
 
@@ -136,5 +138,7 @@ extension Scene {
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         self.init(id: c.v(.id, UUID()), name: c.v(.name, ""), wide: c.v(.wide, Composition()), vertical: c.v(.vertical, Composition()))
+        wide.migrateCameraFrame(canvas: Canvas.wide.size(.hd))
+        vertical.migrateCameraFrame(canvas: Canvas.vertical.size(.hd))
     }
 }

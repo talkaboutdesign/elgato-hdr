@@ -26,6 +26,8 @@ struct DestinationHealth: Equatable {
 }
 
 struct CanvasHealth: Equatable {
+    var queueRejected = 0, inFlightRejected = 0
+    var latencyP50 = 0.0, latencyP95 = 0.0, latencyP99 = 0.0, latencyMax = 0.0
     var canvas: Canvas
     var fps: Double
     var renderMs: Double

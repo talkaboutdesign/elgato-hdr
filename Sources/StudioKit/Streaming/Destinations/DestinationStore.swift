@@ -6,9 +6,11 @@ struct DestinationStore {
     let url: URL
 
     static var defaultURL: URL {
+        #if DEBUG
         if let path = ProcessInfo.processInfo.environment["EHDR_STREAMING_FILE"], !path.isEmpty {
             return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         }
+        #endif
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("\(AppInfo.name)/streaming.json")
     }

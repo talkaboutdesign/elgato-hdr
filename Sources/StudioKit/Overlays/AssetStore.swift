@@ -12,7 +12,9 @@ enum AssetStore {
 
     /// Read once: render threads look overlays up every frame. `EHDR_ASSETS_DIR` redirects it for test runs.
     static let appSupportAssets: URL = {
+        #if DEBUG
         if let d = ProcessInfo.processInfo.environment["EHDR_ASSETS_DIR"], !d.isEmpty { return URL(fileURLWithPath: d, isDirectory: true) }
+        #endif
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Elgato HDR/Assets", isDirectory: true)
     }()

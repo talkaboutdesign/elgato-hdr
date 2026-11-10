@@ -119,7 +119,7 @@ struct LiveSceneState {
             for i in f.layers.indices {
                 let d = f.layers[i].dst
                 f.layers[i].dst = CGRect(x: d.minX * sx, y: d.minY * sy, width: d.width * sx, height: d.height * sy)
-                f.layers[i].radius *= sx; f.layers[i].border *= sx; f.layers[i].shadow *= sx
+                f.layers[i].radius *= sx; f.layers[i].border *= sx; f.layers[i].shadow *= sx; f.layers[i].frameWidth *= sx
             }
             return f
         }
@@ -156,14 +156,18 @@ struct LiveSceneState {
     }
 
     /// The image and text layers that can be in the picture at `t`: the scene's own and, while a transition runs, those
-    /// of the picture it starts from. A layer id in both (a morph match) is the target's definition.
+    /// of the picture it starts from. Same-id content switches at the eased midpoint.
     func overlayLayers(canvas: Canvas, atNs t: UInt64) -> [Layer] {
-        var out = to.composition(canvas).layers.filter(\.isOverlay)
-        guard progress(atNs: t) < 1 else { return out }
-        var seen = Set(out.map(\.id))
+        let target = to.composition(canvas).layers.filter { $0.isOverlay && $0.visible && $0.opacity > 0 }
+        let e = progress(atNs: t)
+        guard e < 1 else { return target }
         let frozen = canvas == .wide ? snapshot?.wideOverlays : snapshot?.verticalOverlays
-        for l in (from?.composition(canvas).layers ?? []) + (frozen ?? []) where l.isOverlay && seen.insert(l.id).inserted { out.append(l) }
-        return out
+        let old = (frozen ?? from?.composition(canvas).layers ?? []).filter { $0.isOverlay && $0.visible && $0.opacity > 0 }
+        // Same-id content switches at the eased midpoint. Hidden definitions must never displace a drawable
+        // outgoing source. A frozen interruption takes precedence over the previous scene's unfrozen definition.
+        let candidates = e < 0.5 ? old + target : target + old
+        var seen = Set<UUID>()
+        return candidates.filter { seen.insert($0.id).inserted }
     }
 
     /// The picture at host time `t` for one canvas. `size` is the canvas in pixels; `sources` the pixel sizes of the
@@ -295,6 +299,8 @@ struct SceneBlend {
         var l = b   // fields this blend does not know about come from the target
         l.dst = mix(a.dst, b.dst); l.src = mix(a.src, b.src)
         l.radius = mix(a.radius, b.radius); l.border = mix(a.border, b.border); l.shadow = mix(a.shadow, b.shadow)
+        l.frameWidth = mix(a.frameWidth, b.frameWidth)
+        l.frameColor = a.frameColor + (b.frameColor - a.frameColor) * Float(e)
         l.opacity = a.opacity + (b.opacity - a.opacity) * e
         l.mirror = e < 0.5 ? a.mirror : b.mirror
         // A game growing from a rounded window to full screen keeps anti-aliased edges until it arrives; at progress 0

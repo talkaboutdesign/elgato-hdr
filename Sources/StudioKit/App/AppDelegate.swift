@@ -80,13 +80,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         audio.muted = UserDefaults.standard.bool(forKey: "muted"); state.muted = audio.muted
+        #if DEBUG
         // Development: `--export <project folder> [hdr|sdr] [hd|uhd]` renders both canvases and quits (no capture).
         if let i = CommandLine.arguments.firstIndex(of: "--export"), i + 1 < CommandLine.arguments.count {
             let args = CommandLine.arguments
             runHeadlessExport(dir: URL(fileURLWithPath: args[i + 1]), range: args.contains("sdr") ? .sdr : .hdr, res: args.contains("uhd") ? .uhd : .hd)
             return
         }
-        #if DEBUG
         if let i = CommandLine.arguments.firstIndex(of: "--make-fixture"), i+1 < CommandLine.arguments.count {
             let arg = CommandLine.arguments[i+1]
             let dir = arg.hasPrefix("/") ? URL(fileURLWithPath: arg) : Self.recordingsDir.appendingPathComponent(arg)
@@ -121,13 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         DebugSnapshots.start()
         startDebugChecks()
-        #endif
         if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 self?.startRecording()
                 DispatchQueue.main.asyncAfter(deadline: .now() + secs) { self?.stopRecording() }
             }
         }
+        #endif
     }
 
     var headless = false

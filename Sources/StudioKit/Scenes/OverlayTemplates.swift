@@ -65,7 +65,8 @@ extension SceneTemplate {
             let pad = (min(canvas.width, canvas.height) * 0.011).rounded()
             var cam = Layer(name: "Camera", source: .camera, frame: NRect(frame, in: canvas), roundness: 0.5, mirror: mirror)
             cam.shadow = true
-            return [.color(accent, name: "Camera Ring", frame: NRect(frame.insetBy(dx: -pad, dy: -pad), in: canvas), roundness: 0.5), cam]
+            cam.frameWidth = pad / min(canvas.width, canvas.height); cam.frameColor = accent
+            return [cam]
         }
         func comp(_ layers: [Layer]) -> Composition { Composition(background: ScreenStyle.ink, layers: layers) }
         switch self {
@@ -107,15 +108,33 @@ enum LayerPreset: String, CaseIterable, Identifiable {
             return .success(l.id)
         case .cameraFrame:
             guard let i = c.layers.lastIndex(where: { $0.source.type == "camera" && $0.visible }) else { return .failure(.noCamera) }
-            let cam = c.layers[i], r = cam.frame.rect(in: size)
-            // Same corner shape, a constant ring width: the outer radius is the camera's plus the padding.
-            let pad = (min(size.width, size.height) * 0.009).rounded()
-            let outer = r.insetBy(dx: -pad, dy: -pad), inner = min(0.5, max(0, cam.roundness)) * min(r.width, r.height)
-            let roundness = min(0.5, (inner + pad) / max(1, min(outer.width, outer.height)))
-            let ring = Layer.color(ScreenStyle.blue, name: "Camera Frame", frame: NRect(outer, in: size), roundness: roundness)
-            c.layers.insert(ring, at: i)
-            return .success(ring.id)
+            c.layers[i].frameWidth = (min(size.width, size.height) * 0.009).rounded() / min(size.width, size.height)
+            c.layers[i].frameColor = ScreenStyle.blue
+            return .success(c.layers[i].id)
         }
     }
     enum PresetError: Error { case noCamera }
+}
+
+
+extension Composition {
+    /// Only migrate an untouched, adjacent legacy preset. Edited or ambiguous decorations stay independent.
+    mutating func migrateCameraFrame(canvas: CGSize) {
+        guard layers.count > 1 else { return }
+        for i in stride(from: layers.count - 1, through: 1, by: -1) {
+            let cam = layers[i], ring = layers[i - 1]
+            guard cam.source.type == "camera", cam.frameWidth == 0, ring.source.type == "color",
+                  ring.name == "Camera Frame" || ring.name == "Camera Ring",
+                  ring.visible, ring.opacity == 1, !ring.shadow, !ring.border, let color = ring.source.color else { continue }
+            let r = cam.frame.rect(in: canvas), outer = ring.frame.rect(in: canvas)
+            let pad = (min(canvas.width, canvas.height) * (ring.name == "Camera Frame" ? 0.009 : 0.011)).rounded()
+            let expected = r.insetBy(dx: -pad, dy: -pad)
+            let radius = min(0.5, (cam.roundness * min(r.width, r.height) + pad) / min(outer.width, outer.height))
+            guard abs(outer.minX - expected.minX) < 0.01, abs(outer.minY - expected.minY) < 0.01,
+                  abs(outer.width - expected.width) < 0.01, abs(outer.height - expected.height) < 0.01,
+                  abs(ring.roundness - radius) < 0.001 else { continue }
+            layers[i].frameWidth = pad / min(canvas.width, canvas.height); layers[i].frameColor = color
+            layers.remove(at: i - 1)
+        }
+    }
 }

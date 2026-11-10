@@ -12,6 +12,8 @@ final class StreamSession {
         /// Same order as `publishers`, so a caller can tell whose numbers are whose.
         var publisherIDs: [ObjectIdentifier] = []
         var renderSkips = ProgramOutput.Stats()
+        var queueRejected = 0, inFlightRejected = 0
+        var latency = EncodeLatency()
     }
     /// A lane that could not start: only the destinations of that canvas are affected.
     struct LaneFailure: Error, Equatable, CustomStringConvertible { let description: String }
@@ -75,7 +77,7 @@ final class StreamSession {
                 self.onStats?(Stats(canvas: lane.canvas, fps: Double(e.frames) / dt,
                     renderMs: p.renderMs / Double(max(1, p.frames)), encodeMs: e.encodeMs / n, latencyMs: e.latencyMs / n,
                     renderDropped: p.dropped, encoderDropped: e.dropped, publishers: publishers.map(\.stats),
-                    publisherIDs: publishers.map(ObjectIdentifier.init), renderSkips: p))
+                    publisherIDs: publishers.map(ObjectIdentifier.init), renderSkips: p, queueRejected: e.queueRejected, inFlightRejected: e.inFlightRejected, latency: e.latency))
             }
         }
         self.timer = timer; timer.resume()
@@ -144,12 +146,20 @@ final class StreamSession {
 
     private func makeLane(_ output: Output) -> Lane? {
         guard let encoder = makeEncoder(.init(width: Int(output.size.width), height: Int(output.size.height), fps: output.fps, bitrate: output.videoBitrate)) else { return nil }
-        let program = ProgramOutput(canvas: output.canvas, size: output.size, fps: output.fps)
+        #if DEBUG
+        let nv12 = ProcessInfo.processInfo.environment["EHDR_STREAM_BGRA"] != "1"
+        #else
+        let nv12 = true
+        #endif
+        let program = ProgramOutput(canvas: output.canvas, size: output.size, fps: output.fps, nv12: nv12)
+        guard program.isReady else { encoder.finish(); log("stream: program buffer preallocation failed"); return nil }
         program.picture = { [weak self] size, sources, ns in
             self?.renderer.livePicture(canvas: output.canvas, size: size, sources: sources, atNs: ns) ?? LivePicture()
         }
         program.camera = { [weak self] in self?.renderer.overlay.camera?.latest }
-        program.onFrame = { [weak encoder] pb, ns in encoder?.encode(pb, hostNs: ns) }
+        program.onLeasedFrame = { [weak encoder] pb, ns, release in
+            guard let encoder else { release(); return }; encoder.encode(pb, hostNs: ns, onComplete: release)
+        }
         let lane = Lane(canvas: output.canvas, program: program, encoder: encoder)
         let publishers = lane.publishers
         encoder.onConfig = { sps, pps in publishers.setConfig(sps, pps).forEach { $0.setVideoConfig(sps: sps, pps: pps) } }

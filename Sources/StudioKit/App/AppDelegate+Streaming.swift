@@ -6,7 +6,11 @@ import SwiftUI
 extension AppDelegate {
     func makeStreamController() -> StreamController {
         // Agent demo runs point the Keychain service elsewhere so they never touch the user's stream keys.
+        #if DEBUG
         let service = ProcessInfo.processInfo.environment["EHDR_KEYCHAIN_SERVICE"].flatMap { $0.isEmpty ? nil : $0 } ?? KeychainStore.streamKeyService
+        #else
+        let service = KeychainStore.streamKeyService
+        #endif
         let c = StreamController(state: state.streaming, keychain: KeychainStore(service: service))
         c.makeSession = { [weak self] outputs, settings in
             guard let self, let renderer = self.renderer else { return nil }
@@ -173,7 +177,6 @@ extension AppDelegate {
     func scheduleStreaming() {
         #if DEBUG
         scheduleStreamUIChecks()
-        #endif
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--go-live-for"), i + 1 < args.count,
               let seconds = Double(args[i + 1]), seconds.isFinite, seconds > 0 else { return }
@@ -197,5 +200,6 @@ extension AppDelegate {
                 }
             }
         }
+        #endif
     }
 }
