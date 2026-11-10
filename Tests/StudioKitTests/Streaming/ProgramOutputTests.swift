@@ -33,4 +33,27 @@ final class ProgramOutputTests: XCTestCase {
         XCTAssertEqual(stats.dropped, 0)
         print("ProgramOutput: 180 frames at 120 fps -> \(selected.count) at 60 fps; no-signal frame delivered; dropped=\(stats.dropped)")
     }
+    func testJitterAndSlowSourceNeverDuplicate() throws {
+        let core = MetalCore.shared
+        let y = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: 64, height: 36, mipmapped: false)))
+        let c = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: 32, height: 18, mipmapped: false)))
+        for rate in [30, 60] {
+            let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60)
+            let gate = DispatchSemaphore(value: 0)
+            var timestamps: [UInt64] = []
+            output.onFrame = { _, ns in timestamps.append(ns); gate.signal() }
+            output.start()
+            let base = nowNs()
+            for frame in 0..<60 {
+                let jitter: UInt64 = frame % 2 == 0 ? 0 : 500_000
+                let ns = base + UInt64(frame) * 1_000_000_000 / UInt64(rate) + jitter
+                output.gameFrame(y: y, c: c, size: CGSize(width: 64, height: 36), colorMode: .sdr, camera: nil, hostNs: ns)
+                XCTAssertEqual(gate.wait(timeout: .now() + 1), .success)
+                XCTAssertEqual(timestamps.last, ns)
+            }
+            output.stop()
+            XCTAssertEqual(timestamps.count, 60)
+        }
+    }
+
 }

@@ -32,9 +32,12 @@ extension AppDelegate {
         }
         let stream = StreamSession(outputs: outputs, audioBitrate: 160_000, renderer: renderer, mixer: streamMixer)
         stream.onError = { error in log("stream: \(error)") }
-        stream.onStats = { stats in
+        stream.onStats = { [weak self] stats in
             log(String(format: "stream %@: %.1f fps render %.3f ms encode %.3f ms callback %.3f ms dropped render=%d encoder=%d", stats.canvas.rawValue,
                        stats.fps, stats.renderMs, stats.encodeMs, stats.latencyMs, stats.renderDropped, stats.encoderDropped))
+            if let recorder = self?.recorder {
+                recorder.queue.async { log("stream recording: frames=\(recorder.videoFrames) dropped=\(recorder.droppedVideo) gaps=\(recorder.gapFrames)") }
+            }
             for p in stats.publishers { log(String(format: "stream upload: %.0f kbps pendingMs=%.2f dropped=%d reconnects=%d", p.kbps, p.pendingMs, p.droppedFrames, p.reconnects)) }
         }
         if stream.start() { streamSession = stream; streamItem?.title = "End Stream" }
