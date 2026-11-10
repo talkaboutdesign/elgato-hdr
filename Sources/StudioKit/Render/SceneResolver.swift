@@ -19,7 +19,7 @@ struct ResolvedLayer: Equatable {
     /// game whose edge falls on a half pixel keeps whole edge rows instead of blending them with the background.
     var hardEdge = false
     var frameWidth: CGFloat = 0
-    var frameColor = SIMD4<Float>(0, 0, 0, 0)
+    var frameColor = SIMD4<Float>(0.42, 0.49, 1, 1)
 }
 
 /// Turns a composition into drawable layers for one canvas size. Pure; the rules are the ones the fixed layouts have

@@ -76,3 +76,21 @@ final class VideoEncoderTests: XCTestCase {
         XCTAssertNil(VideoEncoder(settings: .init(width: 100, height: 100, fps: .nan, bitrate: 1000)))
     }
 }
+
+extension VideoEncoderTests {
+    func testRejectedAndInvalidatedBuffersReleaseTheirLeases() throws {
+        let encoder = try XCTUnwrap(VideoEncoder(settings: .init(width: 64, height: 36, fps: 60, bitrate: 100_000)))
+        var pb: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(nil, 64, 36, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pb), kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pb), lock = NSLock()
+        var counts = [Int](repeating: 0, count: 101)
+        for i in 0..<100 {
+            encoder.encode(buffer, hostNs: UInt64(i + 1) * 17_000_000) { lock.lock(); counts[i] += 1; lock.unlock() }
+            if i == 10 { encoder.invalidateForTesting() }
+        }
+        encoder.finish()
+        encoder.encode(buffer, hostNs: 2_000_000_000) { lock.lock(); counts[100] += 1; lock.unlock() }
+        lock.lock(); let released = counts; lock.unlock()
+        XCTAssertEqual(released, [Int](repeating: 1, count: 101))
+    }
+}

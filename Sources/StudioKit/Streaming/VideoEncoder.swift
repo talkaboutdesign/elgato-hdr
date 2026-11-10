@@ -49,6 +49,7 @@ final class VideoEncoder {
     private let duration: CMTime
     private let settings: Settings
     private var failures = 0, epoch = 0
+    private var leases: [Int: () -> Void] = [:], nextLease = 0
     private var lastErrorNs: UInt64 = 0
     private var failRecoveryForTesting = false
 
@@ -92,6 +93,7 @@ final class VideoEncoder {
         queue.async { [self] in
             guard let session else { lock.lock(); admission.queued -= 1; lock.unlock(); completed(); onComplete(); return }
             lock.lock(); let force = forceKeyframe; forceKeyframe = false; lock.unlock()
+            let leaseID = nextLease; nextLease += 1; leases[leaseID] = onComplete
             let begin = nowNs(), token = epoch
             let options = force ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
             let status = VTCompressionSessionEncodeFrame(session, imageBuffer: pb,
@@ -99,7 +101,7 @@ final class VideoEncoder {
                 frameProperties: options, infoFlagsOut: nil) { [self] status, _, sample in
                     // VT may invoke this inline or on an internal queue. Preserve callback/config order on our queue.
                     queue.async { [self] in
-                        defer { completed(token: token); onComplete() }
+                        defer { completeLease(leaseID, token: token) }
                         guard token == epoch else { return }
                         guard status == noErr, let sample else { failed(status); return }
                         failures = 0
@@ -108,7 +110,7 @@ final class VideoEncoder {
                 }
             let elapsed = Double(nowNs() - begin) / 1e6
             lock.lock(); admission.queued -= 1; counters.encodeMs += elapsed; lock.unlock()
-            if status != noErr { completed(token: token); onComplete(); failed(status) }
+            if status != noErr { completeLease(leaseID, token: token); failed(status) }
         }
         lock.unlock()
     }
@@ -124,6 +126,7 @@ final class VideoEncoder {
         epoch += 1
         lock.lock(); admission.pending = admission.queued; lock.unlock()
         if let session { VTCompressionSessionInvalidate(session) }
+        cancelLeases()
         session = nil; config = []
         if !failRecoveryForTesting && createSession() { failures = 0; requestKeyframe(); onRecovery?() }
         else {
@@ -131,6 +134,16 @@ final class VideoEncoder {
             lock.lock(); accepting = false; lock.unlock()
             onError?(status)
         }
+    }
+    private func completeLease(_ id: Int, token: Int) {
+        guard let done = leases.removeValue(forKey: id) else { return }
+        completed(token: token); done()
+    }
+    private func cancelLeases() {
+        // Invalidation has returned: VT no longer reads these buffers. A cancelled frame need not get an output
+        // callback; late callbacks find no lease, so they cannot recycle the same slot twice.
+        let abandoned = Array(leases.values); leases.removeAll()
+        abandoned.forEach { $0() }
     }
     private func completed(token: Int? = nil) {
         guard token == nil || token == epoch else { return }
@@ -163,7 +176,7 @@ final class VideoEncoder {
         lock.lock(); accepting = false; lock.unlock()
         queue.sync { if let session { VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid) } }
         // CompleteFrames schedules the last callbacks; drain them before invalidating.
-        queue.sync { if let session { VTCompressionSessionInvalidate(session) }; session = nil }
+        queue.sync { if let session { VTCompressionSessionInvalidate(session) }; session = nil; epoch += 1; cancelLeases() }
         log("encoder summary \(settings.width)x\(settings.height): frames=\(lifetime.count) dropped render=0 encoder=\(totalDropped) queueRejected=\(totalQueueRejected) inFlightRejected=\(totalInFlightRejected) latency p50=\(lifetime.percentile(0.50)) p95=\(lifetime.percentile(0.95)) p99=\(lifetime.percentile(0.99)) max=\(lifetime.maxMs) ms")
     }
     deinit { if let session { VTCompressionSessionInvalidate(session) } }

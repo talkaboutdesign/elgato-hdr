@@ -26,6 +26,7 @@ final class ProgramOutput {
     /// reader thread (game frames) and the no-signal queue; it must not block.
     var picture: (_ size: CGSize, _ sources: [SourceKey: SourceInfo], _ hostNs: UInt64) -> LivePicture = { _, _, _ in LivePicture() }
     var camera: () -> CVPixelBuffer? = { nil }
+    /// Synchronous observer; consumers retaining buffers asynchronously must use the lease callback.
     var onFrame: ((CVPixelBuffer, UInt64) -> Void)?
     var onLeasedFrame: ((CVPixelBuffer, UInt64, @escaping () -> Void) -> Void)?
     private struct Slot {
@@ -135,7 +136,10 @@ final class ProgramOutput {
         textures.merge(pic.textures) { own, _ in own }
         core.encodeLayers(cb, target: target, canvas: size, background: pic.frame.background, outTransfer: 2,
                           layers: DrawLayer.pair(pic.frame.layers, textures))
-        if let chroma = slot.chroma, let conversion, let enc = cb.makeComputeCommandEncoder() {
+        if let chroma = slot.chroma {
+            guard let conversion, let enc = cb.makeComputeCommandEncoder() else {
+                release(index); statsLock.lock(); counters.dropped += 1; totalDropped += 1; counters.gpu += 1; statsLock.unlock(); return
+            }
             enc.setComputePipelineState(conversion)
             enc.setTexture(target, index: 0); enc.setTexture(slot.target, index: 1); enc.setTexture(chroma, index: 2)
             enc.dispatchThreads(MTLSize(width: chroma.width, height: chroma.height, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 8, depth: 1))
@@ -155,8 +159,9 @@ final class ProgramOutput {
                 else { counters.inactive += 1 }
             }
             statsLock.unlock()
+            if deliver { onFrame?(pb, hostNs) }
             if deliver, let onLeasedFrame { onLeasedFrame(pb, hostNs) { [self] in release(index) } }
-            else { if deliver { onFrame?(pb, hostNs) }; release(index) }
+            else { release(index) }
         }
         cb.commit()
     }

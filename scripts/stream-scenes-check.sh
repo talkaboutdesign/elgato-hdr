@@ -118,7 +118,7 @@ for port, canvas in ports.items():
             mean = [sum(raw['after'][i::3]) / (w*h) for i in range(3)]
             assert all(abs(got - value*255) < 8 for got, value in zip(mean, rgb)), f'FAIL: {canvas} wrong scene pixels {mean}, expected {rgb}'
         ok &= changed
-        print(f"  {name} at stream {t:6.3f}s: before→during {d_mid:5.1f}, before→after {d_total:5.1f} (mean |Δ| per channel) {'changed' if changed else 'FAIL: unchanged'}")
+        print(f"  {name} at stream {t:6.3f}s: before→during {d_mid:5.1f}, before→after {d_total:5.1f} (mean |Δ| per channel) {('unchanged as expected' if no_change else 'changed as expected') if changed else 'FAIL: unexpected pixels'}")
     for s in probes: png(f, s, f'{canvas}-probe-{s:05.2f}s.png')
 print('PASS: both outputs show every scripted change' if ok else 'FAIL: see above')
 print(f'Artifacts: {out}')

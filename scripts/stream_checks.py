@@ -28,7 +28,7 @@ def expected_actions(script):
         assert m, f'FAIL: invalid scripted action: {step}'
         result.append((float(m[1]), m[2]))
     assert result, 'FAIL: no expected actions'
-    return [a for _, a in sorted(result)]
+    return [a for _, a in sorted(result, key=lambda item: item[0])]
 
 
 def check_actions(script, actual):

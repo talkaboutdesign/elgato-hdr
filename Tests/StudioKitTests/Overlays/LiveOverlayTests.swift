@@ -99,7 +99,7 @@ final class LiveOverlayTests: XCTestCase {
         let fill = Layer(source: LayerSource(type: "color", color: [1, 0, 0, 1]))
         renderer.scene = LiveSceneState(scene: scene("I", [fill, image(name, frame: NRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5))]))
         renderer.overlayContext = LiveOverlayContext(timerStartNs: nil, assets: [dir])
-        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60)
+        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60, nv12: false)
         output.picture = { [weak renderer] s, src, ns in renderer?.livePicture(canvas: .wide, size: s, sources: src, atNs: ns) ?? LivePicture() }
         let gate = DispatchSemaphore(value: 0), lock = NSLock()
         var centre: [[UInt8]] = []
