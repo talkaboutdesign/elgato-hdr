@@ -147,38 +147,28 @@ struct ToolButton: View {
     }
 }
 
+/// "Scene ▾": a tool button that pops up the scene choices (a SwiftUI Menu would be announced by its icon's name).
 struct SceneChangeMenu: View {
     let model: EditorModel
     var body: some View {
-        Menu {
-            Section("Change scene at the playhead") {
-                ForEach(Array(model.sceneChoices.enumerated()), id: \.element.id) { i, c in
-                    Button { model.addSceneChange(c) } label: {
-                        Text(c.sceneID == nil && c.template != nil ? "\(c.name) (new)" : c.name)
-                    }
-                    .shortcutLabel(i < 9 ? KeyEquivalent(Character("\(i + 1)")) : nil, modifiers: .control)
-                }
+        ToolButton(title: "Scene", systemImage: "rectangle.3.group", help: "Change to another scene at the playhead (⌃1…⌃9)") { popUp() }
+            .overlay(alignment: .trailing) {
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary).offset(x: 6).allowsHitTesting(false)
             }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "rectangle.3.group").accessibilityHidden(true)
-                Text("Scene")
-            }
-            .font(.system(size: 12, weight: .medium))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.visible)
-        .fixedSize()
-        .padding(.horizontal, 6)
-        .help("Change to another scene at the playhead (⌃1…⌃9)")
-        .accessibilityLabel("Scene change")
+            .padding(.trailing, 6)
     }
-}
 
-extension View {
-    /// Shows a shortcut next to a menu item. The editor's key handler sees the key first, so it never fires twice.
-    @ViewBuilder func shortcutLabel(_ key: KeyEquivalent?, modifiers: EventModifiers) -> some View {
-        if let key = key { self.keyboardShortcut(key, modifiers: modifiers) } else { self }
+    private func popUp() {
+        guard let e = NSApp.currentEvent, let w = e.window, let content = w.contentView else { return }
+        let menu = NSMenu()
+        let header = NSMenuItem(title: "Change scene at the playhead", action: nil, keyEquivalent: ""); header.isEnabled = false
+        menu.addItem(header)
+        for (i, c) in model.sceneChoices.enumerated() {
+            let item = ClosureMenuItem(title: c.sceneID == nil && c.template != nil ? "\(c.name) (new)" : c.name) { [model] in model.addSceneChange(c) }
+            if i < 9 { item.keyEquivalent = "\(i + 1)"; item.keyEquivalentModifierMask = .control }
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: content.convert(e.locationInWindow, from: nil), in: content)
     }
 }
 
