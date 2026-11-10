@@ -16,6 +16,9 @@ final class SceneRuntime {
     var gestureStart: SceneCollection?
     var eventLog: SessionEventLog?
     var pendingProjectSave: DispatchWorkItem?
+    /// View › Show Clean Game Picture in Focus Mode (persisted, on by default).
+    var cleanGameInFocus = WindowPicture.setting()
+    var cleanGameItem: NSMenuItem?
 }
 
 // Scenes: switching with transitions, editing the active scene, punch-in, the Scenes menu and the event log.
@@ -48,7 +51,7 @@ extension AppDelegate {
         #if DEBUG
         startSceneDebug()
         #endif
-        trackChanges({ [weak self] in self?.state.focusMode ?? false }) { [weak self] focus in self?.view.editingEnabled = !focus }
+        trackChanges({ [weak self] in self?.state.focusMode ?? false }) { [weak self] focus in self?.view.editingEnabled = !focus; self?.pushScene() }
         sceneDidChange(save: false)
         log("scenes: \(m.collection.scenes.count) scenes, active \(m.active.name), canvas \(m.canvas.label), transition \(m.collection.transition.style.rawValue) \(String(format: "%.0f", m.collection.transition.durationMs)) ms")
     }
@@ -97,6 +100,7 @@ extension AppDelegate {
     func pushScene() {
         guard let r = renderer else { return }
         if r.gameSnapshot !== sceneRuntime.thumbnailer.snapshot { r.gameSnapshot = sceneRuntime.thumbnailer.snapshot }
+        r.cleanGame = WindowPicture.clean(setting: sceneRuntime.cleanGameInFocus, focusMode: state.focusMode)
         r.scene = sceneRuntime.live
         r.viewCanvas = scenes.canvas
     }
@@ -452,6 +456,25 @@ extension AppDelegate {
             }
         }
         return e
+    }
+
+    // MARK: Clean game picture
+
+    /// For the View menu: in focus mode the window shows the whole game alone, in its own aspect.
+    func makeCleanGameItem() -> NSMenuItem {
+        let it = NSMenuItem(title: "Show Clean Game Picture in Focus Mode", action: #selector(toggleCleanGameView), keyEquivalent: "")
+        it.target = self; it.state = sceneRuntime.cleanGameInFocus ? .on : .off
+        it.toolTip = "In focus mode, show the whole game in its own aspect, without the camera, overlays, crop or zoom. The stream and recordings still show the scene."
+        sceneRuntime.cleanGameItem = it
+        return it
+    }
+    @objc func toggleCleanGameView() {
+        let rt = sceneRuntime
+        rt.cleanGameInFocus.toggle()
+        UserDefaults.standard.set(rt.cleanGameInFocus, forKey: WindowPicture.defaultsKey)
+        rt.cleanGameItem?.state = rt.cleanGameInFocus ? .on : .off
+        pushScene()
+        log("view: clean game picture in focus mode \(rt.cleanGameInFocus ? "on" : "off")")
     }
 
     // MARK: Menu

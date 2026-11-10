@@ -46,6 +46,9 @@ final class Renderer: NSObject {
     private var _viewCanvas = Canvas.wide
     private var _lastGame: LiveGameFrame?
     private var _gameSnapshot: GameSnapshot?
+    private var _cleanGame = false
+    /// Focus mode with the clean game picture on: the window draws the whole game alone (`WindowPicture`).
+    var cleanGame: Bool { get { lock.lock(); defer { lock.unlock() }; return _cleanGame } set { lock.lock(); _cleanGame = newValue; lock.unlock() } }
     /// Where drawn frames are copied for the scene thumbnails (twice a second; see `GameSnapshot`).
     var gameSnapshot: GameSnapshot? { get { lock.lock(); defer { lock.unlock() }; return _gameSnapshot } set { lock.lock(); _gameSnapshot = newValue; lock.unlock() } }
     var scene: LiveSceneState { get { lock.lock(); defer { lock.unlock() }; return _scene } set { lock.lock(); _scene = newValue; lock.unlock() } }
@@ -215,24 +218,22 @@ final class Renderer: NSObject {
         defer { live.snapshot?.capture(y: yT, c: cT, transfer: colorMode.transfer, on: queue, atNs: nowNs()) }
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
-        let (w, h) = live.canvas == .wide ? (16, 9) : (9, 16)   // the letterbox fits the canvas, not the game
-        let scale = min(dw / Double(w), dh / Double(h))
-        // Whole pixels, so canvas pixels are target pixels: only then may encodeLayers draw the full-canvas game on
-        // its opaque path and skip the background. The game's hard edge keeps whole rows either way.
-        let vw = (Double(w) * scale).rounded(), vh = (Double(h) * scale).rounded()
         // Game passes through untouched in its own encoding; only the facecam is converted into it.
         let ov = live.overlay, transfer = colorMode.transfer
         var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: CGSize(width: gw, height: gh))]
         var textures: [SourceKey: LayerTextures.Kind] = [.game: .biplanar(y: yT, c: cT, bits: 10, transfer: transfer, bt709: transfer == 2)]
         var keep: [CVMetalTexture] = []
-        if let pb = ov.camera?.latest, let p = MetalCore.shared.planes(pb) {
+        // The clean game picture (focus mode) draws the game alone: no camera planes to fetch.
+        if !live.clean, let pb = ov.camera?.latest, let p = MetalCore.shared.planes(pb) {
             keep = p.2
             sources[.camera] = SourceInfo(size: CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb)))
             textures[.camera] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: 2, bt709: true)
         }
-        let canvas = CGSize(width: vw, height: vh)
         // The frame's capture time, as program outputs use it, so window and stream show the same transition frame.
-        let frame = live.scene.frame(canvas: live.canvas, size: canvas, sources: sources, atNs: UInt64(max(0, arrival) * 1e9))
+        // The letterbox fits the canvas (or, clean, the game), not the drawable.
+        let pic = WindowPicture.picture(clean: live.clean, scene: live.scene, canvas: live.canvas, game: CGSize(width: gw, height: gh),
+                                        drawable: CGSize(width: dw, height: dh), sources: sources, atNs: UInt64(max(0, arrival) * 1e9))
+        let canvas = pic.size, frame = pic.frame, vw = Double(canvas.width), vh = Double(canvas.height)
         MetalCore.shared.encodeLayers(cb, target: drawable.texture,
                                       viewport: MTLViewport(originX: ((dw - vw) / 2).rounded(.down), originY: ((dh - vh) / 2).rounded(.down), width: vw, height: vh, znear: 0, zfar: 1),
                                       canvas: canvas, background: frame.background, outTransfer: transfer,
@@ -254,10 +255,10 @@ final class Renderer: NSObject {
     }
 
     /// One lock for everything a frame reads; also remembers the frame for scene thumbnails.
-    private func drawState(y: MTLTexture, c: MTLTexture, w: Int, h: Int) -> (overlay: LiveOverlay, scene: LiveSceneState, canvas: Canvas, snapshot: GameSnapshot?) {
+    private func drawState(y: MTLTexture, c: MTLTexture, w: Int, h: Int) -> (overlay: LiveOverlay, scene: LiveSceneState, canvas: Canvas, snapshot: GameSnapshot?, clean: Bool) {
         lock.lock(); defer { lock.unlock() }
         _lastGame = LiveGameFrame(y: y, c: c, size: CGSize(width: w, height: h), transfer: colorMode.transfer)
-        return (_overlay, _scene, _viewCanvas, _gameSnapshot)
+        return (_overlay, _scene, _viewCanvas, _gameSnapshot, _cleanGame)
     }
 
     /// The live scene's picture for any canvas at host time `atNs`. Program outputs (plan 20) call this from their own

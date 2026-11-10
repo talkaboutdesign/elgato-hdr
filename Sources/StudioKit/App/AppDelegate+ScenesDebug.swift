@@ -96,6 +96,14 @@ extension AppDelegate {
         if let img = renderOffscreen({ st.frame(canvas: .wide, size: CGSize(width: 1280, height: 720), sources: $0, atNs: t0 + 1_000_000_000) }, size: CGSize(width: 1280, height: 720)) {
             AppDelegate.writePNG(img, base.appendingPathComponent("punch-in-gameplay.png"))
         }
+        // Focus mode's clean game picture next to the scene the window would otherwise show, in a 16:10 window.
+        let display = CGSize(width: 1280, height: 800), gameSize = renderer?.latestGameFrame?.size ?? view.gameSize
+        for clean in [true, false] {
+            let size = WindowPicture.picture(clean: clean, scene: st, canvas: .wide, game: gameSize, drawable: display, sources: [:], atNs: t0).size
+            if let img = renderOffscreen({ WindowPicture.picture(clean: clean, scene: st, canvas: .wide, game: gameSize, drawable: display, sources: $0, atNs: t0 + 1_000_000_000).frame }, size: size) {
+                AppDelegate.writePNG(img, base.appendingPathComponent(clean ? "focus-clean-game.png" : "focus-scene.png"))
+            }
+        }
         log("morph-dump: done")
     }
 
