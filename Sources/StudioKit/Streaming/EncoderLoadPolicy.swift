@@ -6,8 +6,8 @@ enum EncoderOverloadPolicy: String, Codable, CaseIterable {
     case verticalFirst, horizontalFirst, never
     var title: String {
         switch self {
-        case .verticalFirst: "Reduce vertical stream first (recommended)"
-        case .horizontalFirst: "Reduce horizontal stream first"
+        case .verticalFirst: "Reduce the 9:16 stream first (recommended)"
+        case .horizontalFirst: "Reduce the 16:9 stream first"
         case .never: "Don't reduce (may stutter)"
         }
     }

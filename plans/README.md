@@ -107,21 +107,69 @@ Key decisions (already made; do not reopen inside a plan):
 
 ## 4. Plans and order
 
-| Plan | What | Depends on | Suggested agent |
+Status as of 10 November 2026: every numbered plan is on `main`; plan 40 (the final integration) is in review.
+
+| Plan | What | Depends on | Status on `main` |
 |---|---|---|---|
-| [00](00-foundation.md) | Swift package, file split, tests, CI, demo source | none | GPT-6 Astra, high |
-| [01](01-crash-safe-recording.md) | Fragmented writers, recovery, disk guard | 00 | Opus 5.5, medium |
-| [10](10-scene-compositor.md) | Scene model, layer compositor, parity with today | 00 | Opus 5.5, xhigh |
-| [11](11-rtmp-publisher.md) | RTMP/RTMPS publisher, FLV, AMF0 | 00 | GPT-6 Astra, xhigh |
-| [12](12-audio-mixer.md) | Audio mixer, drift control, AAC encoder | 00 | GPT-6 Astra, high |
-| [13](13-studio-shell.md) | Design system, main window, observable app state | 00 | Opus 5.5, high |
-| [20](20-program-output-go-live.md) | Program render, H.264 encoder, stream session, first Go Live | 10, 11, 12 | GPT-6 Astra, xhigh |
-| [21](21-destinations-multistream.md) | Destinations, Keychain, multistream, health UI | 13, 20 | Opus 5.5, high |
-| [22](22-live-scenes.md) | Scene collection, switching, transitions, layer editing, event log | 10, 13 | Opus 5.5, xhigh |
-| [23](23-overlays.md) | Image and text layers, templates | 10 (UI parts after 22) | Opus 5.5, high |
-| [30](30-editor-timeline-engine.md) | Project v2, cuts, scene and zoom tracks, render plan | 10 (events from 22) | GPT-6 Astra, xhigh |
-| [31](31-editor-ui.md) | Timeline UI, zoom blocks, undo, export presets | 13, 30 | Opus 5.5, xhigh |
-| [90](90-later.md) | Briefs: daemon and notarization, more sources, HDR streaming, replay buffer, web overlays, captions | various | to be detailed later |
+| [00](00-foundation.md) | Swift package, file split, tests, CI, demo source | none | Done (#3) |
+| [01](01-crash-safe-recording.md) | Fragmented writers, recovery, disk guard | 00 | Done (#6) |
+| [10](10-scene-compositor.md) | Scene model, layer compositor, parity with today | 00 | Done (#7) |
+| [11](11-rtmp-publisher.md) | RTMP/RTMPS publisher, FLV, AMF0 | 00 | Done (#5) |
+| [12](12-audio-mixer.md) | Audio mixer, drift control, AAC encoder | 00 | Done (#4) |
+| [13](13-studio-shell.md) | Design system, main window, observable app state | 00 | Done (#9) |
+| [20](20-program-output-go-live.md) | Program render, H.264 encoder, stream session, first Go Live | 10, 11, 12 | Done (#8) |
+| [21](21-destinations-multistream.md) | Destinations, Keychain, multistream, health UI | 13, 20 | Done (#12) |
+| [22](22-live-scenes.md) | Scene collection, switching, transitions, layer editing, event log | 10, 13 | Done (#13, live integration #15, review fixes #16, #17) |
+| [23](23-overlays.md) | Image and text layers, templates | 10 (UI parts after 22) | Done: engine #10, live UI and templates #15, editor and exports in plan 40 |
+| [30](30-editor-timeline-engine.md) | Project v2, cuts, scene and zoom tracks, render plan | 10 (events from 22) | Done (#11) |
+| [31](31-editor-ui.md) | Timeline UI, zoom blocks, undo, export presets | 13, 30 | Done (#14); step 7 (edit any layer in the preview) in plan 40 |
+| 40 | Final integration: the editor replays live transitions, overlays in the editor and exports, layer editing in the editor, docs | all of the above | In review |
+| [90](90-later.md) | Briefs: daemon and notarization, more sources, HDR streaming, replay buffer, web overlays, captions | various | Not started |
+
+### Done
+
+One line per plan on what turned out differently from the plan; the pull requests have the details.
+
+- **00** Foundation: demo source drives the real capture path; CI builds with Xcode 16.4 (Swift 6.1), which is stricter
+  than the development machine (see "Older compiler on CI").
+- **01** Crash-safe recording: the mic layer is checked to the last whole AAC packet (≥ 2 s − 2048 samples), not 2 s.
+- **10** Scene compositor: an opaque full-canvas layer skips everything beneath it, and the live letterbox snaps to
+  whole pixels; a `hardEdge` flag keeps the old shader's hard-clipped game edges for golden parity.
+- **11** RTMP publisher: as planned; verified against a local `ffmpeg -listen` server.
+- **12** Audio mixer: as planned.
+- **13** Studio shell: `@Observable` instead of `ObservableObject` (per-property tracking keeps the 20 Hz meter from
+  redrawing the window); the README screenshot was not replaced (snapshots cannot capture the Metal picture).
+- **20** Go Live: frame selection on the host clock without duplicating frames; `--go-live-for` makes the stream
+  self-test bounded.
+- **21** Destinations: the stream session became per-canvas lanes so destinations can join and leave while live;
+  saturated lanes reduce their frame rate automatically (see Known limits).
+- **22** Live scenes: extra morph rules (a rising layer passes in front late, unmatched layers sink, layers that will
+  be covered hold opaque), so morphs never dip to the background or double-expose.
+- **23** Overlays: images decode to power-of-two sizes for the size drawn (not "draw size or 2048 px"); text breaks
+  lines only where the string does and shrinks to fit. Editor, library and export support landed in plan 40.
+- **30** Timeline engine: as planned; transitions end at cuts in the preview exactly as in the export.
+- **31** Editor UI: `@Observable` model with its own undo manager; removing and restoring sections works on the kept
+  ranges directly so other split points survive; zoom blocks never overlap in the UI. Step 7 landed in plan 40.
+
+### Known limits
+
+- **Hardware encoder capacity.** Recording (10-bit HEVC), a 16:9 stream and a 9:16 stream share the Mac's video
+  encoder. When a lane cannot keep up, the app halves that canvas's frame rate (the 9:16 one first by default; Stream
+  settings choose which, or never) and says so in the health popover and a toast; it returns to full rate when the
+  load changes. Recording at 1440p60 while streaming two 1080p60 canvases starts the vertical lane at 30 fps.
+- **Exports while live or recording.** Exports use the same encoder after the live work, so they run slower and can
+  pause while the encoder is busy; the export sheet says so before you start. Nothing is dropped.
+- **Overlays are static images and text.** No animated GIFs (first frame only), video, browser sources, alerts or
+  chat. Text has two live tokens: `{time}` (clock) and `{timer}` (stream or recording time live; edited-timeline time
+  in an edit). Fonts missing on another Mac fall back to the system font.
+- **Replay of rapid live switching.** A switch made while a transition was still running starts, live, from the
+  in-between picture; the editor starts it from the previous scene. A live punch-in is replayed as a zoom block with
+  the editor's ease-in-out, not the live spring.
+- **The capture helper needs the administrator prompt.** Detaching Apple's video driver from the card needs root, so
+  the app asks for the password when the helper is not running. A launch daemon is in plan 90.
+- **The app is unsigned.** Ad-hoc signed and not notarized: the first launch needs right-click → Open, and after a
+  rebuild macOS may ask once before the app reads a saved stream key from the Keychain. Developer ID and
+  notarization are in plan 90.
 
 Waves (plans in a wave run in parallel, each in its own worktree and pull request):
 

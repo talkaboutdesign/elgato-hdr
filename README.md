@@ -18,10 +18,11 @@ The whole thing is a few MB: a small native AppKit/SwiftUI app plus a C helper. 
 - **Smooth, in-sync playback.** Frames are paced to the display's refresh so motion is even, and recorded files are stamped on a fixed frame grid so they play back perfectly steady regardless of USB timing jitter.
 - **Facecam overlay, like a streamer.** Show any camera (built-in, Studio Display, iPhone Continuity Camera, USB webcam) in a window over the game. Drag it anywhere (it snaps to corners and edges), drag a corner or scroll to resize, and pick circle, rounded or square.
 - **Scenes, switched live.** A strip of scenes (Gameplay, Game Only, Camera Focus, Just Camera, and your own) with ⌃1–⌃9. Switching glides each layer to its new place (morph), fades or cuts; a live zoom punches in on the game. Arrange any layer directly on the picture, separately for 16:9 and 9:16.
-- **Overlays.** Image and text layers (logos, name tags, a live `{timer}` or the clock), ready-made screens for *Starting Soon*, *Be Right Back* and *Ending*, and presets for a name tag and a camera frame. They show in the window, in every stream and in the scene thumbnails; the editor preview and exports do not draw them yet.
+- **Overlays.** Image and text layers (logos, name tags, a live `{timer}` or the clock), ready-made screens for *Starting Soon*, *Be Right Back* and *Ending*, and presets for a name tag and a camera frame. They show in the window, in every stream, in the scene thumbnails, and in the editor preview, the library and every export of a recording.
 - **Go live, to several platforms at once.** Twitch, YouTube, Kick or any RTMP/RTMPS server, in 16:9 and 9:16 at the same time, each showing the scene you are on, with per-destination health.
 - **Layered recordings.** Game, camera and microphone are recorded as separate files that start at exactly the same instant, so nothing is baked in. Change the layout, framing, volumes and sync after the fact.
-- **One recording, every format.** The built-in editor lays out a widescreen **16:9** cut and a vertical **9:16** cut (for Shorts, Reels and TikTok) independently, and exports both in one go, as HDR10 HEVC or SDR H.264.
+- **An editor that remembers the stream.** Open a recording and every scene switch (with the cut, fade or morph that was live), live zoom and marker is already on the timeline. Cut out the dull parts, retime scenes, add zooms on the action, and move or add any layer right on the picture.
+- **One recording, every format.** The editor keeps a widescreen **16:9** and a vertical **9:16** layout of every scene and exports YouTube, 1080p and Shorts/Reels/TikTok versions in one queue, as HDR10 HEVC or SDR H.264.
 - **All the card's HDR modes.** 4K30, 1440p60, ultrawide 2560×1080 60, 1080p 120/60/30, and 720p 120, every one of them 10-bit.
 
 ### Color modes
@@ -131,13 +132,38 @@ a saved key; choose **Always Allow**. If you deny it, enter the key again in the
 
 ### Editing and exporting
 
-The editor shows the composite exactly as it will be exported, in HDR when exporting HDR.
+Open a recording from the library (⌘O, then double-click it). The editor shows the edit exactly as it will be
+exported, scenes, transitions, zooms and overlays included, in HDR when the export is HDR.
 
-- Switch between **16:9** and **9:16** in the toolbar. Each canvas keeps its own layout: **Camera overlay**, **Split** (camera on top, gameplay below, the usual vertical-clip layout), **Game only** or **Camera only**.
-- Drag the camera on the preview to move it and drag its corners to resize it. Drag the game to reframe the crop, and drag the split divider to change the proportions.
-- Trim with the yellow handles or **I** / **O** at the playhead. The timeline shows one lane per layer.
-- **Audio & Sync** sets the game and mic volumes and nudges the camera or mic in milliseconds, if your voice runs ahead of the gameplay because of the card's delay.
-- **Export** renders the canvases you tick at 1080p or 4K, at the source frame rate, 60 or 30. Exports go into the recording's `Exports` folder.
+![The editor: a text layer added to a recording's scene, selected on the picture](docs/editor.png)
+
+- **What happened live is already there.** Each scene switch comes back with the transition that was live (cut, fade
+  or morph, and its duration), each live zoom as a zoom block and each ⌃M marker as a marker, so the export plays
+  what viewers saw until you change it.
+- **Cut.** The timeline shows the whole recording. **S** or **⌘B** splits at the playhead, **⌫** removes the selected
+  section (it stays hatched, so ⌫ again or **Restore** brings it back), **I** and **O** set the in and out points,
+  **H** hides removed sections. Playback skips what you removed.
+- **Scenes over time.** Click a span on the scene track to pick another scene or change its transition; drag its
+  edge to retime it; **⌃1–⌃9** change the scene at the playhead. **Add from Live Scenes** (in the scene picker and the
+  **Scene** button above the timeline) copies one of your live scenes, with its images, into the recording.
+- **Zoom on the action.** **Z** adds a zoom block at the playhead; drag the target on the picture to choose the point
+  it closes in on, and the block's edges to time it.
+- **Arrange any layer on the picture**, as in the live window: click a layer of the scene at the playhead, drag to
+  move it (it snaps; ⌥ turns snapping off), drag a handle to resize, arrow keys nudge, ⌫ deletes (the game and camera
+  are hidden instead), double-click crops the game or camera or edits a text layer. The inspector has the same layer
+  list and controls as the live **Scene** tab: add images, text and colour, reorder, hide. Edits change the
+  recording's own copy of the scene; **Save as Live Scene** (the scene's ⋯ menu) adds it to your live scenes.
+- **Overlays in the edit.** `{timer}` counts time on the edited timeline (it starts at 0:00 and leaves out what you
+  cut); `{time}` shows the clock when that moment was recorded. An image whose file is gone is left out, and the
+  export sheet lists it.
+- **Undo** with ⌘Z and ⇧⌘Z; a whole drag is one step.
+- **Audio & Sync** (in the inspector with nothing selected) sets the game and mic volumes and nudges the camera or
+  mic in milliseconds, if your voice runs ahead of the gameplay because of the card's delay.
+- **Export** (⌘E) offers **YouTube** (16:9 at the source resolution up to 4K, HDR when recorded in HDR),
+  **YouTube 1080p SDR**, **Shorts, Reels, TikTok** (9:16, 1080×1920, SDR, 60 fps) and **Custom**. Tick several and they
+  run as a queue, with progress in the toolbar; the finished file can be dragged from the toast straight into an
+  upload. Exports go into the recording's `Exports` folder. While you are live or recording they wait for the video
+  encoder and run slower; the export sheet says so before you start.
 
 A recording folder contains:
 
@@ -145,11 +171,14 @@ A recording folder contains:
 game.mov       10-bit HEVC HDR video + game audio (the card's signal, untouched)
 camera.mov     H.264 facecam (only if the camera was on)
 mic.mov        AAC microphone (only if a mic was selected; mic.m4a in older recordings)
-project.json   Layouts, trim, volumes and sync, plus the scenes as they were when recording started and the live
-               events (scene switches, zooms, markers) with their times; every edit is non-destructive
-Assets/        The images the scenes use, so the folder stays complete when it is moved (only if there are any)
-thumbnail.jpg  Library preview
+project.json   The recording's own copy of its scenes, the live events (scene switches with their transitions, zooms,
+               markers) as they happened, and every edit (cuts, scene changes, zooms, markers, volumes, sync);
+               nothing is baked into the video files
+Assets/        The images its scenes use, copied in when recording starts and when you add one in the editor, so the
+               folder stays complete when it is moved
+thumbnail.jpg  Library card (the 16:9 edit at the first marker)
 Exports/       Rendered videos
+.cache/        Filmstrip, waveforms and hover frames; safe to delete
 ```
 
 ### Menus and shortcuts
@@ -181,6 +210,20 @@ Exports/       Rendered videos
 macOS keeps ⌃Space (input sources) and ⌃← / ⌃→ (Mission Control) for itself, so the scene shortcuts add ⇧. While you
 type in a field, ⌃Z, the arrow keys and ⌫ go to the field, never to the picture.
 
+In the editor (**⌘/** lists every shortcut):
+
+| Keys | Action |
+|------|--------|
+| Space · J K L | Play or pause · shuttle backward, stop, forward (again for 2× and 4×) |
+| ← → · ⇧← ⇧→ · ↑ ↓ | One frame · one second · previous or next edit point |
+| S or ⌘B · ⌫ | Split at the playhead · remove (or restore) the selected section, or delete the selected item |
+| I · O · ⌥X | In point · out point · clear both |
+| Z · M · ⇧M ⌥M | Add a zoom · add a marker · next or previous marker |
+| ⌃1 – ⌃9 | Change to scene 1…9 at the playhead |
+| With a layer selected | ← → ↑ ↓ nudge 1 px (⇧ 10 px), ⌫ delete, Esc deselect |
+| = - · ⇧Z · H | Zoom the timeline · show all of it · hide removed sections |
+| ⌘Z ⇧⌘Z · ⌘E | Undo, redo · export |
+
 The **View** menu picks how frames reach the screen. None of these affect recordings.
 
 | Setting | What it does | Measured delay, 1440p60 on a 120 Hz MacBook Pro |
@@ -195,7 +238,7 @@ Delays are from a frame finishing its USB transfer to it being shown, as reporte
 
 ## How it works
 
-Four moving parts:
+The moving parts:
 
 1. **`tools/uvc_capture.c` — a small root helper.** Using [libusb](https://libusb.info), it detaches Apple's USB video driver from the card and talks the USB Video Class protocol directly. It negotiates the hidden `P010` format (format index 7), reads the video off the card's bulk endpoint, reassembles frames, and also captures the card's USB audio. Detaching the kernel driver requires root on macOS, which is why the app asks for your password once and launches the helper with administrator privileges. The helper runs as a small server, stays alive across resolution changes, and exits on its own about 20 seconds after the app quits, handing the card back to macOS so other apps see it again.
 
@@ -203,7 +246,13 @@ Four moving parts:
 
 3. **`Sources/StudioKit/` — the AppKit app.** A Metal shader converts the 10-bit `P010` planes to RGB directly from shared memory and draws into a PQ / HLG / BT.709 layer with the right EDR metadata, so macOS lights it up as HDR. A display-link scheduler paces frames onto the refresh grid for even motion. Audio plays through AVAudioEngine on a dedicated thread. Recording uses the hardware HEVC `Main 10` encoder via AVAssetWriter, stamping video on a fixed frame grid and gently slewing audio to keep A/V sync locked.
 
-4. **`Sources/StudioKit/Render/`, `Model/`, `Edit/`, `UI/` — layers, editor and export.** The camera and microphone are captured with AVCaptureSession and written to their own files on the same host clock as the game, so the layers line up without any baked-in mix. Each recording's `project.json` stores the 16:9 and 9:16 layouts, trim, volumes and sync offsets. One Metal compositor draws the camera over the game for the live view, the editor preview and the export, decoding each layer by its own color tags and outputting PQ, HLG or tone-mapped SDR, so what you see in the editor is what gets exported.
+4. **One compositor for every picture.** A scene is a list of layers per canvas (game, camera, image, text, colour). `SceneResolver` turns one into draw rectangles and `MetalCore.encodeLayers` draws them, decoding each source by its own colour tags and writing PQ, HLG or tone-mapped SDR. The live window, every stream, the scene thumbnails, the editor preview and every export go through it, so they show the same picture. Images and text become textures in one `OverlayTextureCache`, made off the render threads.
+
+5. **Scenes and transitions are one pure function of time.** `LiveSceneState` gives the layers of the picture at any host time: the scene, a cut, fade or morph from the previous one, and the live zoom. The window and each stream lane ask it for their own frame time, so they agree frame for frame. A recording logs each switch, with its transition, as an event; the editor turns the events into scene spans and its `RenderPlan` evaluates the same engine at each frame of the edit, so the export replays exactly what was live.
+
+6. **Streaming.** Each canvas (16:9, 9:16) is rendered once (`ProgramOutput`), encoded once with VideoToolbox H.264, and sent by one RTMP/RTMPS connection per destination, written on Network.framework. Game audio and the microphone are mixed on the host clock and encoded to AAC. Stream keys live in the Keychain.
+
+7. **Layers, editor and export.** The camera and microphone are captured with AVCaptureSession and written to their own files on the same host clock as the game, so the layers line up without any baked-in mix. The editor plays the recording through AVFoundation with the compositor as its custom video compositor; cuts map edit time to recording time, and an export reads the same composition through AVAssetReader into AVAssetWriter.
 
 Measured latency from a frame arriving over USB to it appearing on screen is a few milliseconds of app work on top of the card's own processing; the app favors smooth, in-sync output over shaving off the last milliseconds.
 
@@ -229,11 +278,11 @@ Sources/StudioKit/Render/     Shared Metal compositor and live renderer
 Sources/StudioKit/Scenes/     Scene collection, transitions and live zoom, templates, thumbnails
 Sources/StudioKit/Overlays/   Image assets, text rasterizer and the overlay texture cache
 Sources/StudioKit/Streaming/  Program outputs, H.264 encoder, stream session, destinations, RTMP
-Sources/StudioKit/Audio/      Audio playback
+Sources/StudioKit/Audio/      Audio playback, the stream's audio mixer and AAC encoder
 Sources/StudioKit/Record/     Game and layer writers
 Sources/StudioKit/Model/      Project, layout math and library
-Sources/StudioKit/Edit/       Composition builder and exporter
-Sources/StudioKit/UI/         Library, editor and Metal view
+Sources/StudioKit/Edit/       Timeline, render plan, composition builder and exporter
+Sources/StudioKit/UI/         Design system, studio window, library, editor and the picture views
 Sources/StudioKit/Support/    Logging and socket reads
 Tests/StudioKitTests/         Layout, coding, protocol, golden and export tests
 Resources/Info.plist          App bundle metadata
