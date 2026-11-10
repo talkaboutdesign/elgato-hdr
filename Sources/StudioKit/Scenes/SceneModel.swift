@@ -127,6 +127,16 @@ extension Layer {
         }
     }
 
+    /// A recording's missing game or camera, placed as the live templates place it next to the other source: the
+    /// camera as in Gameplay, the game as the window in Camera Focus. Nil for any other type.
+    static func recordedSource(_ type: String, canvas: Canvas, mirror: Bool) -> Layer? {
+        let template: SceneTemplate = type == "camera" ? .gameplay : .cameraFocus
+        guard type == "game" || type == "camera",
+              var l = template.scene(mirror: mirror).composition(canvas).layers.first(where: { $0.source.type == type }) else { return nil }
+        l.id = UUID()
+        return l
+    }
+
     /// An image layer's frame: centred at `point` (canvas pixels) or in the middle, at most 40% of the canvas and never
     /// larger than the image, kept inside the canvas.
     static func imageFrame(native: CGSize, canvas: CGSize, at point: CGPoint?) -> NRect {

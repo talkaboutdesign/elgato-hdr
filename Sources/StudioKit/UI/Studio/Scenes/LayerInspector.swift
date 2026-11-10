@@ -147,10 +147,11 @@ struct AddLayerPalette: View {
                 AddLayerTile(title: "Text", symbol: "textformat", help: "A line of text; {timer} and {time} update live") { model.layerActions.addLayer("text") }
                 AddLayerTile(title: "Color", symbol: "paintpalette", help: "A solid colour behind everything") { model.layerActions.addLayer("color") }
             }
-            if model.addsSourceLayers {
+            let sources = model.addableSources
+            if !sources.isEmpty {
                 group("Sources") {
-                    AddLayerTile(title: "Game", symbol: "gamecontroller", help: "The capture card picture") { model.layerActions.addLayer("game") }
-                    AddLayerTile(title: "Camera", symbol: "person.crop.rectangle", help: "Your camera in a window") { model.layerActions.addLayer("camera") }
+                    if sources.contains("game") { AddLayerTile(title: "Game", symbol: "gamecontroller", help: "The capture card picture") { model.layerActions.addLayer("game") } }
+                    if sources.contains("camera") { AddLayerTile(title: "Camera", symbol: "person.crop.rectangle", help: "Your camera in a window") { model.layerActions.addLayer("camera") } }
                 }
             }
             group("Presets") {

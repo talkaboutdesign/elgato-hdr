@@ -22,8 +22,9 @@ protocol LayerEditing: AnyObject {
     var layerActions: SceneActions { get }
     /// Folders an image layer's file is looked up in, in order.
     var assetSearchPaths: [URL] { get }
-    /// The live Scene tab also adds game and camera layers; a recording's scenes only get overlays.
-    var addsSourceLayers: Bool { get }
+    /// Capture sources the add palette offers ("game", "camera"): live, always both; in a recording, a source it
+    /// recorded that the scene on this canvas lacks.
+    var addableSources: [String] { get }
 }
 
 extension LayerEditing {
@@ -38,7 +39,7 @@ extension SceneModel: LayerEditing {
     var editedSceneID: UUID? { active.id }
     var layerActions: SceneActions { actions }
     var assetSearchPaths: [URL] { AssetStore.searchPaths(project: nil) }
-    var addsSourceLayers: Bool { true }
+    var addableSources: [String] { ["game", "camera"] }
 }
 
 /// Which scene and canvas a picture shows. Duplicated scenes share layer ids, so a layer id alone does not say which

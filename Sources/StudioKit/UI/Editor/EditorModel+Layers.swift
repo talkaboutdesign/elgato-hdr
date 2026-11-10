@@ -27,7 +27,12 @@ extension EditorModel: LayerEditing {
     }
     var layerActions: SceneActions { sceneLayerActions }
     var assetSearchPaths: [URL] { AssetStore.searchPaths(project: doc.dir) }
-    var addsSourceLayers: Bool { false }
+    /// The game (always recorded) and the camera (when recorded) while the scene on this canvas lacks them: a scene
+    /// converted from a single-source layout has no other way to show the missing one.
+    var addableSources: [String] {
+        let types = Set(editedComposition.layers.map(\.source.type))
+        return (types.contains("game") ? [] : ["game"]) + (hasCamera && !types.contains("camera") ? ["camera"] : [])
+    }
     var projectAssets: URL { doc.dir.appendingPathComponent("Assets", isDirectory: true) }
 
     /// The actions the shared views and the picture call; scene-collection actions do not apply to a recording.
@@ -87,7 +92,9 @@ extension EditorModel: LayerEditing {
     }
 
     func addLayer(_ type: String) {
-        guard let l = Layer.added(type, canvas: canvas, to: editedComposition, mirror: project.cameraMirror),
+        let made = type == "game" || type == "camera" ? Layer.recordedSource(type, canvas: canvas, mirror: project.cameraMirror)
+                                                      : Layer.added(type, canvas: canvas, to: editedComposition, mirror: project.cameraMirror)
+        guard let l = made,
               editComposition("Add Layer", { $0.add(l) }) else { NSSound.beep(); return }
         selectLayer(l.id)
         if type == "text" { editText(l.id) }
