@@ -19,7 +19,7 @@ final class DemoExportStressTests: XCTestCase {
             await MainActor.run {
                 model.startExport([.youtube, .shorts], custom: ExportPreset.Custom())
                 model.exportQueue.onDrained = { drain.fulfill() }
-                if n % 2 == 1 { model.player.play() } else { model.player.pause() }
+                if n % 2 == 1 { model.play(rate: 1) } else { model.pause() }
             }
             if n % 2 == 0 {
                 let delay = Double.random(in: 0...2, using: &rng)
