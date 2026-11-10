@@ -7,8 +7,11 @@ import AVFoundation
 final class Library: ObservableObject {
     static let shared = Library()
     @Published var docs: [ProjectDoc] = []
-    var root: URL { AppDelegate.recordingsDir }
-    private var recoveryAttempted = Set<URL>()   // reload runs often; recover each folder at most once per launch
+    var root: URL { customRoot ?? AppDelegate.recordingsDir }
+    private let customRoot: URL?
+    private(set) var recoveryAttempted = Set<URL>()   // reload runs often; recover each folder at most once per launch
+
+    init(root: URL? = nil) { customRoot = root }
 
     func reload() {
         let fm = FileManager.default
