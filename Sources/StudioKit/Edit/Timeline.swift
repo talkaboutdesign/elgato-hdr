@@ -61,42 +61,45 @@ struct TimeMap {
         sanitize(mergeTouching: false, dropShort: false)
     }
     var durationMs: Double { segments.reduce(0) { $0 + $1.endMs - $1.startMs } }
-    // [] means all in project JSON, so an explicit empty range preserves an all-deleted edit.
-    var storedSegments: [Segment] { segments.isEmpty ? [Segment(startMs: 0, endMs: 0)] : segments }
+    // Empty recordings must retain the implicit, unedited representation.
+    var storedSegments: [Segment] { segments }
     func source(fromTimeline t: Double) -> Double {
         var left = t.isFinite ? max(0, t) : 0
-        for s in segments { let length = s.endMs - s.startMs; if left < length { return s.startMs + left }; left -= length }
+        for s in segments { let length = s.endMs - s.startMs; if left < length - frameMs * 1e-9 { return s.startMs + left }; left = max(0, left - length) }
         return segments.last?.endMs ?? 0
     }
     func timeline(fromSource s: Double) -> Double? {
         var t = 0.0
-        for r in segments { if s >= r.startMs && s < r.endMs { return t + s - r.startMs }; t += r.endMs - r.startMs }
-        return s == segments.last?.endMs ? t : nil
+        for r in segments { if s >= r.startMs - frameMs * 1e-9 && s < r.endMs - frameMs * 1e-9 { return t + max(0, s - r.startMs) }; t += r.endMs - r.startMs }
+        return abs(s - (segments.last?.endMs ?? .infinity)) < frameMs * 1e-9 ? t : nil
     }
     func cutPoints() -> [Double] {
         var t = 0.0, result: [Double] = []
         for (i, s) in segments.enumerated() {
-            if i > 0 && s.startMs > segments[i-1].endMs { result.append(t) }
+            if i > 0 && s.startMs > segments[i-1].endMs + frameMs * 1e-9 { result.append(t) }
             t += s.endMs - s.startMs
         }
         return result
     }
     func crossedCut(from start: Double, through end: Double) -> Bool {
         segments.enumerated().contains { i, s in
-            s.startMs >= start && s.startMs <= end && (i == 0 ? s.startMs > 0 : s.startMs > segments[i-1].endMs)
+            s.startMs >= start && s.startMs <= end && (i == 0 ? s.startMs > 0 : s.startMs > segments[i-1].endMs + frameMs * 1e-9)
         }
     }
     mutating func split(atSourceMs s: Double) {
         guard let i = segments.firstIndex(where: { s - $0.startMs >= frameMs && $0.endMs - s >= frameMs }) else { return }
         let r = segments[i]; segments.replaceSubrange(i...i, with: [Segment(startMs: r.startMs, endMs: s), Segment(startMs: s, endMs: r.endMs)])
     }
-    mutating func remove(sourceRange r: Segment) {
-        guard r.startMs.isFinite, r.endMs.isFinite, r.endMs > r.startMs else { return }
+    @discardableResult mutating func remove(sourceRange r: Segment) -> Bool {
+        guard sourceDurationMs >= frameMs, r.startMs.isFinite, r.endMs.isFinite, r.endMs > r.startMs else { return false }
+        let previous = segments
         segments = segments.flatMap { s -> [Segment] in
             if r.endMs <= s.startMs || r.startMs >= s.endMs { return [s] }
             return [Segment(startMs: s.startMs, endMs: min(s.endMs, r.startMs)), Segment(startMs: max(s.startMs, r.endMs), endMs: s.endMs)]
         }
         normalize()
+        guard durationMs >= frameMs - 0.000001 else { segments = previous; return false }
+        return segments != previous
     }
     mutating func restore(sourceRange r: Segment) { segments.append(r); normalize() }
     mutating func normalize() { sanitize(mergeTouching: true, dropShort: true) }
@@ -111,5 +114,29 @@ struct TimeMap {
             } else { result.append(s) }
         }
         segments = dropShort ? result.filter { $0.endMs - $0.startMs >= frameMs - 0.000001 } : result
+    }
+}
+
+
+extension Timeline {
+    /// Preserve interior cuts while restoring source material when either outer handle widens.
+    func trimming(startMs: Double, endMs: Double, sourceDurationMs: Double, frameMs: Double) -> Timeline {
+        guard sourceDurationMs >= frameMs, startMs.isFinite, endMs.isFinite else { return self }
+        let start = max(0, (startMs / frameMs).rounded() * frameMs)
+        let end = min(sourceDurationMs, (endMs / frameMs).rounded() * frameMs)
+        guard end - start >= frameMs - 0.000001 else { return self }
+        var map = TimeMap(segments: segments, sourceDurationMs: sourceDurationMs, frameMs: frameMs)
+        guard !map.segments.isEmpty else { return self }
+        var kept = map.segments
+        kept[0].startMs = min(start, kept[0].startMs)
+        kept[kept.count-1].endMs = max(end, kept[kept.count-1].endMs)
+        kept = kept.map { Segment(startMs: max(start, $0.startMs), endMs: min(end, $0.endMs)) }
+        map = TimeMap(segments: kept, sourceDurationMs: sourceDurationMs, frameMs: frameMs)
+        map.normalize()
+        guard map.durationMs >= frameMs - 0.000001 else { return self }
+        var result = self; result.segments = map.segments; return result
+    }
+    func activeSceneID(atSourceMs time: Double) -> UUID? {
+        sceneSpans.filter { $0.startMs <= time }.max { $0.startMs < $1.startMs }?.sceneID
     }
 }

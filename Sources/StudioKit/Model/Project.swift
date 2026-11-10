@@ -210,8 +210,10 @@ struct Project: Codable, Equatable {
     }
 
     var defaultScene: Scene {
-        Scene(name: "Default", wide: .from(layout: wide, canvas: Canvas.wide.size(.hd), hasCamera: camera != nil, mirror: cameraMirror),
-              vertical: .from(layout: vertical, canvas: Canvas.vertical.size(.hd), hasCamera: camera != nil, mirror: cameraMirror))
+        var w = Composition.from(layout: wide, canvas: Canvas.wide.size(.hd), hasCamera: true, mirror: cameraMirror)
+        var v = Composition.from(layout: vertical, canvas: Canvas.vertical.size(.hd), hasCamera: true, mirror: cameraMirror)
+        w.legacyLayout = wide; v.legacyLayout = vertical
+        return Scene(name: "Default", wide: w, vertical: v)
     }
     var editSegments: [Segment] {
         if !timeline.segments.isEmpty { return timeline.segments }

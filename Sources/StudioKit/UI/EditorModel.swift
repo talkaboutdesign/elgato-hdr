@@ -61,12 +61,15 @@ final class EditorModel: ObservableObject {
         let old = project
         var p = project; f(&p)
         guard p != old else { return }
-        // Existing layout controls edit the default scene while plan 31 supplies scene selection.
+        if p.trimStartMs != old.trimStartMs || p.trimEndMs != old.trimEndMs {
+            p.timeline = old.timeline.trimming(startMs: p.trimStartMs, endMs: p.trimmedRange.1, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
+        }
+        if let first = p.timeline.segments.first, let last = p.timeline.segments.last { p.trimStartMs = first.startMs; p.trimEndMs = last.endMs }
         if p.wide != old.wide || p.vertical != old.vertical {
-            if !p.scenes.isEmpty {
+            if let index = p.scenes.firstIndex(where: { $0.id == (p.timeline.activeSceneID(atSourceMs: time * 1000) ?? p.scenes.first?.id) }) {
                 let template = p.defaultScene
-                if p.wide != old.wide { p.scenes[0].wide = template.wide }
-                if p.vertical != old.vertical { p.scenes[0].vertical = template.vertical }
+                if p.wide != old.wide { p.scenes[index].wide = template.wide }
+                if p.vertical != old.vertical { p.scenes[index].vertical = template.vertical }
             }
         }
         if p.cameraMirror != old.cameraMirror {
@@ -169,12 +172,12 @@ final class EditorModel: ObservableObject {
         }
     }
     func deleteSection() {
+        guard project.trimEndMs > project.trimStartMs, project.trimStartMs > (project.timeline.segments.first?.startMs ?? 0), project.trimEndMs < (project.timeline.segments.last?.endMs ?? project.durationMs) else { return }
         update { p in
             // In/Out selects the range to remove; it must not first restrict the kept ranges to that selection.
             var map = TimeMap(segments: p.timeline.segments, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
-            map.remove(sourceRange: Segment(startMs: trimStart * 1000, endMs: trimEnd * 1000))
+            guard map.remove(sourceRange: Segment(startMs: trimStart * 1000, endMs: trimEnd * 1000)) else { return }
             p.timeline.segments = map.storedSegments
-            p.trimStartMs = 0; p.trimEndMs = 0
         }
     }
     func addZoom() { let s = time * 1000; update { $0.timeline.zooms.append(ZoomBlock(startMs: s, endMs: min($0.durationMs, s + 3000))) } }

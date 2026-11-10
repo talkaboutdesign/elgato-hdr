@@ -6,6 +6,8 @@ let package = Package(
     targets: [
         .target(name: "StudioKit", path: "Sources/StudioKit"),
         .executableTarget(name: "ElgatoHDR", dependencies: ["StudioKit"], path: "Sources/ElgatoHDR"),
-        .testTarget(name: "StudioKitTests", dependencies: ["StudioKit"], path: "Tests/StudioKitTests", resources: [.copy("Fixtures")]),
+        .testTarget(name: "StudioKitTests", dependencies: ["StudioKit"], path: "Tests/StudioKitTests", resources: [.copy("Fixtures")],
+                    // Full-frame pixel comparisons visit millions of samples; optimize test helpers only.
+                    swiftSettings: [.unsafeFlags(["-O"])]),
     ]
 )

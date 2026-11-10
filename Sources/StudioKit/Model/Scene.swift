@@ -87,14 +87,16 @@ extension Layer {
 
 /// One canvas of one scene.
 struct Composition: Codable, Equatable {
+    // Legacy templates retain their no-camera fallback; availability is decided from loaded sources.
+    var legacyLayout: CanvasLayout? = nil
     var background: [Double] = [0.06, 0.06, 0.07, 1]   // SDR BT.709 code values
     var layers: [Layer] = []                           // bottom first
 }
 extension Composition {
-    enum CodingKeys: String, CodingKey { case background, layers }
+    enum CodingKeys: String, CodingKey { case background, layers, legacyLayout }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = Composition()
-        self.init(background: c.v(.background, z.background), layers: c.v(.layers, z.layers))
+        self.init(legacyLayout: c.v(.legacyLayout, nil), background: c.v(.background, z.background), layers: c.v(.layers, z.layers))
     }
 
     /// Today's fixed layouts as layers. The split row is rounded exactly as the old shader parameters were, so the
