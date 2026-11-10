@@ -61,7 +61,7 @@ assert drops and all(int(r)==0 and int(e)==0 for r,e in drops), 'FAIL: render/en
 print('render drops=0 encoder drops=0')
 assert abs(actual-60)<=0.5 and abs(fps-60)<2 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
 assert abs(duration-20)<1
-# The bottom strip also encodes a binary counter. A flash is an isolated near-white peak, not just any rising bit.
+# The bottom strip also encodes a binary counter; identify the periodic flash from video alone.
 frames=[]; time=None
 for line in (p/'flash.log').read_text().splitlines():
     m=re.search(r'pts_time:([0-9.]+)',line)
@@ -69,13 +69,16 @@ for line in (p/'flash.log').read_text().splitlines():
     m=re.search(r'lavfi.signalstats.YAVG=([0-9.]+)',line)
     if m and time is not None:frames.append((time,float(m[1])))
 peak=max(y for _,y in frames)
-flashes=[t for i,(t,y) in enumerate(frames) if 0<i<len(frames)-1 and y>peak*0.98 and y-frames[i-1][1]>20 and y-frames[i+1][1]>20]
+flashes=[t for t,y in frames if y>peak*0.98]
 assert flashes, 'FAIL: no flashes detected'
 # All eight counter bits also turn white every 256 frames. The actual flash repeats at one second;
 # determine its phase from video alone, then require every expected flash (never fit to audio).
 def phase_distance(a,b): return abs((a-b+0.5)%1-0.5)
 anchor=max(flashes,key=lambda f:sum(phase_distance(f,t)<0.03 for t in flashes))
-flashes=[t for t in flashes if phase_distance(t,anchor)<0.03]
+phase=anchor%1
+expected=[phase+i for i in range(int(duration)) if 0.1<phase+i<duration-0.1]
+flashes=[min(flashes,key=lambda t:abs(t-e)) for e in expected]
+assert all(abs(t-e)<0.03 for t,e in zip(flashes,expected)), 'FAIL: missing video flash'
 assert len(flashes)>=18 and all(abs(b-a-1)<0.05 for a,b in zip(flashes,flashes[1:])), 'FAIL: missing video flash'
 for source, filename in [('game','beep.log'),('mic','mic.log')]:
     beeps=[float(x) for x in re.findall(r'silence_end: ([0-9.]+)',(p/filename).read_text())]
