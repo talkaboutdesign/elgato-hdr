@@ -13,8 +13,12 @@ final class StreamSession {
         var publisherIDs: [ObjectIdentifier] = []
         var renderSkips = ProgramOutput.Stats()
     }
+    /// A lane that could not start: only the destinations of that canvas are affected.
+    struct LaneFailure: Error, Equatable, CustomStringConvertible { let description: String }
     var onStats: ((Stats) -> Void)?
+    /// Failures that stop everything: no audio encoder, or no lane could start.
     var onError: ((String) -> Void)?
+    /// A lane failed (its encoder could not be created at start, or failed for good while live); the others run on.
     var onLaneError: ((Canvas, String) -> Void)?
     var onRecovery: ((Canvas) -> Void)?
     let mixer: AudioMixer
@@ -32,6 +36,8 @@ final class StreamSession {
     private var audio: AACEncoder?
     private var timer: DispatchSourceTimer?
     private var running = false
+    /// Replaced in tests to simulate a hardware encoder that cannot be created.
+    var makeEncoder: (VideoEncoder.Settings) -> VideoEncoder? = { VideoEncoder(settings: $0) }
 
     init(outputs: [Output], audioBitrate: Int, renderer: Renderer, mixer: AudioMixer) {
         self.outputs = outputs; self.audioBitrate = audioBitrate; self.currentRenderer = renderer; self.mixer = mixer
@@ -41,13 +47,13 @@ final class StreamSession {
         guard !running else { return true }
         guard !outputs.isEmpty, mixer.sampleRate == 48000, mixer.blockFrames == 1024,
               let audio = AACEncoder(bitrate: audioBitrate) else { onError?("Cannot create AAC encoder"); return false }
+        // A canvas whose encoder cannot be created fails alone; the session fails only when none can start.
+        var started: [(Lane, Output)] = [], failed: [Canvas] = []
         for output in outputs {
-            guard let lane = makeLane(output) else {
-                lanes.forEach { $0.encoder.finish() }; lanes = []
-                onError?("Hardware H.264 encoder unavailable"); return false
-            }
-            lanes.append(lane)
+            if let lane = makeLane(output) { started.append((lane, output)) } else { failed.append(output.canvas) }
         }
+        guard !started.isEmpty else { onError?(Self.encoderUnavailable); return false }
+        lanes = started.map(\.0)
         self.audio = audio
         let targets = audioTargets
         mixer.onBlock = { samples, frames, ns in
@@ -55,7 +61,7 @@ final class StreamSession {
             for publisher in targets.snapshot.items { publisher.sendAudio(packet.data, ptsNs: packet.ptsNs) }
         }
         running = true
-        for (lane, output) in zip(lanes, outputs) { output.publishers.forEach { attach($0, to: lane) } }
+        for (lane, output) in started { output.publishers.forEach { attach($0, to: lane) } }
         lanes.forEach { $0.program.start() }; renderer.programOutputs = lanes.map(\.program); mixer.start()
         var last = nowNs()
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -72,8 +78,11 @@ final class StreamSession {
                     publisherIDs: publishers.map(ObjectIdentifier.init), renderSkips: p))
             }
         }
-        self.timer = timer; timer.resume(); return true
+        self.timer = timer; timer.resume()
+        for canvas in failed { onLaneError?(canvas, Self.encoderUnavailable) }
+        return true
     }
+    static let encoderUnavailable = "Hardware H.264 encoder unavailable"
     func replaceRenderer(_ next: Renderer) {
         renderer.programOutputs = []
         renderer = next
@@ -94,16 +103,17 @@ final class StreamSession {
 
     /// Starts `publisher` while live. It joins the running lane for `output.canvas`, or starts a new lane with that
     /// output's size, rate and bitrate. A late joiner waits for the stream configuration and a keyframe (plan 11), so
-    /// the encoder is asked for one; the destinations already live see one extra keyframe.
-    @discardableResult func addPublisher(_ publisher: RTMPPublisher, to output: Output) -> Bool {
-        guard running else { return false }
+    /// the encoder is asked for one; the destinations already live see one extra keyframe. Throws `LaneFailure` when
+    /// the new lane cannot start; that concerns this publisher only, so `onError` is not called and the running lanes
+    /// carry on.
+    func addPublisher(_ publisher: RTMPPublisher, to output: Output) throws {
+        guard running else { throw LaneFailure(description: "The stream is not running") }
         if let lane = lanes.first(where: { $0.canvas == output.canvas }) {
-            attach(publisher, to: lane); lane.encoder.requestKeyframe(); return true
+            attach(publisher, to: lane); lane.encoder.requestKeyframe(); return
         }
-        guard let lane = makeLane(output) else { onError?("Hardware H.264 encoder unavailable"); return false }
+        guard let lane = makeLane(output) else { throw LaneFailure(description: Self.encoderUnavailable) }
         lanes.append(lane); attach(publisher, to: lane)
         lane.program.start(); renderer.programOutputs = lanes.map(\.program)
-        return true
     }
 
     /// Stops `publisher`. When it was the last one of its canvas, that canvas's render and encode stop too.
@@ -133,7 +143,7 @@ final class StreamSession {
     }
 
     private func makeLane(_ output: Output) -> Lane? {
-        guard let encoder = VideoEncoder(settings: .init(width: Int(output.size.width), height: Int(output.size.height), fps: output.fps, bitrate: output.videoBitrate)) else { return nil }
+        guard let encoder = makeEncoder(.init(width: Int(output.size.width), height: Int(output.size.height), fps: output.fps, bitrate: output.videoBitrate)) else { return nil }
         let program = ProgramOutput(canvas: output.canvas, size: output.size, fps: output.fps)
         program.composition = { [weak self] in
             let overlay = self?.renderer.overlay ?? LiveOverlay()

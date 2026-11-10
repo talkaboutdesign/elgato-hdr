@@ -13,7 +13,8 @@ protocol StreamSessionDriving: AnyObject {
     var activeCanvases: [Canvas] { get }
     func start() -> Bool
     func stop()
-    @discardableResult func addPublisher(_ publisher: RTMPPublisher, to output: StreamSession.Output) -> Bool
+    /// Throws `StreamSession.LaneFailure` when this publisher's lane cannot start; the other lanes are unaffected.
+    func addPublisher(_ publisher: RTMPPublisher, to output: StreamSession.Output) throws
     func removePublisher(_ publisher: RTMPPublisher)
 }
 extension StreamSession: StreamSessionDriving {}
@@ -37,14 +38,24 @@ final class StreamController {
     private var session: StreamSessionDriving?
     private var runtimes: [UUID: Runtime] = [:]
     private var anyFailed = false
+    /// Bumped by every Go Live and every stop: key reads started under an older value are ignored.
     private var generation = 0
+    /// The Go Live whose keys are being read (the session does not exist yet); nil otherwise.
+    private var pendingStart: Int?
+    /// Destinations starting on their own while live, with the token of their latest key read: turning one off,
+    /// or on again, makes an earlier read stale.
+    private var pendingSingle: [UUID: Int] = [:]
+    private var singleToken = 0
     private var testers: [ObjectIdentifier: ConnectionTester] = [:]
 
     private final class Runtime {
         let publisher: RTMPPublisher
+        /// The lane it really runs on. Editing the destination's canvas while live applies from its next start, so
+        /// lane events go by this, not by the destination's current canvas.
+        let canvas: Canvas
         var everLive = false
         var drops = DropTracker()
-        init(_ p: RTMPPublisher) { publisher = p }
+        init(_ p: RTMPPublisher, canvas: Canvas) { publisher = p; self.canvas = canvas }
     }
 
     init(state: StreamingState, store: DestinationStore = DestinationStore(), keychain: StreamKeyStore = KeychainStore()) {
@@ -54,7 +65,7 @@ final class StreamController {
         refreshKeyStatus()
     }
 
-    var isActive: Bool { session != nil || state.phase == .connecting }
+    var isActive: Bool { session != nil || pendingStart != nil }
 
     func replaceRenderer(_ renderer: Renderer) { session?.replaceRenderer(renderer) }
 
@@ -89,11 +100,11 @@ final class StreamController {
                 if let i = self.state.destinations.firstIndex(where: { $0.id == d.id }) {
                     let old = self.state.destinations[i]
                     self.state.destinations[i] = d
-                    // A live destination keeps its connection until it is turned off and on again.
+                    // A live destination keeps its connection, canvas and key until it next starts (the sheet says so).
                     if old.enabled != d.enabled { self.setEnabled(d.id, d.enabled, persist: false) }
                 } else {
                     self.state.destinations.append(d)
-                    if self.isActive && d.enabled { self.startDestination(d.id) }
+                    if self.isActive && d.enabled { self.turnedOn(d.id) }
                 }
                 self.persist(); done(nil)
             }
@@ -101,8 +112,9 @@ final class StreamController {
     }
 
     func delete(_ id: UUID) {
-        if runtimes[id] != nil { stopDestination(id) }
+        let name = state.destinations.first { $0.id == id }?.name
         state.destinations.removeAll { $0.id == id }
+        if isActive { stopDestination(id, name: name) }
         state.health[id] = nil; state.keyStored.remove(id)
         persist()
         let keychain = keychain
@@ -115,8 +127,7 @@ final class StreamController {
         }
         if save { persist() }
         guard isActive else { return }
-        if on, runtimes[id] == nil { startDestination(id) }
-        if !on, runtimes[id] != nil || state.health(id).status != .off { stopDestination(id) }
+        if on { turnedOn(id) } else { stopDestination(id, name: state.destinations.first { $0.id == id }?.name) }
     }
 
     func updateSettings(_ settings: StreamSettings) {
@@ -141,28 +152,41 @@ final class StreamController {
 
     // MARK: Going live
 
+    /// Starts every enabled destination. Pressed again while the keys are still being read (macOS may be asking for
+    /// the Keychain password), it replaces that pending start with one for the destinations enabled now.
     func goLive() {
-        guard !isActive else { return }
+        guard session == nil else { return }
         let enabled = state.destinations.filter(\.enabled)
         guard !enabled.isEmpty else {
+            if pendingStart != nil { cancelPendingStart(); return }
             toast(state.destinations.isEmpty ? "Add a destination to go live" : "Turn on a destination to go live", nil, .info); return
         }
+        if pendingStart != nil { log("stream: Go Live again while reading keys; the earlier start is replaced") }
         let settings = state.settings
         generation += 1
         let token = generation
+        pendingStart = token
         state.phase = .connecting; state.liveSettings = settings; state.canvases = []; anyFailed = false
         for d in enabled { state.health[d.id] = DestinationHealth(status: .connecting) }
         for d in state.destinations where !d.enabled { state.health[d.id] = nil }
         log("stream: going live to \(enabled.count) destination(s) at \(settings.resolution)p\(settings.fps) \(settings.videoKbps) kbps")
         // A Keychain read waits silently while macOS shows its access prompt (after a rebuild of an ad-hoc signed app).
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-            guard let self, self.generation == token, self.state.phase == .connecting, self.session == nil else { return }
+            guard let self, self.pendingStart == token else { return }
             self.toast("Waiting for Keychain access", "macOS may be asking for your password to read the stream keys.", .warning)
         }
         readKeys(enabled) { [weak self] keys in
-            guard let self, self.generation == token, self.state.phase == .connecting, self.session == nil else { return }
+            guard let self, self.pendingStart == token, self.generation == token, self.session == nil else { return }
+            self.pendingStart = nil
+            // The list may have changed during the read: only destinations still there and still on go live, with
+            // their current URL and canvas. One turned on meanwhile replaced this start, so every one has a key read.
+            let live = self.state.destinations.filter { $0.enabled && keys[$0.id] != nil }
+            guard !live.isEmpty else {
+                self.finish(reason: "every destination was turned off")
+                self.toast("Go Live cancelled", "Every destination was turned off.", .info); return
+            }
             var publishers: [UUID: RTMPPublisher] = [:]
-            for d in enabled {
+            for d in live {
                 switch keys[d.id] ?? .failure("No stream key saved") {
                 case .success(let key):
                     guard let endpoint = d.endpoint else { self.fail(d, "The server URL is not valid", detail: nil); continue }
@@ -170,26 +194,16 @@ final class StreamController {
                 case .failure(let message): self.fail(d, message.description, detail: nil)
                 }
             }
-            let outputs = StreamPlanner.plan(destinations: enabled, settings: settings) { publishers[$0.id] }
+            let outputs = StreamPlanner.plan(destinations: live, settings: settings) { publishers[$0.id] }
             guard !outputs.isEmpty else { self.finish(reason: nil); return }
             guard let session = self.makeSession(outputs, settings) else {
                 self.toast("Streaming is not available yet", "Wait for the picture to appear, then try again.", .warning)
                 self.finish(reason: nil); return
             }
-            for (id, p) in publishers { self.watch(p, for: id) }
+            for d in live { if let p = publishers[d.id] { self.watch(p, for: d.id, canvas: d.canvas) } }
             session.onStats = { [weak self] in self?.apply($0) }
             session.onError = { [weak self] message in self?.sessionFailed(message) }
-            session.onLaneError = { [weak self] canvas, message in
-                guard let self else { return }
-                for d in self.state.destinations where d.canvas == canvas {
-                    if let r = self.runtimes.removeValue(forKey: d.id) {
-                        r.publisher.onState = nil
-                        self.fail(d, message, detail: nil)
-                    }
-                }
-                self.state.canvases.removeAll { $0.canvas == canvas }
-                self.checkEnded()
-            }
+            session.onLaneError = { [weak self] canvas, message in self?.laneFailed(canvas, message) }
             session.onRecovery = { [weak self] canvas in
                 guard let self else { return }
                 self.state.encoderRecoveryEvents += 1
@@ -201,6 +215,22 @@ final class StreamController {
         }
     }
 
+    /// Every destination on that lane failed with it; the destinations on the other lane keep streaming.
+    private func laneFailed(_ canvas: Canvas, _ message: String) {
+        for (id, r) in runtimes where r.canvas == canvas {
+            runtimes[id] = nil
+            r.publisher.onState = nil
+            if let d = state.destinations.first(where: { $0.id == id }) { fail(d, message, detail: nil) }
+        }
+        state.canvases.removeAll { $0.canvas == canvas }
+        checkEnded()
+    }
+
+    private func cancelPendingStart() {
+        finish(reason: "every destination was turned off")
+        toast("Go Live cancelled", "Every destination was turned off.", .info)
+    }
+
     func endStream() {
         guard isActive else { return }
         finish(reason: nil)
@@ -209,7 +239,7 @@ final class StreamController {
 
     func retry(_ id: UUID) {
         guard isActive, runtimes[id] == nil, state.destinations.contains(where: { $0.id == id }) else { return }
-        startDestination(id)
+        turnedOn(id)
     }
 
     // MARK: Connection test
@@ -246,42 +276,54 @@ final class StreamController {
 
     // MARK: Per-destination control
 
+    /// A destination was turned on, added or retried while streaming or while Go Live reads keys.
+    private func turnedOn(_ id: UUID) {
+        if session == nil { goLive() } else if runtimes[id] == nil { startDestination(id) }
+    }
+
     private func startDestination(_ id: UUID) {
-        guard let d = state.destinations.first(where: { $0.id == id }), let settings = state.liveSettings else { return }
+        guard let d = state.destinations.first(where: { $0.id == id }), let settings = state.liveSettings, session != nil else { return }
         state.health[id] = DestinationHealth(status: .connecting)
-        let token = generation
+        singleToken += 1
+        let token = generation, attempt = singleToken
+        pendingSingle[id] = attempt
         readKeys([d]) { [weak self] keys in
-            guard let self, self.generation == token, self.isActive, self.runtimes[id] == nil,
-                  let d = self.state.destinations.first(where: { $0.id == id }), d.enabled else { return }
+            // Only the latest start of this destination counts; turning it off meanwhile cancelled it.
+            guard let self, self.generation == token, self.pendingSingle[id] == attempt else { return }
+            self.pendingSingle[id] = nil
+            guard let session = self.session, self.runtimes[id] == nil,
+                  let d = self.state.destinations.first(where: { $0.id == id }), d.enabled else { self.checkEnded(); return }
             switch keys[id] ?? .failure("No stream key saved") {
             case .failure(let message): self.fail(d, message.description, detail: nil); self.checkEnded()
             case .success(let key):
                 guard let endpoint = d.endpoint else { self.fail(d, "The server URL is not valid", detail: nil); self.checkEnded(); return }
-                guard let session = self.session else {
-                    // Still reading keys for Go Live: that pass skips destinations turned on after it started.
-                    return
-                }
                 let p = self.makePublisher(d, endpoint, key, settings)
-                self.watch(p, for: id)
+                self.watch(p, for: id, canvas: d.canvas)
                 let group = StreamPlanner.Group(canvas: d.canvas, size: settings.size(d.canvas), fps: Double(settings.fps),
                                                 videoBitrate: settings.videoKbps * 1000, destinations: [d])
-                if !session.addPublisher(p, to: StreamPlanner.output(for: group, publishers: [])) {
-                    self.runtimes[id] = nil; self.fail(d, "Could not start the encoder", detail: nil); self.checkEnded()
+                do { try session.addPublisher(p, to: StreamPlanner.output(for: group, publishers: [])) } catch {
+                    // Only this destination: the lanes already running carry on.
+                    p.onState = nil; self.runtimes[id] = nil
+                    self.fail(d, (error as? StreamSession.LaneFailure)?.description ?? "Could not start the encoder", detail: nil)
+                    self.checkEnded()
                 }
             }
         }
     }
 
     /// The user turned a destination off or deleted it.
-    private func stopDestination(_ id: UUID) {
+    private func stopDestination(_ id: UUID, name: String?) {
+        guard runtimes[id] != nil || pendingSingle[id] != nil || state.health(id).status != .off else { return }
+        pendingSingle[id] = nil
         if let r = runtimes.removeValue(forKey: id) { r.publisher.onState = nil; session?.removePublisher(r.publisher) }
         state.health[id] = nil
-        if let name = state.destinations.first(where: { $0.id == id })?.name { log("stream: \(name) stopped") }
+        if let name { log("stream: \(name) stopped") }
+        if session == nil, pendingStart != nil, !state.destinations.contains(where: \.enabled) { cancelPendingStart(); return }
         checkEnded(userStopped: true)
     }
 
-    private func watch(_ publisher: RTMPPublisher, for id: UUID) {
-        runtimes[id] = Runtime(publisher)
+    private func watch(_ publisher: RTMPPublisher, for id: UUID, canvas: Canvas) {
+        runtimes[id] = Runtime(publisher, canvas: canvas)
         publisher.onState = { [weak self, weak publisher] st in
             // On the publisher's queue, where its stats can be read without blocking.
             let error = { () -> String? in if case .reconnecting = st { return publisher?.stats.lastError }; return nil }()
@@ -336,7 +378,7 @@ final class StreamController {
     }
 
     private func checkEnded(userStopped: Bool = false) {
-        guard session != nil, runtimes.isEmpty else { return }
+        guard session != nil, runtimes.isEmpty, pendingSingle.isEmpty else { return }
         let reason = userStopped ? "Stream ended: every destination is off" : "Stream ended: no destination could stay connected"
         finish(reason: reason)
         toast(reason, nil, userStopped ? .info : .error)
@@ -352,6 +394,7 @@ final class StreamController {
     /// Stops everything; failed cards keep their reason so the user can see what happened.
     private func finish(reason: String?) {
         generation += 1
+        pendingStart = nil; pendingSingle = [:]
         let s = session; session = nil
         for r in runtimes.values { r.publisher.onState = nil }
         runtimes = [:]

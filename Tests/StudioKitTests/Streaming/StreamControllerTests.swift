@@ -18,9 +18,13 @@ final class StreamControllerTests: XCTestCase {
         func publishers(_ canvas: Canvas) -> [RTMPPublisher] { lanes.first { $0.0 == canvas }?.1 ?? [] }
         func start() -> Bool { for o in outputs { lanes.append((o.canvas, o.publishers)); o.publishers.forEach { $0.start() } }; return true }
         func stop() { lanes.flatMap(\.1).forEach { $0.stop() }; lanes = []; stopped = true }
-        func addPublisher(_ p: RTMPPublisher, to output: StreamSession.Output) -> Bool {
-            if let i = lanes.firstIndex(where: { $0.0 == output.canvas }) { lanes[i].1.append(p) } else { lanes.append((output.canvas, [p])) }
-            p.start(); return true
+        /// Canvases whose lane cannot start while live, like a hardware encoder that cannot be created.
+        var failing: Set<Canvas> = []
+        func addPublisher(_ p: RTMPPublisher, to output: StreamSession.Output) throws {
+            if let i = lanes.firstIndex(where: { $0.0 == output.canvas }) { lanes[i].1.append(p) }
+            else if failing.contains(output.canvas) { throw StreamSession.LaneFailure(description: StreamSession.encoderUnavailable) }
+            else { lanes.append((output.canvas, [p])) }
+            p.start()
         }
         func removePublisher(_ p: RTMPPublisher) {
             for i in lanes.indices { lanes[i].1.removeAll { $0 === p } }
@@ -217,5 +221,163 @@ extension StreamControllerTests {
         XCTAssertEqual(c.state.phase, .idle)
         XCTAssertTrue(toasts.contains("Stream ended: every destination is off"), "\(toasts)")
         XCTAssertTrue(c.state.destinations.isEmpty)
+    }
+}
+
+// MARK: - Review fixes: Keychain wait, lane-scoped failures, edits while live, toggling
+
+extension StreamControllerTests {
+    /// Holds key reads as if macOS were showing its Keychain prompt; `release` answers them.
+    private func holdKeys(_ c: StreamController) -> () -> Void {
+        let q = DispatchQueue(label: "test.keys"); q.suspend()
+        c.keyQueue = q
+        var held = true
+        addTeardownBlock { if held { q.resume() } }
+        return { if held { held = false; q.resume() } }
+    }
+    private func connections(_ server: FakeRTMPServer) -> Int { Set(server.messages.map(\.0)).count }
+
+    /// A destination switched off while Go Live waits for the Keychain is not streamed to; one whose URL changed
+    /// meanwhile streams to the new URL.
+    func testGoLiveUsesTheDestinationsAsTheyAreWhenTheKeysArrive() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer(), moved = try FakeRTMPServer()
+        defer { a.stop(); b.stop(); moved.stop() }
+        let one = local("One", a), two = local("Two", b)
+        let c = try controller([one, two])
+        let release = holdKeys(c)
+        c.goLive()
+        XCTAssertEqual(c.state.phase, .connecting)
+        c.setEnabled(two.id, false)
+        XCTAssertEqual(c.state.health(two.id).status, .off)
+        XCTAssertTrue(c.isActive, "one destination is still on")
+        c.state.destinations[0].url = "rtmp://127.0.0.1:\(moved.port)/live"
+        release()
+        XCTAssertTrue(spin(5) { c.state.health(one.id).status == .live })
+        spin(0.5) { false }
+        let session = try XCTUnwrap(sessions.first)
+        XCTAssertEqual(session.outputs.flatMap(\.publishers).count, 1)
+        XCTAssertEqual(connections(b), 0, "a destination turned off during the wait must not be streamed to")
+        XCTAssertEqual(connections(a), 0, "the old URL is not used")
+        XCTAssertEqual(connections(moved), 1)
+        XCTAssertEqual(c.state.health(two.id).status, .off)
+    }
+
+    func testTurningEverythingOffOrEndingDuringTheKeyWaitCancelsGoLive() throws {
+        let a = try FakeRTMPServer(); defer { a.stop() }
+        let one = local("One", a)
+        let c = try controller([one])
+        var release = holdKeys(c)
+        c.goLive()
+        c.setEnabled(one.id, false)
+        XCTAssertEqual(c.state.phase, .idle)
+        XCTAssertFalse(c.isActive)
+        XCTAssertTrue(toasts.contains("Go Live cancelled"), "\(toasts)")
+        release()
+        spin(0.5) { false }
+        XCTAssertTrue(sessions.isEmpty)
+
+        // End Stream during the wait.
+        c.setEnabled(one.id, true)
+        release = holdKeys(c)
+        c.goLive(); c.endStream()
+        XCTAssertEqual(c.state.phase, .idle)
+        release()
+        spin(0.5) { false }
+        XCTAssertTrue(sessions.isEmpty)
+        XCTAssertEqual(connections(a), 0)
+    }
+
+    /// A second Go Live, or turning another destination on, during the wait replaces the pending start: one session
+    /// with every destination that is on.
+    func testSecondGoLiveDuringTheKeyWaitReplacesThePendingStart() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer(); defer { a.stop(); b.stop() }
+        var two = local("Two", b, .vertical); two.enabled = false
+        let one = local("One", a)
+        let c = try controller([one, two])
+        let release = holdKeys(c)
+        c.goLive()
+        c.goLive()
+        c.setEnabled(two.id, true)
+        release()
+        XCTAssertTrue(spin(5) { c.state.health(one.id).status == .live && c.state.health(two.id).status == .live })
+        spin(0.5) { false }
+        XCTAssertEqual(sessions.count, 1)
+        XCTAssertEqual(sessions[0].activeCanvases, [.wide, .vertical])
+        XCTAssertEqual([connections(a), connections(b)], [1, 1])
+    }
+
+    /// Starting one destination while live follows the same rule: only its latest switch counts.
+    func testSingleStartWaitingForItsKeyFollowsTheLatestSwitch() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer(); defer { a.stop(); b.stop() }
+        var two = local("Two", b); two.enabled = false
+        let one = local("One", a)
+        let c = try controller([one, two])
+        c.goLive()
+        XCTAssertTrue(spin(5) { c.state.health(one.id).status == .live })
+        var release = holdKeys(c)
+        c.setEnabled(two.id, true); c.setEnabled(two.id, false)
+        release()
+        spin(0.5) { false }
+        XCTAssertEqual(connections(b), 0)
+        XCTAssertEqual(c.state.health(two.id).status, .off)
+
+        release = holdKeys(c)
+        c.setEnabled(two.id, true); c.setEnabled(two.id, false); c.setEnabled(two.id, true)
+        // The only live destination going off while the other waits for its key does not end the stream.
+        c.setEnabled(one.id, false)
+        XCTAssertTrue(c.isActive)
+        release()
+        XCTAssertTrue(spin(5) { c.state.health(two.id).status == .live })
+        XCTAssertEqual(sessions[0].publishers(.wide).count, 1)
+        XCTAssertEqual(connections(b), 1)
+        XCTAssertEqual(sessions.count, 1)
+    }
+
+    /// A vertical lane that cannot start while wide is live fails that destination only.
+    func testALaneThatCannotStartFailsOnlyItsDestination() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer(); defer { a.stop(); b.stop() }
+        var two = local("Two", b, .vertical); two.enabled = false
+        let one = local("One", a)
+        let c = try controller([one, two])
+        c.goLive()
+        XCTAssertTrue(spin(5) { c.state.health(one.id).status == .live })
+        let session = try XCTUnwrap(sessions.first)
+        session.failing = [.vertical]
+        c.setEnabled(two.id, true)
+        XCTAssertTrue(spin(5) { c.state.health(two.id).status != .connecting })
+        XCTAssertEqual(c.state.health(two.id).status, .failed("Hardware H.264 encoder unavailable"))
+        XCTAssertEqual(c.state.health(one.id).status, .live)
+        XCTAssertFalse(session.stopped)
+        XCTAssertTrue(c.isActive)
+        XCTAssertTrue(toasts.contains("Two: hardware H.264 encoder unavailable"), "\(toasts)")
+    }
+
+    /// Editing a live destination's canvas applies from its next start; lane events follow the lane it runs on.
+    func testLaneEventsFollowTheLaneADestinationRunsOnAfterAnEdit() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer(); defer { a.stop(); b.stop() }
+        let wide = local("Wide", a), tall = local("Tall", b, .vertical)
+        let c = try controller([wide, tall])
+        c.goLive()
+        XCTAssertTrue(spin(5) { c.state.health(wide.id).status == .live && c.state.health(tall.id).status == .live })
+        let session = try XCTUnwrap(sessions.first)
+        var edited = wide; edited.canvas = .vertical
+        var saved: String?? = nil
+        c.save(edited, key: nil) { saved = .some($0) }
+        XCTAssertTrue(spin(5) { saved != nil }); XCTAssertNil(saved!)
+        XCTAssertEqual(c.state.destinations.first { $0.id == wide.id }?.canvas, .vertical)
+        XCTAssertEqual(session.publishers(.wide).count, 1, "still on its original lane until it restarts")
+
+        // The vertical lane fails: only the destination really on it.
+        session.publishers(.vertical).forEach { session.removePublisher($0) }
+        session.onLaneError?(.vertical, "H.264 recovery failed")
+        XCTAssertEqual(c.state.health(tall.id).status, .failed("H.264 recovery failed"))
+        XCTAssertEqual(c.state.health(wide.id).status, .live)
+        XCTAssertTrue(c.isActive)
+
+        // The wide lane fails: the edited destination, which runs there, fails, and the stream ends.
+        session.publishers(.wide).forEach { session.removePublisher($0) }
+        session.onLaneError?(.wide, "H.264 recovery failed")
+        XCTAssertEqual(c.state.health(wide.id).status, .failed("H.264 recovery failed"))
+        XCTAssertFalse(c.isActive)
     }
 }

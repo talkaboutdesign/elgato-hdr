@@ -58,14 +58,14 @@ final class StreamSessionTests: XCTestCase {
         wait(for: [aKey], timeout: 8)
 
         // A second wide destination joins the running encoder: configuration first, then a keyframe.
-        XCTAssertTrue(session.addPublisher(pb, to: wide))
+        XCTAssertNoThrow(try session.addPublisher(pb, to: wide))
         XCTAssertEqual(session.activeCanvases, [.wide])
         wait(for: [bKey], timeout: 8)
         XCTAssertEqual(tb.first, "config", "a late joiner must see the AVC configuration before any frame")
 
         // A vertical destination starts a second lane; removing it stops that lane again.
         let vertical = StreamSession.Output(canvas: .vertical, size: tallSize, fps: 30, videoBitrate: 500_000, publishers: [])
-        XCTAssertTrue(session.addPublisher(pc, to: vertical))
+        XCTAssertNoThrow(try session.addPublisher(pc, to: vertical))
         XCTAssertEqual(session.activeCanvases, [.wide, .vertical])
         wait(for: [cKey], timeout: 8)
         XCTAssertEqual(tc.first, "config")
@@ -140,5 +140,41 @@ final class StreamSessionTests: XCTestCase {
         XCTAssertEqual(gate.wait(timeout: .now() + 2), .success)
         stream.stop()
         XCTAssertTrue(second.programOutputs.isEmpty)
+    }
+
+    /// A lane whose encoder cannot be created concerns its own publishers only: `addPublisher` throws and `onError`
+    /// stays quiet; at start, the other lanes run and the failed canvas is reported through `onLaneError`.
+    func testLaneThatCannotStartDoesNotStopTheSession() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer(), c = try FakeRTMPServer()
+        defer { a.stop(); b.stop(); c.stop() }
+        let ta = Tally(), tb = Tally()
+        watch(a, ta); watch(b, tb)
+        let demo = DemoSource(width: 64, height: 36, fps: 30)
+        let renderer = try XCTUnwrap(Renderer(layer: CAMetalLayer(), shm: demo.memory, demoSource: demo))
+        let wideSize = CGSize(width: 320, height: 180), tallSize = CGSize(width: 180, height: 320)
+        let session = StreamSession(outputs: [
+            .init(canvas: .wide, size: wideSize, fps: 30, videoBitrate: 500_000, publishers: [publisher(a, wideSize)]),
+            .init(canvas: .vertical, size: tallSize, fps: 30, videoBitrate: 500_000, publishers: [publisher(c, tallSize)])
+        ], audioBitrate: 128_000, renderer: renderer, mixer: AudioMixer())
+        // Only portrait encoders fail, like a hardware encoder that is out of sessions.
+        session.makeEncoder = { $0.height > $0.width ? nil : VideoEncoder(settings: $0) }
+        var errors: [String] = [], laneErrors: [Canvas] = []
+        session.onError = { errors.append($0) }
+        session.onLaneError = { canvas, _ in laneErrors.append(canvas) }
+        XCTAssertTrue(session.start()); defer { session.stop() }
+        XCTAssertEqual(laneErrors, [.vertical])
+        XCTAssertEqual(session.activeCanvases, [.wide])
+        XCTAssertTrue(spin(until: 5) { ta["key"] > 0 })
+
+        let vertical = StreamSession.Output(canvas: .vertical, size: tallSize, fps: 30, videoBitrate: 500_000, publishers: [])
+        XCTAssertThrowsError(try session.addPublisher(publisher(b, tallSize), to: vertical)) {
+            XCTAssertEqual($0 as? StreamSession.LaneFailure, StreamSession.LaneFailure(description: "Hardware H.264 encoder unavailable"))
+        }
+        XCTAssertTrue(errors.isEmpty, "\(errors)")
+        XCTAssertEqual(session.activeCanvases, [.wide])
+        let before = ta["delta"]
+        XCTAssertTrue(spin(until: 3) { ta["delta"] > before + 20 }, "the wide lane keeps streaming")
+        XCTAssertEqual(tb["config"] + tb["key"] + tb["delta"], 0)
+        XCTAssertTrue(c.messages.isEmpty, "the failed lane's publisher never connected")
     }
 }
