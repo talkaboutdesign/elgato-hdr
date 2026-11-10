@@ -61,6 +61,14 @@ private struct LayerListSection: View {
                 }
             }
             .padding(-DS.Space.xs)
+            Divider().opacity(0.4)
+            let other = model.canvas == .wide ? "9:16" : "16:9"
+            Button { model.actions.copyLayoutToOtherCanvas() } label: {
+                Label("Copy Layout to \(other)", systemImage: model.canvas == .wide ? "rectangle.portrait" : "rectangle")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+            .help("Start the \(other) canvas of this scene from this layout")
         }
     }
 }

@@ -198,6 +198,29 @@ final class SceneEngineTests: XCTestCase {
         for (m, q) in zip(mid, plain) where m.key == .game { XCTAssertEqual(m.src.width, q.src.width / 2, accuracy: 1e-9) }
     }
 
+    /// What `drawNow` adds per frame on the reader thread: copying the state and evaluating it, next to what it did
+    /// before (building and resolving the fixed layout). Printed for the pull request; the bound only catches an
+    /// accidental blow-up.
+    func testPerFrameCost() {
+        let n = 20_000
+        func measure(_ f: () -> Void) -> Double {
+            let t = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<n { f() }
+            return Double(DispatchTime.now().uptimeNanoseconds - t) / Double(n) / 1000
+        }
+        let size = CGSize(width: 2560, height: 1440)
+        let before = measure { _ = SceneResolver.resolve(Composition.from(layout: CanvasLayout(kind: .pip), canvas: size, hasCamera: true, mirror: false), canvas: size, sources: sources) }
+        let steady = LiveSceneState(scene: gameplay)
+        let still = measure { _ = steady.frame(canvas: .wide, size: size, sources: sources, atNs: t0) }
+        let st = state(gameplay, focus, .morph), mid = time(for: 0.5)
+        let morph = measure { _ = st.frame(canvas: .wide, size: size, sources: sources, atNs: mid) }
+        var nested = st
+        for i in 0..<5 { nested = nested.switching(to: [justCamera, gameOnly, focus][i % 3], atNs: t0 + UInt64(i + 1) * 20 * ms, transition: SceneTransition()) }
+        let deep = measure { _ = nested.frame(canvas: .wide, size: size, sources: sources, atNs: t0 + 110 * ms) }
+        print(String(format: "per-frame scene cost (µs): before (fixed layout) %.2f, scene %.2f, mid-morph %.2f, 3 nested switches %.2f", before, still, morph, deep))
+        XCTAssertLessThan(deep, 200)
+    }
+
     /// The 9:16 canvas transitions with the same rules. Gameplay's camera and game sit side by side (stacked), so
     /// the game, which has no partner in Just Camera, goes beneath the camera: the camera grows over it.
     func testVerticalMorph() {

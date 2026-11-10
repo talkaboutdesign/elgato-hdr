@@ -121,6 +121,14 @@ extension AppDelegate {
             ctx.saveGState(); ctx.translateBy(x: l.frame.minX, y: l.frame.minY); l.render(in: ctx); ctx.restoreGState()
         }
         ctx.restoreGState()
+        // The views floating over the picture (status pill, toast) were painted over: draw them again on top.
+        for sub in view.superview?.subviews ?? [] where sub !== view && !sub.isHidden && sub.frame.intersects(view.frame) && sub.frame.height < view.frame.height / 2 {
+            guard let r = sub.bitmapImageRepForCachingDisplay(in: sub.bounds) else { continue }
+            sub.cacheDisplay(in: sub.bounds, to: r)
+            guard let img = r.cgImage else { continue }
+            let f = sub.convert(sub.bounds, to: content)
+            ctx.draw(img, in: CGRect(x: f.minX * scale, y: f.minY * scale, width: f.width * scale, height: f.height * scale))
+        }
         return ctx.makeImage()
     }
 
