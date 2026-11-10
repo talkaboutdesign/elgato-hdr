@@ -14,6 +14,42 @@ extension AppDelegate {
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }
+    /// Disk guard: refuse to start below 5 GB free, stop cleanly below 2 GB (about ten minutes of 4K HDR).
+    static let minFreeToStart: Int64 = 5_000_000_000, minFreeWhileRecording: Int64 = 2_000_000_000
+
+    /// "Important usage" capacity counts purgeable space (caches, local snapshots) that macOS frees on demand.
+    static func recordingsFreeBytes() -> Int64? {
+        #if DEBUG
+        // Exercises the guard without filling a disk: a file holding the byte count, re-read on every check.
+        if let f = ProcessInfo.processInfo.environment["EHDR_FREE_BYTES_FILE"],
+           let v = (try? String(contentsOfFile: f)).flatMap({ Int64($0.trimmingCharacters(in: .whitespacesAndNewlines)) }) { return v }
+        #endif
+        return (try? recordingsDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+    }
+
+    func showRecordingAlert(_ message: String, _ info: String) {
+        let a = NSAlert(); a.alertStyle = .warning; a.messageText = message; a.informativeText = info
+        // A sheet, not runModal: the capture and render paths keep running on the main thread while it is up.
+        a.beginSheetModal(for: window)
+    }
+
+    private func diskGB(_ b: Int64) -> String { String(format: "%.1f GB", Double(b) / 1e9) }
+
+    /// Runs every 5 s while recording. The volume query can stall on slow disks, so it stays off the main thread.
+    func checkDiskWhileRecording() {
+        guard let r = recorder else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let free = AppDelegate.recordingsFreeBytes(), free < AppDelegate.minFreeWhileRecording else { return }
+            DispatchQueue.main.async {
+                guard let self = self, self.recorder === r else { return }
+                log("disk guard: \(self.diskGB(free)) free, stopping recording")
+                self.finishRecording { msg in log(msg) }
+                self.showRecordingAlert("Recording stopped: the disk is almost full",
+                    "Only \(self.diskGB(free)) is left on the recordings volume. Everything up to this point was saved. Free up space or choose another recordings folder before recording again.")
+            }
+        }
+    }
+
     @objc func toggleRecording() { if recorder == nil { startRecording() } else { stopRecording() } }
     @objc func showRecordings() { NSWorkspace.shared.open(AppDelegate.recordingsDir) }
     @objc func showLibraryAction() { showLibrary() }
@@ -25,9 +61,16 @@ extension AppDelegate {
     }
 
     /// Each recording is a project folder with one file per layer, all starting at the same instant:
-    /// game.mov (HDR video + game audio), camera.mov (facecam) and mic.m4a (voice), plus project.json.
+    /// game.mov (HDR video + game audio), camera.mov (facecam) and mic.mov (voice), plus project.json.
+    /// All three are fragmented movies, so a crash loses only the last couple of seconds.
     func startRecording() {
-        guard let s = session, s.w > 0 else { setTitle("not streaming, cannot record"); return }
+        guard let s = session, s.w > 0 else { toast("Nothing to record yet", detail: "Recording starts once the picture is live.", style: .warning); return }
+        if let free = AppDelegate.recordingsFreeBytes(), free < AppDelegate.minFreeToStart {
+            log("disk guard: \(diskGB(free)) free, not starting a recording")
+            showRecordingAlert("Not enough disk space to record",
+                "Only \(diskGB(free)) is free on the recordings volume; recording needs at least \(diskGB(AppDelegate.minFreeToStart)). Free up space or choose another recordings folder.")
+            return
+        }
         let (dir, name) = Library.shared.newProjectDir(date: Date())
         let nominal = demoSource?.fps ?? modes[modeIndex].fps
         let fps = abs(measuredFps - nominal) < 2 ? nominal : (measuredFps > 1 ? measuredFps : nominal)
@@ -46,7 +89,7 @@ extension AppDelegate {
                 } catch { log("camera layer failed: \(error)") }
             }
             if camera.micOn {
-                do { micWriter = try LayerWriter(micURL: dir.appendingPathComponent("mic.m4a"), startNs: startNs); proj.mic = LayerInfo(file: "mic.m4a") }
+                do { micWriter = try LayerWriter(micURL: dir.appendingPathComponent("mic.mov"), startNs: startNs); proj.mic = LayerInfo(file: "mic.mov") }
                 catch { log("mic layer failed: \(error)") }
             }
             if proj.camera == nil { proj.wide.kind = .screenOnly; proj.vertical.kind = .screenOnly }
@@ -54,13 +97,32 @@ extension AppDelegate {
             let doc = ProjectDoc(dir: dir, project: proj); doc.save()
             recDoc = doc; AppDelegate.activeRecordingDir = dir
             recorder = r; s.recorder = r; recStart = Date()
-            recordItem.title = "Stop Recording"
-            recTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.setTitle(self?.lastInfo ?? "") }
-            setTitle(lastInfo)
-        } catch { setTitle("record failed: \(error.localizedDescription)"); log("record failed: \(error)") }
+            state.recording = true; state.recordingElapsed = 0
+            state.recordingLayers = ["game"] + (camWriter != nil ? ["camera"] : []) + (micWriter != nil ? ["mic"] : [])
+            refreshChecks()
+            var ticks = 0
+            let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                self.state.recordingElapsed = Date().timeIntervalSince(self.recStart).rounded(.down)
+                ticks += 1
+                if ticks % 5 == 0 { self.checkDiskWhileRecording() }
+            }
+            RunLoop.main.add(t, forMode: .common)   // the timer keeps counting during window resizes and menu tracking
+            recTimer = t
+        } catch { toast("Recording failed", detail: error.localizedDescription, style: .error); log("record failed: \(error)") }
     }
 
-    func stopRecording() { finishRecording { [weak self] msg in log(msg); self?.setTitle(msg) } }
+    func stopRecording() {
+        finishRecording { [weak self] msg in
+            log(msg)
+            // "saved <name> [game + camera + mic]" -> "<name> · game, camera, mic"
+            if msg.hasPrefix("saved ") {
+                let detail = msg.dropFirst(6).replacingOccurrences(of: " [", with: " · ").replacingOccurrences(of: "]", with: "").replacingOccurrences(of: " + ", with: ", ")
+                self?.toast("Recording saved", detail: detail, style: .success)
+            }
+            else { self?.toast("Recording failed", detail: msg, style: .error) }
+        }
+    }
 
     /// Closes every layer, then completes project.json and its thumbnail.
     func finishRecording(_ done: @escaping (String) -> Void) {
@@ -68,7 +130,8 @@ extension AppDelegate {
         session?.recorder = nil; recorder = nil
         camera.attach(camera: nil, mic: nil)
         recTimer?.invalidate(); recTimer = nil
-        recordItem.title = "Start Recording"
+        state.recording = false; state.recordingElapsed = 0; state.recordingLayers = []
+        refreshChecks()
         let doc = recDoc, cw = camWriter, mw = micWriter
         recDoc = nil; camWriter = nil; micWriter = nil
         let group = DispatchGroup()
