@@ -186,7 +186,7 @@ struct ShortcutsView: View {
                             HStack(alignment: .firstTextBaseline) {
                                 Text(s.title).font(.system(size: 12))
                                 Spacer(minLength: DS.Space.m)
-                                Text(s.keys).font(.system(size: 12, weight: .medium).monospaced())
+                                Text(s.keys).font(.system(size: 12, weight: .medium))
                                     .padding(.horizontal, 6).padding(.vertical, 2)
                                     .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.08)))
                             }

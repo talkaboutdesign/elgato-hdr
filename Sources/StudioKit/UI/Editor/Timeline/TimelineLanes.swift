@@ -353,7 +353,7 @@ struct GuidesOverlay: View {
                 let x0 = axis.x(r.startMs / 1000), x1 = axis.x(r.endMs / 1000)
                 guard x1 > 0, x0 < size.width else { continue }
                 for lane in layout.lanes where lane.kind != .ruler && lane.kind != video?.kind {
-                    ctx.fill(Path(CGRect(x: x0, y: lane.y, width: x1 - x0, height: lane.height)), with: .color(Color(nsColor: .windowBackgroundColor).opacity(0.62)))
+                    ctx.fill(Path(CGRect(x: x0, y: lane.y, width: x1 - x0, height: lane.height)), with: .color(Color(nsColor: .windowBackgroundColor).opacity(0.55)))
                 }
             }
             var lines = Path()

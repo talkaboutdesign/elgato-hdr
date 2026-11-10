@@ -93,7 +93,9 @@ enum EditorHarness {
         case "shortcuts": ShortcutsWindow.show(); delay = 1
         case "shot": shot(arg, window: m.window)
         case "shotlib": shot(arg, window: LibraryNavigation.shared.window)
-        case "shotwin": if parts.count > 2, let w = NSApp.windows.first(where: { $0.title == parts[1] && $0.isVisible }) { shot(parts[2], window: w) }
+        case "shotwin":   // shotwin <name> <window title…>
+            let title = parts.dropFirst(2).joined(separator: " ")
+            if parts.count > 2, let w = NSApp.windows.first(where: { $0.title == title && $0.isVisible }) { shot(parts[1], window: w) }
         case "closewin": NSApp.windows.first { $0.title == arg }?.close()
         case "scrubtest": scrubTest(m) { run(rest, m) }; return
         case "perftest": MainActor.assumeIsolated { perfTest(m) }; delay = 0.5
