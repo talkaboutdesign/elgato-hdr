@@ -144,7 +144,7 @@ struct AddLayerPalette: View {
             }
             group("Overlays") {
                 AddLayerTile(title: "Image…", symbol: "photo", help: "Choose an image file (PNG, JPEG, HEIC, TIFF, GIF)") { later { model.layerActions.addImage(nil, nil) } }
-                AddLayerTile(title: "Text", symbol: "textformat", help: "A line of text; {timer} and {time} update live") { model.layerActions.addLayer("text") }
+                AddLayerTile(title: "Text", symbol: "textformat", help: "A line of text; {timer} and {time} fill in live, in the editor and in exports") { model.layerActions.addLayer("text") }
                 AddLayerTile(title: "Color", symbol: "paintpalette", help: "A solid colour behind everything") { model.layerActions.addLayer("color") }
             }
             let sources = model.addableSources
@@ -437,11 +437,11 @@ private struct TextControls: View {
                 Text("Text").font(.system(size: 12)).foregroundStyle(.secondary)
                 Spacer()
                 Menu {
-                    Button("Stream or Recording Time  {timer}") { insert("{timer}") }
+                    Button("Timer  {timer}") { insert("{timer}") }
                     Button("Clock  {time}") { insert("{time}") }
                 } label: { Text("Insert").font(.system(size: 11, weight: .medium)) }
                 .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
-                .help("Live values that update while you stream or record")
+                .help("Values filled in as the picture plays: live, in the editor and in exports")
             }
             TextField("Text", text: $draft, axis: .vertical)
                 .lineLimit(1...4).textFieldStyle(.plain).font(.system(size: 13))
@@ -452,7 +452,7 @@ private struct TextControls: View {
                 .onChange(of: draft) { _, v in if v != spec.string { set { $0.string = v } } }
                 .onChange(of: focused) { _, f in if f { model.layerActions.beginGesture() } else { model.layerActions.endGesture("Edit Text") } }
                 .accessibilityLabel("Text")
-            Text("{timer} counts the stream while live, else the recording. {time} is the clock. ⌥↩ adds a line.")
+            Text(model.tokenHelp)
                 .font(.system(size: 10)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
         .onAppear { draft = t.string; takeFocusIfAsked() }

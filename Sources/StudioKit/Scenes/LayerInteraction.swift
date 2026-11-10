@@ -25,6 +25,8 @@ protocol LayerEditing: AnyObject {
     /// Capture sources the add palette offers ("game", "camera"): live, always both; in a recording, a source it
     /// recorded that the scene on this canvas lacks.
     var addableSources: [String] { get }
+    /// What `{timer}` and `{time}` show where this scene is drawn, for the text inspector.
+    var tokenHelp: String { get }
 }
 
 extension LayerEditing {
@@ -40,6 +42,12 @@ extension SceneModel: LayerEditing {
     var layerActions: SceneActions { actions }
     var assetSearchPaths: [URL] { AssetStore.searchPaths(project: nil) }
     var addableSources: [String] { ["game", "camera"] }
+    var tokenHelp: String { LayerTokenHelp.live }
+}
+
+enum LayerTokenHelp {
+    static let live = "Live, {timer} counts the stream, else the recording, and {time} is the clock. In an edit, {timer} is the time in the exported video. ⌥↩ adds a line."
+    static let editor = "{timer} is the time in the exported video (cuts left out); {time} is the clock when that moment was recorded. Live, {timer} counts the stream or recording. ⌥↩ adds a line."
 }
 
 /// Which scene and canvas a picture shows. Duplicated scenes share layer ids, so a layer id alone does not say which

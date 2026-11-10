@@ -323,15 +323,19 @@ struct SceneSchematic: View {
         let _ = film.revision
         let frame = film.image(for: Int(frameMs) / 1000 * 1000, interval: 1000)
         let gameSize = model.gameSize
+        let tiles = SceneTileOverlays.shared
+        let _ = tiles.revision
+        let tokens = OverlayTokens(now: (model.project.recordedAt ?? model.project.createdAt).addingTimeInterval(frameMs / 1000), elapsed: frameMs / 1000)
         SwiftUI.Canvas { ctx, size in
             let rect = CGRect(origin: .zero, size: size)
             ctx.clip(to: Path(roundedRect: rect, cornerRadius: 5))
             let bg = composition.background
             ctx.fill(Path(rect), with: .color(Color(red: bg.count > 0 ? bg[0] : 0, green: bg.count > 1 ? bg[1] : 0, blue: bg.count > 2 ? bg[2] : 0)))
-            // Overlays as their boxes (text) or proportions (images), so scenes that differ only in them look different.
+            // Overlays with their real pictures once the cache has them (at 2× for the Retina tile), so scenes that
+            // differ only in them look different; a box until then.
             var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: gameSize), .camera: SourceInfo(size: CGSize(width: 16, height: 9))]
-            let overlays = composition.layers.filter(\.isOverlay)
-            if !overlays.isEmpty { sources.merge(OverlayTextureCache.shared.sourceSizes(for: overlays, canvas: size, assets: model.assetSearchPaths)) { own, _ in own } }
+            let o = tiles.overlays(for: composition, canvas: CGSize(width: size.width * 2, height: size.height * 2), assets: model.assetSearchPaths, tokens: tokens)
+            sources.merge(o.sources) { own, _ in own }
             let layers = SceneResolver.resolve(composition, canvas: size, sources: sources)
             for l in layers {
                 let path = Path(roundedRect: l.dst, cornerRadius: l.radius)
@@ -355,6 +359,12 @@ struct SceneSchematic: View {
                     if l.border > 0 { ctx.stroke(path, with: .color(.white), lineWidth: 1) }
                 default:
                     if let c = l.color { ctx.fill(path, with: .color(Color(red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: Double(c.w * Float(l.opacity))))) }
+                    else if case .layer(let id) = l.key, let img = o.images[id], l.src.width > 0, l.src.height > 0 {
+                        var c = ctx; c.clip(to: path); c.opacity = l.opacity
+                        let full = CGRect(x: l.dst.minX - l.src.minX / l.src.width * l.dst.width, y: l.dst.minY - l.src.minY / l.src.height * l.dst.height,
+                                          width: l.dst.width / l.src.width, height: l.dst.height / l.src.height)
+                        c.draw(Image(decorative: img, scale: 1), in: full)
+                    }
                     else { ctx.fill(path, with: .color(.white.opacity(0.55 * l.opacity))) }
                 }
             }

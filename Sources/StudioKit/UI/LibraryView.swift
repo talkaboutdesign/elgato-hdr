@@ -183,13 +183,13 @@ struct LibraryView: View {
         Group {
             if lib.docs.isEmpty {
                 EmptyState(systemImage: "rectangle.stack.badge.play", title: "No recordings yet",
-                           message: "Press ⌘R in the live window to record. The game, your camera and your microphone are saved as separate layers you can cut, zoom and export here.")
+                           message: LibraryCopy.noRecordings)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filtered.isEmpty {
                 if !search.isEmpty { ContentUnavailableView.search(text: search) }
                 else {
                     EmptyState(systemImage: "dot.radiowaves.left.and.right", title: "No live sessions yet",
-                               message: "Recordings made while streaming keep their scene switches, zooms and markers, and show up here.")
+                               message: LibraryCopy.noLiveSessions)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
@@ -513,6 +513,13 @@ struct Badge: View {
             .background(tint.opacity(tint == .black ? 0.6 : 0.85), in: Capsule())
             .foregroundStyle(.white)
     }
+}
+
+/// The library's empty states. "Live Sessions" are recordings with a scene switch, punch-in or marker
+/// (`Project.hasLiveEvents`), whether or not they were streamed.
+enum LibraryCopy {
+    static let noRecordings = "Press ⌘R in the live window to record, streaming or not. The game, your camera and your microphone are saved as separate layers; open a recording to cut, zoom and export it."
+    static let noLiveSessions = "Recordings in which you switched scenes, punched in or added a marker show up here, streamed or not. The editor replays what you did."
 }
 
 func formatTime(_ s: Double) -> String {

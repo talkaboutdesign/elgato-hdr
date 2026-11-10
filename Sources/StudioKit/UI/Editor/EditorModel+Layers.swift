@@ -29,6 +29,7 @@ extension EditorModel: LayerEditing {
     var assetSearchPaths: [URL] { AssetStore.searchPaths(project: doc.dir) }
     /// The game (always recorded) and the camera (when recorded) while the scene on this canvas lacks them: a scene
     /// converted from a single-source layout has no other way to show the missing one.
+    var tokenHelp: String { LayerTokenHelp.editor }
     var addableSources: [String] {
         let types = Set(editedComposition.layers.map(\.source.type))
         return (types.contains("game") ? [] : ["game"]) + (hasCamera && !types.contains("camera") ? ["camera"] : [])
