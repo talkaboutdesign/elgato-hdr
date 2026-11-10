@@ -21,7 +21,12 @@ final class Session {
     var audio: AudioPlayer?
     var recorder: Recorder?
     var lastFrameNs: UInt64 = 0
-    var latestSeq: UInt32 = 0
+    private let sequenceLock = NSLock()
+    private var sequence: UInt32 = 0
+    var latestSeq: UInt32 {
+        get { sequenceLock.lock(); defer { sequenceLock.unlock() }; return sequence }
+        set { sequenceLock.lock(); sequence = newValue; sequenceLock.unlock() }
+    }
     var audioScratch = [UInt8](repeating: 0, count: 1 << 16)
     var pool: CVPixelBufferPool?
     let copyQueue = DispatchQueue(label: "record-copy")
@@ -99,7 +104,7 @@ final class Session {
                 latestSeq = seq; lastFrameNs = tNs
                 let slot = Int(seq % UInt32(shmSlots))
                 let t1 = CFAbsoluteTimeGetCurrent()
-                renderer.submit(slot: slot, w: w, h: h, arrivalNs: tNs)
+                renderer.submit(slot: slot, w: w, h: h, arrivalNs: tNs, isCurrent: { [self] in latestSeq &- seq < UInt32(shmSlots) })
                 let dd = CFAbsoluteTimeGetCurrent() - t1; tDraw += dd; tDrawMax = max(tDrawMax, dd)
                 if recorder != nil { copyForRecording(slot: slot, seq: seq, w: w, h: h, ns: tNs, colorMode: renderer.colorMode) }
                 frames += 1

@@ -4,6 +4,48 @@ import Metal
 @testable import StudioKit
 
 final class ProgramOutputTests: XCTestCase {
+    func testPhaseTracking() {
+        for (source, target, jitter, late, expected) in [
+            (60.0, 60.0, 1_000_000.0, 4_000_000.0, 2400),
+            (60, 60, 3_000_000, 4_000_000, 2400),
+            (59.94, 60, 0, 0, 2400), (120, 60, 0, 0, 1200),
+            (30, 60, 0, 0, 2400), (60, 30, 0, 0, 1200)
+        ] {
+            var phase = FramePhase(), kept: [UInt64] = []
+            for frame in 0..<2400 {
+                let offset = frame == 0 ? late : (frame % 2 == 0 ? jitter : -jitter)
+                let ns = UInt64(10e9 + Double(frame) * 1e9 / source + offset)
+                if phase.accept(ns, fps: target) { kept.append(ns) }
+            }
+            XCTAssertEqual(kept.count, expected, "\(source) → \(target), jitter \(jitter)")
+            XCTAssertTrue(zip(kept, kept.dropFirst()).allSatisfy { $0 < $1 })
+            print("phase: \(source) -> \(target), jitter=\(jitter), kept=\(kept.count)/2400")
+        }
+    }
+    func testContentionAndStalePassAreCounted() throws {
+        let core = MetalCore.shared
+        let y = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: 64, height: 36, mipmapped: false)))
+        let c = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Unorm, width: 32, height: 18, mipmapped: false)))
+        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60)
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), submitted = DispatchSemaphore(value: 0)
+        output.composition = { entered.signal(); _ = release.wait(timeout: .now() + 2); return Composition() }
+        output.start()
+        let base = nowNs()
+        DispatchQueue.global().async {
+            output.gameFrame(y: y, c: c, size: CGSize(width: 64, height: 36), colorMode: .sdr, camera: nil, hostNs: base, isCurrent: { false })
+            submitted.signal()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        output.gameFrame(y: y, c: c, size: CGSize(width: 64, height: 36), colorMode: .sdr, camera: nil, hostNs: base + 17_000_000)
+        release.signal()
+        XCTAssertEqual(submitted.wait(timeout: .now() + 2), .success)
+        let barrier = try XCTUnwrap(core.queue.makeCommandBuffer()); barrier.commit(); barrier.waitUntilCompleted()
+        Thread.sleep(forTimeInterval: 0.02)
+        output.stop()
+        let stats = output.takeStats()
+        XCTAssertEqual(stats.contention, 1); XCTAssertEqual(stats.stale, 1)
+        XCTAssertEqual(stats.frames, 0); XCTAssertEqual(stats.dropped, 2)
+    }
     func testFrameSelectionAndNoSignal() throws {
         let core = MetalCore.shared
         let y = try XCTUnwrap(core.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Unorm, width: 64, height: 36, mipmapped: false)))
