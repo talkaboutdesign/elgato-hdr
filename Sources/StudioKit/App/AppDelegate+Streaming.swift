@@ -73,7 +73,7 @@ extension AppDelegate {
         if !state.focusMode { studio.setSidebar(visible: true, animated: true) }
     }
 
-    /// Stops a stream without asking (capture restarts, window closes, quit after confirmation).
+    /// Stops a stream without asking (window closes, quit after confirmation).
     func endStream() { if streamController.isActive { streamController.endStream() } }
 
     // MARK: Add/edit sheet
@@ -183,10 +183,18 @@ extension AppDelegate {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.streamController.goLive()
+            if let i = args.firstIndex(of: "--stream-restart-after"), i + 1 < args.count,
+               let delay = Double(args[i + 1]), delay > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.start() }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
                 self?.endStream()
-                // Termination drains any layered recording through the existing delegate path.
-                if args.contains("--demo-source") { NSApp.terminate(nil) }
+                // terminateLater enters a nested AppKit loop inside this dispatch callback. Finish first
+                // so the recording's main-queue completion can run before requesting termination.
+                if args.contains("--demo-source") {
+                    if self?.recorder != nil { self?.finishRecording { _ in NSApp.terminate(nil) } }
+                    else { NSApp.terminate(nil) }
+                }
             }
         }
     }

@@ -31,6 +31,7 @@ struct CanvasHealth: Equatable {
     var renderMs: Double
     var encodeMs: Double
     var dropped: Int
+    var rateSkipped = 0, contention = 0, capacity = 0, stale = 0, gpu = 0, inactive = 0, encoderDropped = 0
 }
 
 /// Opens the add/edit sheet: `destination` nil adds a new one (starting at `service` when given).
@@ -64,6 +65,7 @@ struct StreamActions {
 
 @Observable
 final class StreamingState {
+    var encoderRecoveryEvents = 0
     var phase: StreamUIState = .idle
     var destinations: [Destination] = []
     var settings = StreamSettings()

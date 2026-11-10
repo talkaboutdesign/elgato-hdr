@@ -11,12 +11,21 @@ final class StreamSession {
         var renderDropped, encoderDropped: Int; var publishers: [RTMPPublisher.Stats]
         /// Same order as `publishers`, so a caller can tell whose numbers are whose.
         var publisherIDs: [ObjectIdentifier] = []
+        var renderSkips = ProgramOutput.Stats()
     }
     var onStats: ((Stats) -> Void)?
     var onError: ((String) -> Void)?
+    var onLaneError: ((Canvas, String) -> Void)?
+    var onRecovery: ((Canvas) -> Void)?
     let mixer: AudioMixer
     var mic: MixerInput { mixer.addInput("mic") }
-    private let outputs: [Output], renderer: Renderer, audioBitrate: Int
+    private let outputs: [Output], audioBitrate: Int
+    private let rendererLock = NSLock()
+    private var currentRenderer: Renderer
+    private var renderer: Renderer {
+        get { rendererLock.lock(); defer { rendererLock.unlock() }; return currentRenderer }
+        set { rendererLock.lock(); currentRenderer = newValue; rendererLock.unlock() }
+    }
     /// One lane per canvas: a program render and an encoder fanned out to that canvas's publishers.
     private var lanes: [Lane] = []
     private let audioTargets = PublisherList()
@@ -25,7 +34,7 @@ final class StreamSession {
     private var running = false
 
     init(outputs: [Output], audioBitrate: Int, renderer: Renderer, mixer: AudioMixer) {
-        self.outputs = outputs; self.audioBitrate = audioBitrate; self.renderer = renderer; self.mixer = mixer
+        self.outputs = outputs; self.audioBitrate = audioBitrate; self.currentRenderer = renderer; self.mixer = mixer
     }
     /// Lifecycle and stats callbacks run on main; all media callbacks stay on their producer queues.
     @discardableResult func start() -> Bool {
@@ -60,10 +69,15 @@ final class StreamSession {
                 self.onStats?(Stats(canvas: lane.canvas, fps: Double(e.frames) / dt,
                     renderMs: p.renderMs / Double(max(1, p.frames)), encodeMs: e.encodeMs / n, latencyMs: e.latencyMs / n,
                     renderDropped: p.dropped, encoderDropped: e.dropped, publishers: publishers.map(\.stats),
-                    publisherIDs: publishers.map(ObjectIdentifier.init)))
+                    publisherIDs: publishers.map(ObjectIdentifier.init), renderSkips: p))
             }
         }
         self.timer = timer; timer.resume(); return true
+    }
+    func replaceRenderer(_ next: Renderer) {
+        renderer.programOutputs = []
+        renderer = next
+        if running { next.programOutputs = lanes.map(\.program) }
     }
     func stop() {
         guard running else { return }; running = false
@@ -117,18 +131,30 @@ final class StreamSession {
     private func makeLane(_ output: Output) -> Lane? {
         guard let encoder = VideoEncoder(settings: .init(width: Int(output.size.width), height: Int(output.size.height), fps: output.fps, bitrate: output.videoBitrate)) else { return nil }
         let program = ProgramOutput(canvas: output.canvas, size: output.size, fps: output.fps)
-        program.composition = { [weak renderer] in
-            let overlay = renderer?.overlay ?? LiveOverlay()
+        program.composition = { [weak self] in
+            let overlay = self?.renderer.overlay ?? LiveOverlay()
             let layout = output.canvas == .wide ? CanvasLayout(kind: .pip, camera: overlay.placement) : .verticalDefault
             return Composition.from(layout: layout, canvas: output.size, hasCamera: overlay.camera?.latest != nil, mirror: overlay.mirror)
         }
-        program.camera = { [weak renderer] in renderer?.overlay.camera?.latest }
+        program.camera = { [weak self] in self?.renderer.overlay.camera?.latest }
         program.onFrame = { [weak encoder] pb, ns in encoder?.encode(pb, hostNs: ns) }
         let lane = Lane(canvas: output.canvas, program: program, encoder: encoder)
         let publishers = lane.publishers
         encoder.onConfig = { sps, pps in publishers.setConfig(sps, pps).forEach { $0.setVideoConfig(sps: sps, pps: pps) } }
         encoder.onFrame = { bytes, ns, key in publishers.snapshot.items.forEach { $0.sendVideo(bytes, ptsNs: ns, dtsNs: ns, keyframe: key) } }
-        encoder.onError = { [weak self] status in DispatchQueue.main.async { self?.onError?("H.264 encode failed (\(status))") } }
+        encoder.onError = { [weak self, weak lane] status in
+            DispatchQueue.main.async {
+                guard let self, let lane, self.lanes.contains(where: { $0 === lane }) else { return }
+                for publisher in lane.publishers.snapshot.items { self.removePublisher(publisher) }
+                self.onLaneError?(lane.canvas, "H.264 recovery failed (\(status))")
+            }
+        }
+        encoder.onRecovery = { [weak self, weak lane] in
+            DispatchQueue.main.async {
+                guard let self, let lane, self.lanes.contains(where: { $0 === lane }) else { return }
+                self.onRecovery?(lane.canvas)
+            }
+        }
         return lane
     }
 

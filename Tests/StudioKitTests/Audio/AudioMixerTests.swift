@@ -129,8 +129,8 @@ final class AudioMixerTests: XCTestCase {
         }
         let ms = elapsed / 1000 / 1e6
         print(String(format: "two-input render average: %.6f ms/block", ms))
-        #if DEBUG
-        // Unoptimized build on a shared CI machine: only catch gross regressions (a block lasts 21 ms).
+#if DEBUG
+        // Unoptimized build on a shared CI machine: catch gross regressions.
         XCTAssertLessThan(ms, 5)
         #else
         XCTAssertLessThan(ms, 0.2)
@@ -247,18 +247,27 @@ final class AudioMixerTests: XCTestCase {
     func testRestartSkipsStoppedTimeAndStopCancelsQueuedTicks() {
         let queue = DispatchQueue(label: "restart.timer")
         let mixer = AudioMixer(blockFrames: 480, targetLatencyMs: 0, queue: queue)
-        let lock = NSLock(); var starts: [UInt64] = []
-        mixer.onBlock = { _, _, start in lock.lock(); starts.append(start); lock.unlock() }
+        let lock = NSLock(); var starts: [UInt64] = [], restartBoundary = UInt64.max
+        let resumedBlock = DispatchSemaphore(value: 0)
+        mixer.onBlock = { _, _, start in
+            lock.lock(); starts.append(start); let resumed = start >= restartBoundary; lock.unlock()
+            if resumed { resumedBlock.signal() }
+        }
         mixer.start(); Thread.sleep(forTimeInterval: 0.06); mixer.stop()
         queue.sync {}
         lock.lock(); let stoppedCount = starts.count; lock.unlock()
         Thread.sleep(forTimeInterval: 0.15)
         lock.lock(); XCTAssertEqual(starts.count, stoppedCount); lock.unlock()
-        let restart = nowNs(); mixer.start(); Thread.sleep(forTimeInterval: 0.04); mixer.stop()
+        let restart = nowNs()
+        lock.lock(); restartBoundary = restart; lock.unlock()
+        mixer.start()
+        // A shared runner may not schedule the timer within 40 ms; observe a block before stopping it.
+        XCTAssertEqual(resumedBlock.wait(timeout: .now() + 2), .success)
+        mixer.stop()
         let stoppedAt = nowNs()
         queue.sync {}
         lock.lock(); let resumed = Array(starts.dropFirst(stoppedCount)); lock.unlock()
-        // A loaded CI host may oversleep 40 ms. Bound emitted blocks by elapsed host time, not requested sleep.
+        // Bound emitted blocks by actual host time while retaining the no-stopped-time catch-up check.
         let maximumBlocks = Int((stoppedAt - restart) / 10_000_000) + 1
         XCTAssertFalse(resumed.isEmpty); XCTAssertLessThanOrEqual(resumed.count, maximumBlocks)
         XCTAssertTrue(resumed.allSatisfy { $0 >= restart })

@@ -133,12 +133,12 @@ final class Renderer: NSObject {
     func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); gameQueued = 0; lock.unlock() }
 
     /// Reader thread: copy the shared-memory slot into the ring on the GPU and schedule it. Never blocks on drawables.
-    func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64) {
+    func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64, isCurrent: @escaping () -> Bool = { true }) {
         guard let (sy, sc) = shmTextures(slot: slot, w: w, h: h) else { return }
         let outputs = programOutputs
         if !outputs.isEmpty {
             let camera = overlay.camera?.latest
-            for output in outputs { output.gameFrame(y: sy, c: sc, size: CGSize(width: w, height: h), colorMode: colorMode, camera: camera, hostNs: arrivalNs) }
+            for output in outputs { output.gameFrame(y: sy, c: sc, size: CGSize(width: w, height: h), colorMode: colorMode, camera: camera, hostNs: arrivalNs, isCurrent: isCurrent) }
         }
         let a = Double(arrivalNs) / 1e9
         if presentation == .immediate { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }

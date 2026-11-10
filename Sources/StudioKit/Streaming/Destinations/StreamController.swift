@@ -7,6 +7,9 @@ import Foundation
 protocol StreamSessionDriving: AnyObject {
     var onStats: ((StreamSession.Stats) -> Void)? { get set }
     var onError: ((String) -> Void)? { get set }
+    var onLaneError: ((Canvas, String) -> Void)? { get set }
+    var onRecovery: ((Canvas) -> Void)? { get set }
+    func replaceRenderer(_ renderer: Renderer)
     var activeCanvases: [Canvas] { get }
     func start() -> Bool
     func stop()
@@ -52,6 +55,8 @@ final class StreamController {
     }
 
     var isActive: Bool { session != nil || state.phase == .connecting }
+
+    func replaceRenderer(_ renderer: Renderer) { session?.replaceRenderer(renderer) }
 
     // MARK: Configuration
 
@@ -167,6 +172,23 @@ final class StreamController {
             for (id, p) in publishers { self.watch(p, for: id) }
             session.onStats = { [weak self] in self?.apply($0) }
             session.onError = { [weak self] message in self?.sessionFailed(message) }
+            session.onLaneError = { [weak self] canvas, message in
+                guard let self else { return }
+                for d in self.state.destinations where d.canvas == canvas {
+                    if let r = self.runtimes.removeValue(forKey: d.id) {
+                        r.publisher.onState = nil
+                        self.fail(d, message, detail: nil)
+                    }
+                }
+                self.state.canvases.removeAll { $0.canvas == canvas }
+                self.checkEnded()
+            }
+            session.onRecovery = { [weak self] canvas in
+                guard let self else { return }
+                self.state.encoderRecoveryEvents += 1
+                self.toast("\(canvas.label) encoder recovered", nil, .info)
+                log("stream \(canvas.rawValue): encoder recovered")
+            }
             self.session = session
             guard session.start() else { self.session = nil; self.finish(reason: nil); return }
         }
@@ -330,7 +352,10 @@ final class StreamController {
     private func apply(_ stats: StreamSession.Stats) {
         guard let session else { return }
         let c = CanvasHealth(canvas: stats.canvas, fps: stats.fps, renderMs: stats.renderMs, encodeMs: stats.encodeMs,
-                             dropped: stats.renderDropped + stats.encoderDropped)
+                             dropped: stats.renderDropped + stats.encoderDropped,
+                             rateSkipped: stats.renderSkips.rateSkipped, contention: stats.renderSkips.contention,
+                             capacity: stats.renderSkips.capacity, stale: stats.renderSkips.stale, gpu: stats.renderSkips.gpu,
+                             inactive: stats.renderSkips.inactive, encoderDropped: stats.encoderDropped)
         var canvases = state.canvases.filter { $0.canvas != stats.canvas && session.activeCanvases.contains($0.canvas) }
         canvases.append(c); canvases.sort { $0.canvas == .wide && $1.canvas == .vertical }
         if state.canvases != canvases { state.canvases = canvases }

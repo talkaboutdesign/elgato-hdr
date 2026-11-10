@@ -42,6 +42,35 @@ final class VideoEncoderTests: XCTestCase {
         XCTAssertEqual(measured, Double(bitrate), accuracy: Double(bitrate) * 0.25)
         print("VideoEncoder: \(count) frames; keyframes=\(keys); bitrate=\(Int(measured)) target=\(bitrate)")
     }
+    func testInvalidSessionRecoversWithKeyframe() throws {
+        let encoder = try XCTUnwrap(VideoEncoder(settings: .init(width: 64, height: 64, fps: 60, bitrate: 100_000)))
+        var pb: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pb)
+        let buffer = try XCTUnwrap(pb), gate = DispatchSemaphore(value: 0)
+        encoder.onError = { XCTFail("Recovery failed: \($0)") }
+        encoder.onFrame = { _, _, key in XCTAssertTrue(key); gate.signal() }
+        encoder.encode(buffer, hostNs: 1_000_000_000)
+        XCTAssertEqual(gate.wait(timeout: .now() + 5), .success)
+        encoder.invalidateForTesting()
+        encoder.encode(buffer, hostNs: 2_000_000_000)
+        // This also drains the failed encode and recovery before submitting the next frame.
+        encoder.drainForTesting()
+        encoder.encode(buffer, hostNs: 3_000_000_000)
+        XCTAssertEqual(gate.wait(timeout: .now() + 5), .success)
+        encoder.finish()
+        XCTAssertEqual(encoder.takeStats().dropped, 1)
+    }
+    func testAdmissionSeparatesQueuedAndHardwareWork() {
+        var admission = EncodeAdmission()
+        XCTAssertTrue(admission.admit()); XCTAssertTrue(admission.admit())
+        XCTAssertFalse(admission.admit())
+        admission.queued -= 2
+        for _ in 0..<6 { XCTAssertTrue(admission.admit()); admission.queued -= 1 }
+        XCTAssertEqual(admission.pending, 8)
+        XCTAssertFalse(admission.admit())
+        admission.pending -= 1
+        XCTAssertTrue(admission.admit())
+    }
     func testInvalidSettings() {
         XCTAssertNil(VideoEncoder(settings: .init(width: 0, height: 100, fps: 60, bitrate: 1000)))
         XCTAssertNil(VideoEncoder(settings: .init(width: 100, height: 100, fps: .nan, bitrate: 1000)))

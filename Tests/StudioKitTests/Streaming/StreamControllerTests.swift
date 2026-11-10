@@ -7,6 +7,9 @@ final class StreamControllerTests: XCTestCase {
     final class FakeSession: StreamSessionDriving {
         var onStats: ((StreamSession.Stats) -> Void)?
         var onError: ((String) -> Void)?
+        var onLaneError: ((Canvas, String) -> Void)?
+        var onRecovery: ((Canvas) -> Void)?
+        func replaceRenderer(_ renderer: Renderer) {}
         private(set) var lanes: [(Canvas, [RTMPPublisher])] = []
         private(set) var stopped = false
         let outputs: [StreamSession.Output]

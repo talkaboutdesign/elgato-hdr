@@ -142,9 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func start() {
-        endStream()
         if recorder != nil { stopRecording() }
-        if demoSource != nil, session != nil { return }
         session?.stop(); session = nil
         let mode = modes[modeIndex]
         setConnection(.connecting)
@@ -182,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     self.view.updateDrawableSize()
                     self.renderer?.attachDisplayLink(view: self.view)
                     self.applyOverlay()
+                    if let renderer = self.renderer { self.streamController.replaceRenderer(renderer) }
                 }
             }
             guard let renderer = self.renderer else { DispatchQueue.main.async { self.setConnection(.noSignal("Metal is unavailable")) }; close(fd); return }
