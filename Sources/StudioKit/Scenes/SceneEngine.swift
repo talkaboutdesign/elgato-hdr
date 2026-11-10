@@ -73,12 +73,14 @@ struct PunchIn: Equatable {
     func apply(to layers: inout [ResolvedLayer], atNs t: UInt64) {
         let s = scale(atNs: t)
         guard s > 1.0001 else { return }
-        let p = amount > 1 ? min(1, max(0, (s - 1) / (amount - 1))) : 1
+        let p: CGFloat = amount > 1 ? CGFloat(min(1, max(0, (s - 1) / (amount - 1)))) : 1
+        let k = CGFloat(s)
         for i in layers.indices where layers[i].key == .game {
             let src = layers[i].src, c = CGPoint(x: src.midX, y: src.midY)
             let f = focusPoint(atNs: t, centre: c)
-            let w = src.width / s, h = src.height / s
-            let cx = min(max(c.x + (f.x - c.x) * p, w / 2), 1 - w / 2), cy = min(max(c.y + (f.y - c.y) * p, h / 2), 1 - h / 2)
+            let w: CGFloat = src.width / k, h: CGFloat = src.height / k
+            let tx: CGFloat = c.x + (f.x - c.x) * p, ty: CGFloat = c.y + (f.y - c.y) * p
+            let cx = min(max(tx, w / 2), 1 - w / 2), cy = min(max(ty, h / 2), 1 - h / 2)
             layers[i].src = CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
         }
     }

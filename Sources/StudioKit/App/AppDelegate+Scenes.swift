@@ -1,4 +1,5 @@
 import AppKit
+import CoreVideo
 import SwiftUI
 
 /// Main-thread scene state that the UI does not read: storage, the renderer's live state, menu, keys, event log.

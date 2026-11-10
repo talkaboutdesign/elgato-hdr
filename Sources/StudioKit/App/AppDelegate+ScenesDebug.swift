@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import CoreVideo
 import Metal
 
 /// Development aids for scenes, for sessions that cannot look at the screen (a locked screen presents no frames and

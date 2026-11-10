@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Timing of the live event log during one recording: event times in source milliseconds and the throttle for

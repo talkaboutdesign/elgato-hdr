@@ -333,17 +333,19 @@ private struct ColorRow: View {
     let model: SceneModel
     let layer: Layer
     var body: some View {
-        let c = layer.source.color ?? [0, 0, 0, 1]
+        let current = Color(.sRGB, red: component(0, 0), green: component(1, 0), blue: component(2, 0), opacity: component(3, 1))
         InspectorRow(label: "Color") {
-            ColorPicker("Color", selection: Binding(get: {
-                Color(.sRGB, red: c[0], green: c.count > 1 ? c[1] : 0, blue: c.count > 2 ? c[2] : 0, opacity: c.count > 3 ? c[3] : 1)
-            }, set: { new in
+            ColorPicker("Color", selection: Binding(get: { current }, set: { new in
                 guard let s = NSColor(new).usingColorSpace(.sRGB) else { return }
                 let v: [Double] = [Double(s.redComponent), Double(s.greenComponent), Double(s.blueComponent), Double(s.alphaComponent)]
                 model.actions.editLayer(layer.id) { $0.source.color = v }
             }))
             .labelsHidden()
         }
+    }
+    private func component(_ i: Int, _ fallback: Double) -> Double {
+        guard let c = layer.source.color, i < c.count else { return fallback }
+        return c[i]
     }
 }
 

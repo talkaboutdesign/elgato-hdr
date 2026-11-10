@@ -43,9 +43,10 @@ struct LayerSnapper {
 
     /// The guide for a snap, spanning the canvas or both layers involved.
     func guide(_ t: Target, _ axis: SnapGuide.Axis, for r: CGRect) -> SnapGuide {
-        let ext = axis == .vertical ? (r.minY, r.maxY) : (r.minX, r.maxX)
-        let (a, b) = t.span.map { (min($0.0, ext.0), max($0.1, ext.1)) } ?? (0, axis == .vertical ? canvas.height : canvas.width)
-        return SnapGuide(axis: axis, position: t.value, from: a, to: b)
+        let lo: CGFloat = axis == .vertical ? r.minY : r.minX, hi: CGFloat = axis == .vertical ? r.maxY : r.maxX
+        let full: CGFloat = axis == .vertical ? canvas.height : canvas.width
+        guard let span = t.span else { return SnapGuide(axis: axis, position: t.value, from: 0, to: full) }
+        return SnapGuide(axis: axis, position: t.value, from: min(span.0, lo), to: max(span.1, hi))
     }
 
     /// Moves `r` so its nearest edge or centre lands on a target, per axis.
