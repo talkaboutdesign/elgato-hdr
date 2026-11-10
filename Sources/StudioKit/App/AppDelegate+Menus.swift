@@ -51,6 +51,7 @@ extension AppDelegate {
         let camItem = NSMenuItem(); main.addItem(camItem)
         cameraMenu.delegate = self   // rebuilt on open so device lists stay current
         camItem.submenu = cameraMenu
+        addScenesMenu(to: main)
 
         let recItem = NSMenuItem(); main.addItem(recItem)
         let recMenu = NSMenu(title: "Record")

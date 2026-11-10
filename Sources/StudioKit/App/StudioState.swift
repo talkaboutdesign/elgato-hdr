@@ -108,6 +108,8 @@ final class StudioState {
     // window chrome
     var sidebarVisible = true
     var focusMode = false
+    // scenes (plan 22)
+    let scenes = SceneModel()
 
     @ObservationIgnored var actions = StudioActions()
 
