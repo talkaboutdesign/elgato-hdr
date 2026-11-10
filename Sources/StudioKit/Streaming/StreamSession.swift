@@ -145,10 +145,8 @@ final class StreamSession {
     private func makeLane(_ output: Output) -> Lane? {
         guard let encoder = makeEncoder(.init(width: Int(output.size.width), height: Int(output.size.height), fps: output.fps, bitrate: output.videoBitrate)) else { return nil }
         let program = ProgramOutput(canvas: output.canvas, size: output.size, fps: output.fps)
-        program.composition = { [weak self] in
-            let overlay = self?.renderer.overlay ?? LiveOverlay()
-            let layout = output.canvas == .wide ? CanvasLayout(kind: .pip, camera: overlay.placement) : .verticalDefault
-            return Composition.from(layout: layout, canvas: output.size, hasCamera: overlay.camera?.latest != nil, mirror: overlay.mirror)
+        program.picture = { [weak self] size, sources, ns in
+            self?.renderer.livePicture(canvas: output.canvas, size: size, sources: sources, atNs: ns) ?? LivePicture()
         }
         program.camera = { [weak self] in self?.renderer.overlay.camera?.latest }
         program.onFrame = { [weak encoder] pb, ns in encoder?.encode(pb, hostNs: ns) }

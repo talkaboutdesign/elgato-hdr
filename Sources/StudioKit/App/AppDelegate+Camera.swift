@@ -28,7 +28,7 @@ extension AppDelegate {
     }
 
     func applyOverlay() {
-        renderer?.overlay = LiveOverlay(camera: camera.cameraOn ? camera : nil, placement: livePlacement, mirror: cameraMirror)
+        renderer?.overlay = LiveOverlay(camera: camera.cameraOn ? camera : nil)
         pushScene()
         view.refreshOverlay()
         syncActiveDevices()

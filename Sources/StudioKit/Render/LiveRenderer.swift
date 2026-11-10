@@ -8,12 +8,9 @@ import QuartzCore
 
 // MARK: - Live renderer (P010 -> PQ/HLG/709 RGB, zero-copy from shared memory, facecam composited on top)
 
-/// The facecam the live view draws. The layout lives in the scene (`LiveSceneState`); `placement` and `mirror`
-/// mirror the active scene's camera layer for code that has not moved to `Renderer.sceneFrame` yet.
+/// The facecam the live view and the program outputs draw. Where it goes is the scene's business (`LiveSceneState`).
 struct LiveOverlay {
     var camera: CameraCapture?
-    var placement = CameraPlacement()
-    var mirror = false
 }
 
 struct LiveGameFrame { let y: MTLTexture, c: MTLTexture; let size: CGSize; let transfer: Int32 }
@@ -277,6 +274,11 @@ final class Renderer: NSObject {
     /// (a locked copy, then pure maths), never blocks.
     func sceneFrame(canvas: Canvas, size: CGSize, sources: [SourceKey: SourceInfo], atNs: UInt64) -> SceneFrame {
         scene.frame(canvas: canvas, size: size, sources: sources, atNs: atNs)
+    }
+
+    /// `sceneFrame` in the shape a program output draws. Every stream lane renders through this.
+    func livePicture(canvas: Canvas, size: CGSize, sources: [SourceKey: SourceInfo], atNs: UInt64) -> LivePicture {
+        LivePicture(frame: sceneFrame(canvas: canvas, size: size, sources: sources, atNs: atNs))
     }
 
     /// The game frame drawn (or dropped) last. In Smooth mode it is a ring texture and otherwise shared memory, so a

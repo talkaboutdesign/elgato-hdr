@@ -19,9 +19,19 @@ struct FramePhase {
     }
 }
 
+/// What a program output draws for one frame: the live scene's picture for its canvas and the textures of the overlay
+/// layers in it (images and text; game and camera textures are added by the output).
+struct LivePicture {
+    var frame = SceneFrame(background: SIMD4(0, 0, 0, 1), layers: [])
+    var textures: [SourceKey: LayerTextures.Kind] = [:]
+}
+
 final class ProgramOutput {
     let canvas: Canvas, size: CGSize, fps: Double
-    var composition: () -> Composition = { Composition() }
+    /// The picture at a host time for this output's size, given the sources that have frames. The stream session
+    /// supplies `Renderer.livePicture`, so window and stream show the same scene and transition frame. Called on the
+    /// reader thread (game frames) and the no-signal queue; it must not block.
+    var picture: (_ size: CGSize, _ sources: [SourceKey: SourceInfo], _ hostNs: UInt64) -> LivePicture = { _, _, _ in LivePicture() }
     var camera: () -> CVPixelBuffer? = { nil }
     var onFrame: ((CVPixelBuffer, UInt64) -> Void)?
     struct Stats { var frames = 0, dropped = 0; var renderMs = 0.0; var rateSkipped = 0, contention = 0, capacity = 0, stale = 0, gpu = 0, inactive = 0 }
@@ -89,9 +99,11 @@ final class ProgramOutput {
             sources[.camera] = SourceInfo(size: CGSize(width: CVPixelBufferGetWidth(camera), height: CVPixelBufferGetHeight(camera)))
             textures[.camera] = .biplanar(y: planes.0, c: planes.1, bits: planes.3, transfer: 2, bt709: true)
         }
-        let comp = composition(), token = generation
-        core.encodeLayers(cb, target: target, canvas: size, background: comp.backgroundColor, outTransfer: 2,
-                          layers: DrawLayer.pair(SceneResolver.resolve(comp, canvas: size, sources: sources), textures))
+        // Without a game frame (no signal) the scene renders without its game layers: the background shows.
+        let pic = picture(size, sources, hostNs), token = generation
+        textures.merge(pic.textures) { own, _ in own }
+        core.encodeLayers(cb, target: target, canvas: size, background: pic.frame.background, outTransfer: 2,
+                          layers: DrawLayer.pair(pic.frame.layers, textures))
         statsLock.lock(); inFlight += 1; statsLock.unlock()
         cb.addCompletedHandler { [self] completed in
             _ = keep; _ = camera

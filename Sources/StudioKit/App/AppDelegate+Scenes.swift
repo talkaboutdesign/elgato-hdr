@@ -48,6 +48,7 @@ extension AppDelegate {
         installSceneKeys()
         startThumbnails()
         scheduleSceneTorture()
+        scheduleSceneScript()
         #if DEBUG
         startSceneDebug()
         #endif
@@ -373,7 +374,6 @@ extension AppDelegate {
         guard let k = scenes.composition.layers.last(where: { $0.source.type == "camera" }) else { return }
         let p = CameraPlacement(frame: k.frame, canvas: size, roundness: k.roundness, border: k.border, shadow: k.shadow)
         if p != livePlacement { livePlacement = p }
-        if renderer?.overlay.placement != p { renderer?.overlay.placement = p }
     }
 
     // MARK: Punch-in
@@ -621,6 +621,38 @@ extension AppDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.5) { [weak self] in
                     self?.nextScene()
                     if i == 19 { log("scene-torture: done") }
+                }
+            }
+        }
+    }
+
+    /// `--scene-script "6:next,11:scene=Gameplay,14:punch"`: live actions at fixed seconds after launch, for checking
+    /// what the stream and recordings show. Actions: `next`, `prev`, `scene=<name or 1-based index>`, `punch` (toggle
+    /// the live zoom), `marker`, `canvas=wide|vertical`. Each logs its host time, to match against the stream's
+    /// "stream time 0" line.
+    func scheduleSceneScript() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--scene-script"), i + 1 < args.count else { return }
+        for step in args[i + 1].split(separator: ",") {
+            let parts = step.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let at = Double(parts[0]), at >= 0 else { log("scene-script: ignored \(step)"); continue }
+            let action = parts[1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + at) { [weak self] in
+                guard let self = self else { return }
+                log("scene-script: \(action) at host \(nowNs()) ns")
+                let c = self.scenes.collection
+                switch action {
+                case "next": self.nextScene()
+                case "prev": self.previousScene()
+                case "punch": self.togglePunchIn()
+                case "marker": self.addMarker()
+                case "canvas=wide": self.setCanvas(.wide)
+                case "canvas=vertical": self.setCanvas(.vertical)
+                default:
+                    guard action.hasPrefix("scene=") else { log("scene-script: unknown action \(action)"); return }
+                    let name = String(action.dropFirst(6))
+                    let target = c.scenes.first { $0.name == name } ?? Int(name).flatMap { n in c.scenes.indices.contains(n - 1) ? c.scenes[n - 1] : nil }
+                    if let t = target { self.switchScene(to: t.id) } else { log("scene-script: no scene \(name)") }
                 }
             }
         }
