@@ -20,6 +20,11 @@ struct ExportSheet: View {
             }
             .padding([.horizontal, .top], DS.Space.xl).padding(.bottom, DS.Space.l)
 
+            let notices = ExportNotices(model: model)
+            if notices.any {
+                notices.padding(.horizontal, DS.Space.xl).padding(.bottom, DS.Space.l)
+            }
+
             let columns = [GridItem(.flexible(), spacing: DS.Space.m), GridItem(.flexible(), spacing: DS.Space.m)]
             LazyVGrid(columns: columns, spacing: DS.Space.m) {
                 ForEach(ExportPreset.allCases) { preset in
@@ -69,6 +74,46 @@ struct ExportSheet: View {
         case .youtube1080: return "H.264, plays everywhere"
         case .shorts: return "Vertical canvas, H.264 at 60 fps"
         case .custom: return "Pick canvas, size, frame rate and colour"
+        }
+    }
+}
+
+/// What the user should know before exporting: the encoder is shared with a recording or stream in progress, and
+/// image layers whose file is gone are left out.
+struct ExportNotices: View {
+    let model: EditorModel
+    private var activity: (recording: Bool, live: Bool) { ExportQueue.liveActivity }
+    private var missing: [MissingAsset] { model.missingAssets }
+    var any: Bool { activity.recording || activity.live || !missing.isEmpty }
+
+    /// One line per missing file: "Logo in “Gameplay” and “Camera Focus”".
+    static func byFile(_ missing: [MissingAsset]) -> [String] {
+        var order: [String] = [], scenes: [String: [String]] = [:], names: [String: String] = [:]
+        for m in missing {
+            if scenes[m.file] == nil { order.append(m.file); names[m.file] = m.layer }
+            if !(scenes[m.file] ?? []).contains(m.scene) { scenes[m.file, default: []].append(m.scene) }
+        }
+        return order.map { f in
+            let s = (scenes[f] ?? []).map { "“\($0)”" }
+            let list = s.count > 1 ? s.dropLast().joined(separator: ", ") + " and " + s.last! : s.first ?? ""
+            return "\(names[f] ?? f) in \(list)"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Space.s) {
+            let a = activity
+            if a.recording || a.live {
+                Callout(style: .info, title: "Exports wait for the video encoder while you are live or recording",
+                        detail: "\(a.live && a.recording ? "Streaming and recording use" : a.live ? "The stream uses" : "The recording uses") the Mac's video encoder first, so exports run slower until \(a.live ? "you end the stream" : "the recording stops"). Nothing is lost.",
+                        systemImage: a.live ? "dot.radiowaves.left.and.right" : "record.circle")
+            }
+            let files = ExportNotices.byFile(missing)
+            if !files.isEmpty {
+                Callout(style: .warning, title: files.count == 1 ? "1 image is missing and will be left out" : "\(files.count) images are missing and will be left out",
+                        detail: files.prefix(3).joined(separator: "; ") + (files.count > 3 ? "; and \(files.count - 3) more" : "")
+                            + ". Put the file back in the recording's Assets folder to include it.")
+            }
         }
     }
 }

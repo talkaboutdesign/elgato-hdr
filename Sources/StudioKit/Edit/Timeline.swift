@@ -18,6 +18,10 @@ extension SceneSpan {
 struct ZoomBlock: Codable, Equatable {
     var id = UUID(); var startMs, endMs: Double
     var scale = 1.8; var focusX = 0.5, focusY = 0.5; var easeMs = 450.0
+    /// Imported from a live punch-in: replayed with the live engine's spring, easing in from the press (`startMs`)
+    /// and starting its return at the release (`endMs`), centred as live centred it. Editor blocks ease in and out
+    /// inside the block with `easeMs`.
+    var live = false
     func weight(at s: Double) -> Double {
         guard s > startMs, s < endMs else { return 0 }
         guard easeMs > 0 else { return 1 }
@@ -26,11 +30,30 @@ struct ZoomBlock: Codable, Equatable {
     }
 }
 extension ZoomBlock {
-    enum CodingKeys: String, CodingKey { case id, startMs, endMs, scale, focusX, focusY, easeMs }
+    enum CodingKeys: String, CodingKey { case id, startMs, endMs, scale, focusX, focusY, easeMs, live }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         self.init(id: c.v(.id, UUID()), startMs: c.v(.startMs, 0), endMs: c.v(.endMs, 0), scale: c.v(.scale, 1.8),
-                  focusX: c.v(.focusX, 0.5), focusY: c.v(.focusY, 0.5), easeMs: c.v(.easeMs, 450))
+                  focusX: c.v(.focusX, 0.5), focusY: c.v(.focusY, 0.5), easeMs: c.v(.easeMs, 450), live: c.v(.live, false))
+    }
+
+    /// The live punch-in's spring (`PunchIn.durationMs`, as live without Reduce Motion).
+    static let liveSpringMs = PunchIn().durationMs
+    /// Where the block changes the picture: a live block keeps returning for one spring after its release.
+    var effectEndMs: Double { live ? endMs + Self.liveSpringMs : endMs }
+    /// The live engine's punch-in for a live block at `s`: pressed at `startMs`, released at `endMs`.
+    func punchIn(at s: Double) -> PunchIn? {
+        guard live, s > startMs, s < effectEndMs else { return nil }
+        var p = PunchIn()
+        p.amount = scale; p.durationMs = Self.liveSpringMs
+        p.set(engaged: true, atNs: RenderPlan.hostNs(startMs))
+        if s >= endMs { p.set(engaged: false, atNs: RenderPlan.hostNs(endMs)) }
+        return p
+    }
+    /// How far the game is zoomed at `s` (1: not at all).
+    func scale(at s: Double) -> Double {
+        if live { return punchIn(at: s)?.scale(atNs: RenderPlan.hostNs(s)) ?? 1 }
+        return 1 + (max(1, scale) - 1) * weight(at: s)
     }
 }
 struct Marker: Codable, Equatable { var id = UUID(); var tMs: Double; var label = "" }

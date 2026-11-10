@@ -10,6 +10,8 @@ import Metal
 /// the picture (rendered offscreen, SDR) and its editing overlay composited in;
 /// `EHDR_OVERLAY_DEMO=<dir>` (with `EHDR_OVERLAY_DEMO_IMAGE=<png>`) does the same for image and text layers, the
 /// presets and the screen templates, and renders each template offscreen in both canvases.
+enum LiveDump { static var count = 0 }
+
 extension AppDelegate {
     func startSceneDebug() {
         let env = ProcessInfo.processInfo.environment
@@ -33,6 +35,32 @@ extension AppDelegate {
         ]
         for (t, name, f) in script {
             DispatchQueue.main.asyncAfter(deadline: .now() + t) { log("event-demo: \(name) (recording: \(self.recorder != nil))"); f() }
+        }
+    }
+
+    /// `EHDR_LIVE_DUMP=<dir>`: after each scripted switch or punch while recording, the live picture (the renderer's
+    /// own `LiveSceneState` at that moment, overlays waited for) rendered offscreen on both canvases at fixed offsets,
+    /// as `<dir>/<n>-<action>/<canvas>-<recording ms>.png`, to set beside an export's frame at the same time. The game
+    /// and camera are the thumbnailer's latest frames (refreshed twice a second), so only their placement is exact.
+    func dumpLivePicture(after action: String) {
+        guard let dir = ProcessInfo.processInfo.environment["EHDR_LIVE_DUMP"], sceneRuntime.eventLog != nil else { return }
+        LiveDump.count += 1
+        let folder = URL(fileURLWithPath: dir).appendingPathComponent(String(format: "%02d-%@", LiveDump.count, action.replacingOccurrences(of: "/", with: "-")))
+        // Nothing between +40 and +200 ms: a render takes the main thread for a moment, which would delay a scripted
+        // switch made 150 ms later.
+        for offset in [0.0, 40, 200, 300, 450, 700, 1000] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + offset / 1000) { [weak self] in
+                guard let self = self, let log0 = self.sceneRuntime.eventLog else { return }
+                let t = nowNs(), state = self.sceneRuntime.live, ms = Int(log0.tMs(atNs: t).rounded())
+                for canvas in Canvas.allCases {
+                    let size = canvas == .wide ? CGSize(width: 960, height: 540) : CGSize(width: 540, height: 960)
+                    guard let img = self.renderOffscreen({ state.frame(canvas: canvas, size: size, sources: $0, atNs: t) }, size: size,
+                                                         overlays: state.overlayLayers(canvas: canvas, atNs: t)) else { continue }
+                    // Written off the main thread: PNG encoding is the slow part.
+                    DispatchQueue.global(qos: .utility).async { AppDelegate.writePNG(img, folder.appendingPathComponent("\(canvas.rawValue)-\(ms).png")) }
+                }
+                log("live-dump: \(action) +\(Int(offset)) ms at recording \(ms) ms")
+            }
         }
     }
 

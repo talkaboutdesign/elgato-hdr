@@ -76,10 +76,15 @@ final class ExportQueue {
     }
 
     var items: [Item] = []
+    /// Whether the app is recording or live: both use the video encoder before exports do. Observable (the studio
+    /// state is), so a sheet showing it follows along.
+    static var liveActivity: (recording: Bool, live: Bool) {
+        guard let app = NSApp?.delegate as? AppDelegate else { return (false, false) }
+        return (app.state.recording, app.state.streaming.isActive)
+    }
     var encoderWaitMessage: String {
-        let app = NSApp?.delegate as? AppDelegate
-        let live = app.map { $0.state.recording || $0.state.streaming.isActive } ?? false
-        return live ? "Waiting for the video encoder — recording in progress" : "Waiting for the video encoder"
+        let a = Self.liveActivity
+        return a.live ? "Waiting for the encoder (live)" : a.recording ? "Waiting for the encoder (recording)" : "Waiting for the encoder"
     }
     @ObservationIgnored var onFinished: ((Item) -> Void)?
     @ObservationIgnored var onDrained: (() -> Void)?

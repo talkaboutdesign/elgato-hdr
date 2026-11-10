@@ -35,6 +35,7 @@ struct EditorInspector: View {
         case .scene: SceneInspector(model: model)
         case .zoom(let id): ZoomInspector(model: model, id: id)
         case .marker(let id): MarkerInspector(model: model, id: id)
+        case .layer: LayerSelectionInspector(model: model)
         }
     }
 }
@@ -49,6 +50,7 @@ struct InspectorHeader: View {
             case .scene: return ("Scene", "rectangle.3.group")
             case .zoom: return ("Zoom", "plus.magnifyingglass")
             case .marker: return ("Marker", "flag")
+            case .layer: return ("Layer", "square.3.layers.3d")
             }
         }()
         HStack(spacing: DS.Space.s) {
@@ -104,49 +106,13 @@ func recordingSummary(_ p: Project, duration: Double) -> String {
     return parts.joined(separator: " · ")
 }
 
-/// Layout of the scene at the playhead for the current canvas: the fixed-layout controls for a scene migrated from
-/// one, otherwise the scene's own game and camera layers.
+/// The scene at the playhead on the current canvas: its layers (as in the live Scene tab), and for a scene migrated
+/// from a fixed layout, the layout controls it started with.
 struct LayoutInspector: View {
     @Bindable var model: EditorModel
     var body: some View {
-        if model.sceneControls.legacy { LegacyLayoutInspector(model: model) } else { SceneLayersInspector(model: model) }
-    }
-}
-
-/// A scene built from layers (templates, live scenes): only what its layers have, edited in place.
-struct SceneLayersInspector: View {
-    @Bindable var model: EditorModel
-    var body: some View {
-        let controls = model.sceneControls
-        InspectorSection(title: "\(model.activeScene?.name ?? "Scene") · \(model.canvas.label)") {
-            if controls.game {
-                InspectorRow(label: "Game") {
-                    SegmentedSwitch(selection: model.sceneLayerBinding(.game, \.fit, "Game Fit", fallback: false),
-                                    options: [.init(value: false, label: "Fill"), .init(value: true, label: "Fit")]).frame(width: 120)
-                }
-                LabeledSlider(label: "Game zoom", value: model.sceneLayerBinding(.game, \.zoom, "Game Zoom", fallback: 1), range: 1...3, defaultValue: 1,
-                              format: { String(format: "%.2f×", $0) }, onEditingChanged: model.gesture)
-                HStack {
-                    Text("Drag the preview to reframe").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Center") { model.updateSceneLayer(.game, "Center") { $0.panX = 0.5; $0.panY = 0.5; $0.zoom = 1 } }.controlSize(.small)
-                }
-            }
-            if controls.camera {
-                LabeledSlider(label: "Corners", value: model.sceneLayerBinding(.camera, \.roundness, "Camera Corners", fallback: 0), range: 0...0.5,
-                              defaultValue: 0.16, onEditingChanged: model.gesture)
-                HStack {
-                    Toggle("Shadow", isOn: model.sceneLayerBinding(.camera, \.shadow, "Camera Shadow", fallback: false))
-                    Toggle("Border", isOn: model.sceneLayerBinding(.camera, \.border, "Camera Border", fallback: false))
-                }
-                .toggleStyle(.checkbox).font(.system(size: 12))
-                Toggle("Mirror camera", isOn: model.projectBinding(\.cameraMirror, "Mirror")).toggleStyle(.checkbox).font(.system(size: 12))
-                Text("Drag the camera in the preview to move it, a corner to resize it.").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            if !controls.game && !controls.camera {
-                Text("This scene has no game or camera layer to adjust.").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-        }
+        EditorSceneLayers(model: model)
+        if model.sceneControls.legacy { LegacyLayoutInspector(model: model) }
     }
 }
 
@@ -276,6 +242,7 @@ struct SceneInspector: View {
                         }
                     }
                 }
+                AddLiveSceneMenu(model: model, run: run)
                 Text("Scenes here belong to this project; changing them never touches your live scenes.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -291,7 +258,7 @@ struct SceneInspector: View {
                     }), range: 0.1...1.5, defaultValue: 0.38, format: { String(format: "%.2f s", $0) }, onEditingChanged: model.gesture)
                     .disabled(span.transition.style == .cut)
                     if span.transition.style == .morph {
-                        Text("Morph moves shared layers into place; until live scenes arrive it renders as a fade.")
+                        Text("Morph glides the game, the camera and overlays shared by both scenes into place, as it did live.")
                             .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -356,12 +323,20 @@ struct SceneSchematic: View {
         let _ = film.revision
         let frame = film.image(for: Int(frameMs) / 1000 * 1000, interval: 1000)
         let gameSize = model.gameSize
+        let tiles = SceneTileOverlays.shared
+        let _ = tiles.revision
+        let tokens = OverlayTokens(now: (model.project.recordedAt ?? model.project.createdAt).addingTimeInterval(frameMs / 1000), elapsed: frameMs / 1000)
         SwiftUI.Canvas { ctx, size in
             let rect = CGRect(origin: .zero, size: size)
             ctx.clip(to: Path(roundedRect: rect, cornerRadius: 5))
             let bg = composition.background
             ctx.fill(Path(rect), with: .color(Color(red: bg.count > 0 ? bg[0] : 0, green: bg.count > 1 ? bg[1] : 0, blue: bg.count > 2 ? bg[2] : 0)))
-            let layers = SceneResolver.resolve(composition, canvas: size, sources: [.game: SourceInfo(size: gameSize), .camera: SourceInfo(size: CGSize(width: 16, height: 9))])
+            // Overlays with their real pictures once the cache has them (at 2× for the Retina tile), so scenes that
+            // differ only in them look different; a box until then.
+            var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: gameSize), .camera: SourceInfo(size: CGSize(width: 16, height: 9))]
+            let o = tiles.overlays(for: composition, canvas: CGSize(width: size.width * 2, height: size.height * 2), assets: model.assetSearchPaths, tokens: tokens)
+            sources.merge(o.sources) { own, _ in own }
+            let layers = SceneResolver.resolve(composition, canvas: size, sources: sources)
             for l in layers {
                 let path = Path(roundedRect: l.dst, cornerRadius: l.radius)
                 switch l.key {
@@ -383,7 +358,14 @@ struct SceneSchematic: View {
                     ctx.draw(person, in: CGRect(x: l.dst.midX - s / 2, y: l.dst.midY - s / 2 + s * 0.08, width: s, height: s))
                     if l.border > 0 { ctx.stroke(path, with: .color(.white), lineWidth: 1) }
                 default:
-                    ctx.fill(path, with: .color(.white.opacity(0.25)))
+                    if let c = l.color { ctx.fill(path, with: .color(Color(red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: Double(c.w * Float(l.opacity))))) }
+                    else if case .layer(let id) = l.key, let img = o.images[id], l.src.width > 0, l.src.height > 0 {
+                        var c = ctx; c.clip(to: path); c.opacity = l.opacity
+                        let full = CGRect(x: l.dst.minX - l.src.minX / l.src.width * l.dst.width, y: l.dst.minY - l.src.minY / l.src.height * l.dst.height,
+                                          width: l.dst.width / l.src.width, height: l.dst.height / l.src.height)
+                        c.draw(Image(decorative: img, scale: 1), in: full)
+                    }
+                    else { ctx.fill(path, with: .color(.white.opacity(0.55 * l.opacity))) }
                 }
             }
         }
@@ -400,14 +382,25 @@ struct ZoomInspector: View {
             InspectorSection(title: "Zoom") {
                 LabeledSlider(label: "Scale", value: Binding(get: { z.scale }, set: { v in model.updateZoom(id, "Zoom Scale") { $0.scale = (v * 20).rounded() / 20 } }),
                               range: 1.1...4, defaultValue: 1.8, format: { String(format: "%.2f×", $0) }, onEditingChanged: editing)
-                LabeledSlider(label: "Ease in and out", value: Binding(get: { z.easeMs / 1000 }, set: { v in model.updateZoom(id, "Zoom Ease") { $0.easeMs = (v * 1000 / 10).rounded() * 10 } }),
-                              range: 0...1.5, defaultValue: 0.45, format: { String(format: "%.2f s", $0) }, onEditingChanged: editing)
-                InspectorRow(label: "Focus") {
-                    Text(String(format: "%.0f%%, %.0f%%", z.focusX * 100, z.focusY * 100)).monospacedDigit().foregroundStyle(.secondary)
-                    Button("Center") { model.updateZoom(id, "Zoom Focus") { $0.focusX = 0.5; $0.focusY = 0.5 } }.controlSize(.small)
+                if z.live {
+                    InspectorRow(label: "Timing") {
+                        Label("Live timing", systemImage: "dot.radiowaves.left.and.right").foregroundStyle(.secondary)
+                            .accessibilityLabel("Live timing")
+                    }
+                    Text("Zooms in from the press and starts back at the release with the live spring, centred as it was live.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    PillButton("Use Editor Timing", systemImage: "slider.horizontal.3",
+                               help: "Ease in and out inside the block, with a focus point you choose") { model.useEditorTiming(id) }
+                } else {
+                    LabeledSlider(label: "Ease in and out", value: Binding(get: { z.easeMs / 1000 }, set: { v in model.updateZoom(id, "Zoom Ease") { $0.easeMs = (v * 1000 / 10).rounded() * 10 } }),
+                                  range: 0...1.5, defaultValue: 0.45, format: { String(format: "%.2f s", $0) }, onEditingChanged: editing)
+                    InspectorRow(label: "Focus") {
+                        Text(String(format: "%.0f%%, %.0f%%", z.focusX * 100, z.focusY * 100)).monospacedDigit().foregroundStyle(.secondary)
+                        Button("Center") { model.updateZoom(id, "Zoom Focus") { $0.focusX = 0.5; $0.focusY = 0.5 } }.controlSize(.small)
+                    }
+                    Text("Drag the target in the preview to choose the point the zoom closes in on.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                Text("Drag the target in the preview to choose the point the zoom closes in on.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: 12))
             InspectorSection(title: "Timing") {

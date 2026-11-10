@@ -12,6 +12,18 @@ final class ProjectDoc: Identifiable, Hashable {
 
     func url(_ file: String) -> URL { dir.appendingPathComponent(file) }
     var thumbnailURL: URL { dir.appendingPathComponent("thumbnail.jpg") }
+    /// The render version `thumbnail.jpg` was made with (`renderVersion`); absent for thumbnails made before it.
+    var thumbnailVersionURL: URL { dir.appendingPathComponent("thumbnail.version") }
+
+    /// Bumped whenever the editor's composite draws a project differently, so pictures cached from an older one (the
+    /// library's thumbnail and hover frames) are made again. 2: image and text overlays are drawn.
+    static let renderVersion = 2
+    /// The thumbnail exists and was made by the current composite.
+    var thumbnailIsCurrent: Bool {
+        guard FileManager.default.fileExists(atPath: thumbnailURL.path),
+              let s = try? String(contentsOf: thumbnailVersionURL, encoding: .utf8) else { return false }
+        return Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) == Self.renderVersion
+    }
     var exportsDir: URL { dir.appendingPathComponent("Exports") }
     var hasCamera: Bool { project.camera.map { FileManager.default.fileExists(atPath: url($0.file).path) } ?? false }
     var hasMic: Bool { project.mic.map { FileManager.default.fileExists(atPath: url($0.file).path) } ?? false }
@@ -24,7 +36,8 @@ final class ProjectDoc: Identifiable, Hashable {
         Exporter.removeStalePartials(in: doc.exportsDir)
         let raw = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
         if (raw?["scenes"] as? [Any])?.isEmpty != false || (raw?["version"] as? Int ?? 1) < 2 ||
-            (p.eventsImported && raw?["eventsImported"] as? Bool != true) { doc.save() }
+            (p.eventsImported && raw?["eventsImported"] as? Bool != true) || (p.eventTransitions && raw?["eventTransitions"] as? Bool != true) ||
+            (p.liveZooms && raw?["liveZooms"] as? Bool != true) { doc.save() }
         return doc
     }
 
@@ -69,23 +82,47 @@ final class ProjectDoc: Identifiable, Hashable {
     }
 
     /// Card image for the library: a frame of the 16:9 composite, so it shows the facecam as laid out.
-    func writeThumbnail() async {
+    @discardableResult
+    func writeThumbnail() async -> Bool {
         let at = CMTime(seconds: project.timeline.markers.first.map { max(0, min(project.durationMs - 1000 / max(1, project.fps), $0.tMs)) / 1000 } ?? min(3, max(0, project.durationMs / 2000)), preferredTimescale: 600)
-        var image: CGImage?
+        var image: CGImage?, composite = false
         if let built = try? await CompositionBuilder.build(self, canvas: .wide, resolution: .hd, range: .sdr, ignoreCuts: true) {
             let gen = AVAssetImageGenerator(asset: built.asset)
             gen.videoComposition = built.video
             gen.maximumSize = CGSize(width: 640, height: 360)
             image = try? await gen.image(at: at).image
+            composite = image != nil
         }
         if image == nil {
             let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url(project.game.file)))
             gen.maximumSize = CGSize(width: 640, height: 360)
             image = try? await gen.image(at: at).image
         }
-        guard let img = image else { return }
+        guard let img = image else { return false }
         let rep = NSBitmapImageRep(cgImage: img)
-        try? rep.representation(using: .jpeg, properties: [.compressionFactor: 0.8])?.write(to: thumbnailURL)
+        guard (try? rep.representation(using: .jpeg, properties: [.compressionFactor: 0.8])?.write(to: thumbnailURL)) != nil else { return false }
+        // Only the composite counts as current: a game-only fallback is retried the next time the library shows it.
+        if composite { try? "\(Self.renderVersion)\n".write(to: thumbnailVersionURL, atomically: true, encoding: .utf8) }
+        else { try? FileManager.default.removeItem(at: thumbnailVersionURL) }
+        return composite
+    }
+
+    private static let staleLock = NSLock()
+    private static var staleRefreshes: Set<String> = []
+    private static func claimStaleRefresh(_ key: String) -> Bool {
+        staleLock.lock(); defer { staleLock.unlock() }
+        return staleRefreshes.insert(key).inserted
+    }
+    /// Remakes the thumbnail of a finished project whose `thumbnail.jpg` predates the current `renderVersion`, off the
+    /// main thread. At most once per project folder per launch, so a project whose composite cannot be built is not
+    /// retried on every redraw. True when a new thumbnail was written.
+    func refreshStaleThumbnail() async -> Bool {
+        guard project.state == "complete", !thumbnailIsCurrent else { return false }
+        guard Self.claimStaleRefresh(dir.standardizedFileURL.path) else { return false }
+        let snapshot = ProjectDoc(dir: dir, project: project)
+        let made = await Task.detached(priority: .utility) { await snapshot.writeThumbnail() }.value
+        if made { log("library: remade the thumbnail of \(dir.lastPathComponent) for render version \(Self.renderVersion)") }
+        return made
     }
 }
 

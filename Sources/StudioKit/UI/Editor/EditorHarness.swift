@@ -77,7 +77,7 @@ enum EditorHarness {
         case "short": if case .marker(let id) = m.selection { m.makeShort(from: id) }
         case "save": m.saveNow()
         case "state":
-            let sel: String = { switch m.selection { case .none: "none"; case .section(let s): "section \(Int(s.startMs))-\(Int(s.endMs)) \(s.kept ? "kept" : "removed")"; case .scene: "scene"; case .zoom: "zoom"; case .marker(let id): "marker \(Int(m.marker(id)?.tMs ?? -1))" } }()
+            let sel: String = { switch m.selection { case .none: "none"; case .section(let s): "section \(Int(s.startMs))-\(Int(s.endMs)) \(s.kept ? "kept" : "removed")"; case .scene: "scene"; case .zoom: "zoom"; case .marker(let id): "marker \(Int(m.marker(id)?.tMs ?? -1))"; case .layer(let id): "layer \(m.editedComposition.layers.first { $0.id == id }?.displayName ?? "?")" } }()
             log(String(format: "harness: state %@ t=%.3f playing=%d rate=%.0f reverse=%d pps=%.2f fitted=%d hide=%d sections=%d markers=%d zooms=%d undo=%@ sel=%@", arg, m.time, m.playing ? 1 : 0, m.shuttleRate,
                        m.player.currentItem?.canPlayReverse == true ? 1 : 0, m.axis.pps, m.axis.fitted ? 1 : 0, m.hideRemoved ? 1 : 0, TimelineEdits.sections(m.project).count,
                        m.project.timeline.markers.count, m.project.timeline.zooms.count, m.undoTitle, sel))
@@ -87,6 +87,21 @@ enum EditorHarness {
             try? FileManager.default.removeItem(at: dst)
             try? FileManager.default.copyItem(at: m.doc.dir.appendingPathComponent("project.json"), to: dst)
         case "hover": hover(parts, m)
+        // Picture editing through real mouse events on the preview: canvas pixels of the 1080p canvas.
+        case "pclick": postPicture(parts, m, drag: false)          // pclick <x> <y> [clicks]
+        case "pdrag": postPicture(parts, m, drag: true); delay = 0.8   // pdrag <x0> <y0> <x1> <y1> [opt]
+        case "pselect": if let l = m.editedComposition.layers.last(where: { $0.source.type == arg || $0.displayName == arg }) { m.selectLayer(l.id) }
+        case "addlayer": m.addLayer(arg)
+        case "settext": if let id = m.selectedLayerID { m.editLayer(id) { $0.source.text?.string = arg.replacingOccurrences(of: "\\n", with: "\n") } }
+        case "setframe":   // setframe <x> <y> <w> <h>, normalized
+            let v = parts.dropFirst().compactMap(Double.init)
+            if v.count == 4, let id = m.selectedLayerID { m.editLayer(id) { $0.frame = NRect(x: v[0], y: v[1], w: v[2], h: v[3]) } }
+        case "savelive": m.saveSceneToLive()
+        case "layers":
+            let c = m.editedComposition
+            log("harness: layers \(arg) scene=\(m.editedSceneName) canvas=\(m.canvas.label) " + c.layers.map { l in
+                String(format: "%@[%@ %.3f,%.3f %.3fx%.3f%@]", l.displayName, l.source.type, l.frame.x, l.frame.y, l.frame.w, l.frame.h, l.visible ? "" : " hidden")
+            }.joined(separator: " ") + " selected=\(m.selectedEditedLayer?.displayName ?? "-")")
         case "exportsheet": showExport?(arg != "off"); delay = 1
         case "export":
             let presets = arg.split(separator: ",").compactMap { ExportPreset(rawValue: String($0)) }
@@ -157,6 +172,34 @@ enum EditorHarness {
         for i in 1...8 { post(.leftMouseDragged, windowPoint(from + (to - from) * Double(i) / 8)) }
         post(.leftMouseUp, windowPoint(to))
     }
+    /// Mouse events on the preview's layer editing view, at canvas pixels.
+    private static func postPicture(_ parts: [String], _ m: EditorModel, drag: Bool) {
+        let v = parts.dropFirst().compactMap(Double.init)
+        guard let w = m.window, let stage = findView(EditorStageView.self, in: w.contentView), v.count >= (drag ? 4 : 2) else { log("harness: no picture to click"); return }
+        func point(_ x: Double, _ y: Double) -> NSPoint { stage.convert(stage.viewRect(CGRect(x: x, y: y, width: 0, height: 0)).origin, to: nil) }
+        let flags: NSEvent.ModifierFlags = parts.last == "opt" ? [.option] : []
+        func post(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1) {
+            if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: clicks, pressure: type == .leftMouseUp ? 0 : 1) {
+                NSApp.postEvent(e, atStart: false)
+            }
+        }
+        if drag {
+            post(.leftMouseDown, point(v[0], v[1]))
+            for i in 1...10 { post(.leftMouseDragged, point(v[0] + (v[2] - v[0]) * Double(i) / 10, v[1] + (v[3] - v[1]) * Double(i) / 10)) }
+            post(.leftMouseUp, point(v[2], v[3]))
+        } else {
+            let clicks = v.count > 2 ? Int(v[2]) : 1
+            post(.leftMouseDown, point(v[0], v[1]), clicks: clicks); post(.leftMouseUp, point(v[0], v[1]), clicks: clicks)
+        }
+    }
+    private static func findView<T: NSView>(_ type: T.Type, in v: NSView?) -> T? {
+        guard let v = v else { return nil }
+        if let t = v as? T { return t }
+        for s in v.subviews { if let t = findView(type, in: s) { return t } }
+        return nil
+    }
+
     private static func findInput(_ v: NSView?) -> TimelineInputView? {
         guard let v = v else { return nil }
         if let t = v as? TimelineInputView { return t }
@@ -333,14 +376,6 @@ enum EditorHarness {
 
 extension Notification.Name { static let harnessShowQueue = Notification.Name("EHDRHarnessShowQueue") }
 
-extension EditorModel {
-    /// The window showing this editor (its own or the library's).
-    var window: NSWindow? {
-        if let w = EditorWindows.shared.window(for: self) { return w }
-        if LibraryNavigation.shared.editor === self { return LibraryNavigation.shared.window }
-        return nil
-    }
-}
 
 /// The lanes alone, for offscreen draw timing.
 private struct LanesSnapshot: View {
@@ -388,7 +423,8 @@ struct SnapshotFrameOverlay: View {
                     try? await Task.sleep(nanoseconds: 120_000_000)
                     guard let item = model.player.currentItem else { return }
                     let g = AVAssetImageGenerator(asset: item.asset)
-                    g.videoComposition = item.videoComposition
+                    // Waits for overlays: a snapshot is one frame, with no later redraw to pick them up.
+                    g.videoComposition = model.stillComposition() ?? item.videoComposition
                     let half = CMTime(value: 1, timescale: 120)
                     g.requestedTimeToleranceBefore = half; g.requestedTimeToleranceAfter = half
                     g.maximumSize = model.canvas.size(.hd)

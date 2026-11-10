@@ -25,13 +25,19 @@ struct ResolvedLayer: Equatable {
 /// Turns a composition into drawable layers for one canvas size. Pure; the rules are the ones the fixed layouts have
 /// always used, so a template resolves to the same rectangles the old shader parameters held.
 enum SceneResolver {
+    /// The game layer that fills the canvas instead of its own frame: a scene that shows a camera, drawn without a
+    /// camera picture, gives its largest visible game layer the whole canvas. Source availability changes rendering
+    /// only; authored frames and overlay placement remain intact.
+    static func pinnedGame(_ c: Composition, sources: [SourceKey: SourceInfo]) -> UUID? {
+        guard sources[.camera] == nil, c.layers.contains(where: { $0.source.type == "camera" && $0.visible && $0.opacity > 0 }) else { return nil }
+        return c.layers.filter { $0.source.type == "game" && $0.visible && $0.opacity > 0 }.max { $0.frame.w * $0.frame.h < $1.frame.w * $1.frame.h }?.id
+    }
+
     static func resolve(_ c: Composition, canvas: CGSize, sources: [SourceKey: SourceInfo]) -> [ResolvedLayer] {
-        // Source availability changes rendering only; authored frames and overlay placement remain intact.
-        let gameOnly = sources[.camera] == nil && c.layers.contains { $0.source.type == "camera" && $0.visible && $0.opacity > 0 }
-        let mainGame = c.layers.filter { $0.source.type == "game" && $0.visible && $0.opacity > 0 }.max { $0.frame.w * $0.frame.h < $1.frame.w * $1.frame.h }?.id
+        let pinned = pinnedGame(c, sources: sources)
         return c.layers.compactMap { original in
             var l = original
-            if gameOnly && l.id == mainGame { l.frame = NRect(x: 0, y: 0, w: 1, h: 1) }
+            if l.id == pinned { l.frame = NRect(x: 0, y: 0, w: 1, h: 1) }
             guard l.visible, l.opacity > 0 else { return nil }
             var dst = l.frame.rect(in: canvas), src = CGRect(x: 0, y: 0, width: 1, height: 1), color: SIMD4<Float>?
             let key: SourceKey

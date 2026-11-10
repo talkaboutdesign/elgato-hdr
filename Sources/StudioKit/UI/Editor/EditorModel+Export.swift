@@ -25,12 +25,22 @@ extension EditorModel {
         log("export: queued \(added) of \(jobs.count) (\(jobs.map { ExportPreset.describe($0.job) }.joined(separator: ", ")))")
     }
 
+    /// Image layers of the scenes this edit shows whose file is in neither the project's `Assets/` nor the
+    /// application support folder: exports leave them out.
+    var missingAssets: [MissingAsset] {
+        let used = Set(project.timeline.sceneSpans.map(\.sceneID))
+        let shown = project.scenes.filter { used.contains($0.id) || $0.id == project.scenes.first?.id }
+        return AssetStore.missing(in: shown, searchPaths: assetSearchPaths)
+    }
+
     func exportFinished(_ item: ExportQueue.Item) {
         switch item.state {
         case .done(let url):
             setSilently { $0.lastExport[item.job.canvas.rawValue] = url.lastPathComponent }
             log("export: \(item.title) done: \(url.lastPathComponent)")
-            showToast(EditorToast(text: "Exported \(item.title)", detail: url.lastPathComponent, style: .success, file: url), seconds: 12)
+            let missing = missingAssets.count
+            showToast(EditorToast(text: "Exported \(item.title)", detail: missing == 0 ? url.lastPathComponent : "\(url.lastPathComponent) · \(missing) missing image\(missing == 1 ? "" : "s") left out",
+                                  style: missing == 0 ? .success : .warning, file: url), seconds: 12)
         case .failed(let why):
             log("export: \(item.title) failed: \(why)")
             showToast(EditorToast(text: "\(item.title) export failed", detail: why, style: .error), seconds: 8)

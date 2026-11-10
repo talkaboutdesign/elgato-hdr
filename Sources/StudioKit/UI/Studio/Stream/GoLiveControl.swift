@@ -87,7 +87,7 @@ struct GoLivePill: View {
                 Text(StudioFormat.elapsed(context.date.timeIntervalSince(since)))
                     .monospacedDigit().contentTransition(.numericText())
                 if problems > 0 {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundStyle(Color.yellow)
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundStyle(DS.Color.warn)
                         .help("\(problems) destination\(problems == 1 ? "" : "s") need attention")
                 }
             }
@@ -175,8 +175,8 @@ struct GoLivePopover: View {
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity).frame(height: 32)
                         .foregroundStyle(.white)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(DS.Color.live.opacity(s.enabledCount == 0 ? 0.35 : 1)))
-                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous).fill(DS.Color.live.opacity(s.enabledCount == 0 ? 0.35 : 1)))
+                        .contentShape(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .disabled(s.enabledCount == 0)
@@ -261,8 +261,9 @@ struct HealthPopover: View {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Canvas.allCases, id: \.self) { canvas in
                         if let fps = s.reducedRates[canvas] {
-                            Text("\(canvas == .vertical ? "Vertical" : "Horizontal") · reduced frame rate (\(Int(fps)) fps)")
-                                .font(.system(size: 11)).foregroundStyle(.orange)
+                            Label("\(canvas.label) · frame rate reduced to \(Int(fps)) fps to keep up", systemImage: "exclamationmark.triangle.fill")
+                                .font(.system(size: 11)).foregroundStyle(DS.Color.warn)
+                                .help("The hardware encoder cannot keep up with every output at full rate; this canvas streams at a lower frame rate")
                         }
                     }
                     ForEach(s.canvases, id: \.canvas) { c in

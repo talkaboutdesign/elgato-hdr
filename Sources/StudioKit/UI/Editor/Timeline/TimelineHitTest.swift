@@ -7,6 +7,7 @@ enum TimelineSelection: Equatable {
     case scene(UUID?)       // a scene span; nil is the run before the first scene change
     case zoom(UUID)
     case marker(UUID)
+    case layer(UUID)        // a layer of the scene at the playhead, picked in the preview or the layer list
 }
 
 enum LaneKind: Hashable { case ruler, scenes, zoom, video, gameAudio, micAudio }

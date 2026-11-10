@@ -9,6 +9,8 @@ enum EditorCommand: Hashable {
     case addZoom, addMarker, nextMarker, previousMarker, sceneChange(Int)
     case fit, zoomIn, zoomOut, toggleRemoved
     case deselect, undo, redo, export, shortcuts
+    /// Rows of the shortcuts list for picture editing; those keys go to the selected layer (`LayerInteraction`).
+    case layers
 }
 
 struct EditorShortcut: Identifiable {
@@ -18,7 +20,7 @@ struct EditorShortcut: Identifiable {
     let command: EditorCommand
     var id: String { group + keys + title }
 
-    static let groups = ["Playback", "Navigate", "Edit", "Zoom, Scenes and Markers", "Timeline", "Project"]
+    static let groups = ["Playback", "Navigate", "Edit", "Layers", "Zoom, Scenes and Markers", "Timeline", "Project"]
 
     static let all: [EditorShortcut] = [
         .init(keys: "Space", title: "Play or pause", group: "Playback", command: .playPause),
@@ -36,6 +38,10 @@ struct EditorShortcut: Identifiable {
         .init(keys: "⌥X", title: "Clear in and out", group: "Edit", command: .clearInOut),
         .init(keys: "⌘Z  ⇧⌘Z", title: "Undo and redo", group: "Edit", command: .undo),
         .init(keys: "Esc", title: "Select nothing (project settings)", group: "Edit", command: .deselect),
+        .init(keys: "←→↑↓  ⇧", title: "With a layer selected in the picture: nudge it 1 px (⇧ 10 px); ⌫ deletes it", group: "Layers", command: .layers),
+        .init(keys: "⌥-drag", title: "Move or resize without snapping; on an edge of the game or camera, crop", group: "Layers", command: .layers),
+        .init(keys: "⇧-drag", title: "Resize from a corner without keeping the shape", group: "Layers", command: .layers),
+        .init(keys: "Double-click", title: "Crop the game or camera (scroll zooms); on text, edit it", group: "Layers", command: .layers),
         .init(keys: "Z", title: "Add a zoom at the playhead", group: "Zoom, Scenes and Markers", command: .addZoom),
         .init(keys: "⌃1 … ⌃9", title: "Change to scene 1…9 at the playhead", group: "Zoom, Scenes and Markers", command: .sceneChange(1)),
         .init(keys: "M", title: "Add a marker", group: "Zoom, Scenes and Markers", command: .addMarker),
@@ -95,11 +101,12 @@ struct EditorKeyHandler: NSViewRepresentable {
     let model: EditorModel
     let perform: (EditorCommand) -> Void
 
-    func makeNSView(context: Context) -> KeyView { let v = KeyView(); v.perform = perform; return v }
-    func updateNSView(_ v: KeyView, context: Context) { v.perform = perform }
+    func makeNSView(context: Context) -> KeyView { let v = KeyView(); v.perform = perform; v.model = model; return v }
+    func updateNSView(_ v: KeyView, context: Context) { v.perform = perform; v.model = model }
 
     final class KeyView: NSView {
         var perform: ((EditorCommand) -> Void)?
+        weak var model: EditorModel?
         private var monitor: Any?
 
         override func viewDidMoveToWindow() {
@@ -109,6 +116,8 @@ struct EditorKeyHandler: NSViewRepresentable {
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
                 guard let self = self, let w = self.window, e.window === w, w.attachedSheet == nil else { return e }
                 if w.firstResponder is NSText { return e }   // typing in a field
+                // A layer picked in the preview takes the arrow keys (nudge), ⌫ and Esc, as in the live window.
+                if let m = self.model, !m.editsLocked, m.selectedLayerID != nil, m.layerKeys?(e) == true { return nil }
                 guard let cmd = EditorShortcut.command(chars: e.charactersIgnoringModifiers ?? "", keyCode: e.keyCode, flags: e.modifierFlags) else { return e }
                 self.perform?(cmd)
                 return nil
@@ -149,7 +158,7 @@ extension EditorModel {
         case .deselect: selection = .none
         case .undo: undo()
         case .redo: redo()
-        case .export, .shortcuts: break
+        case .export, .shortcuts, .layers: break
         }
     }
 }

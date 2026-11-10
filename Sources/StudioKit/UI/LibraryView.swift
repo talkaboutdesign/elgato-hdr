@@ -175,7 +175,7 @@ struct LibraryView: View {
     var filtered: [ProjectDoc] {
         let q = search.trimmingCharacters(in: .whitespaces)
         return lib.docs.filter { d in
-            (filter == .all || !d.project.events.isEmpty) && (q.isEmpty || d.project.name.localizedCaseInsensitiveContains(q))
+            (filter == .all || d.project.hasLiveEvents) && (q.isEmpty || d.project.name.localizedCaseInsensitiveContains(q))
         }
     }
 
@@ -183,13 +183,13 @@ struct LibraryView: View {
         Group {
             if lib.docs.isEmpty {
                 EmptyState(systemImage: "rectangle.stack.badge.play", title: "No recordings yet",
-                           message: "Press ⌘R in the live window to record. The game, your camera and your microphone are saved as separate layers you can cut, zoom and export here.")
+                           message: LibraryCopy.noRecordings)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filtered.isEmpty {
                 if !search.isEmpty { ContentUnavailableView.search(text: search) }
                 else {
                     EmptyState(systemImage: "dot.radiowaves.left.and.right", title: "No live sessions yet",
-                               message: "Recordings made while streaming keep their scene switches, zooms and markers, and show up here.")
+                               message: LibraryCopy.noLiveSessions)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
@@ -302,10 +302,10 @@ struct ProjectCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(alignment: .topLeading) {
                 HStack(spacing: 4) {
-                    if !p.events.isEmpty { Badge(text: "LIVE", tint: DS.Color.live) }
+                    if p.hasLiveEvents { Badge(text: "LIVE", tint: DS.Color.live) }
                     if p.color != .sdr { Badge(text: p.color == .pq ? "HDR" : "HLG") }
-                    if p.state == "recording" { Badge(text: "RECOVERING", tint: .orange) }
-                    if p.state == "damaged" { Badge(text: "DAMAGED", tint: .red) }
+                    if p.state == "recording" { Badge(text: "RECOVERING", tint: DS.Color.warn) }
+                    if p.state == "damaged" { Badge(text: "DAMAGED", tint: DS.Color.record) }
                     if !p.lastExport.isEmpty { Badge(text: "EXPORTED", tint: DS.Color.ok) }
                 }.padding(10)
             }
@@ -352,7 +352,11 @@ struct ProjectCard: View {
         .onHover { hover = $0 }
         .onChange(of: ScrubFrames.fingerprint(project)) { _, _ in if hover { loadFrames() } }
         .contentShape(Rectangle())
-        .task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+        .task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") {
+            thumb = NSImage(contentsOf: doc.thumbnailURL)
+            // A thumbnail from an older composite (before overlays) is shown until its replacement is ready.
+            if await doc.refreshStaleThumbnail() { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+        }
         #if DEBUG
         .onAppear {
             // EHDR_LIBRARY_SCRUB="<name prefix>:<frame>" shows a card mid-scrub for screenshots (no pointer in CI).
@@ -412,12 +416,15 @@ enum ScrubFrames {
         var mirror: Bool; var cameraOffsetMs: Double?; var micOffsetMs: Double?
         var game: String; var camera: String?; var color: String; var durationMs: Double
         var trimStartMs: Double; var trimEndMs: Double; var fps: Double
+        /// `ProjectDoc.renderVersion`; nil gives the fingerprints of builds before it existed.
+        var render: Int?
     }
     /// FNV-1a over the sorted-key JSON: stable across launches (Swift's `Hasher` is seeded per process).
-    static func fingerprint(_ p: Project) -> String {
+    static func fingerprint(_ p: Project, renderVersion: Int? = ProjectDoc.renderVersion) -> String {
         let state = RenderState(scenes: p.scenes, timeline: p.timeline, wide: p.wide, vertical: p.vertical, mirror: p.cameraMirror,
                                 cameraOffsetMs: p.camera?.offsetMs, micOffsetMs: p.mic?.offsetMs, game: p.game.file, camera: p.camera?.file,
-                                color: p.colorMode, durationMs: p.durationMs, trimStartMs: p.trimStartMs, trimEndMs: p.trimEndMs, fps: p.fps)
+                                color: p.colorMode, durationMs: p.durationMs, trimStartMs: p.trimStartMs, trimEndMs: p.trimEndMs, fps: p.fps,
+                                render: renderVersion)
         let e = JSONEncoder(); e.outputFormatting = .sortedKeys
         var h: UInt64 = 0xcbf29ce484222325
         for b in (try? e.encode(state)) ?? Data() { h = (h ^ UInt64(b)) &* 0x100000001b3 }
@@ -506,6 +513,13 @@ struct Badge: View {
             .background(tint.opacity(tint == .black ? 0.6 : 0.85), in: Capsule())
             .foregroundStyle(.white)
     }
+}
+
+/// The library's empty states. "Live Sessions" are recordings with a scene switch, punch-in or marker
+/// (`Project.hasLiveEvents`), whether or not they were streamed.
+enum LibraryCopy {
+    static let noRecordings = "Press ⌘R in the live window to record, streaming or not. The game, your camera and your microphone are saved as separate layers; open a recording to cut, zoom and export it."
+    static let noLiveSessions = "Recordings in which you switched scenes, punched in or added a marker show up here, streamed or not. The editor replays what you did."
 }
 
 func formatTime(_ s: Double) -> String {

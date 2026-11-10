@@ -190,10 +190,12 @@ struct ZoomLane: View {
                 let r = CGRect(x: x0 + 0.5, y: 1, width: max(2, x1 - x0 - 1), height: h - 2)
                 ctx.fill(Path(roundedRect: r, cornerRadius: 5), with: .color(TimelineStyle.zoom.opacity(on ? 0.34 : 0.22)))
                 // The ease in and out as ramps, so the block reads as the zoom curve it is.
-                let ramp = min(r.width / 2, z.easeMs / 1000 * axis.pps)
+                // A live-style block rises over the live spring and holds until the release; its return follows it.
+                let ramp = min(r.width / 2, (z.live ? ZoomBlock.liveSpringMs : z.easeMs) / 1000 * axis.pps)
+                let rampOut = z.live ? 0 : ramp
                 var curve = Path()
                 curve.move(to: CGPoint(x: r.minX, y: r.maxY)); curve.addLine(to: CGPoint(x: r.minX + ramp, y: r.minY + 3))
-                curve.addLine(to: CGPoint(x: r.maxX - ramp, y: r.minY + 3)); curve.addLine(to: CGPoint(x: r.maxX, y: r.maxY)); curve.closeSubpath()
+                curve.addLine(to: CGPoint(x: r.maxX - rampOut, y: r.minY + 3)); curve.addLine(to: CGPoint(x: r.maxX, y: r.maxY)); curve.closeSubpath()
                 var c = ctx; c.clip(to: Path(roundedRect: r, cornerRadius: 5))
                 c.fill(curve, with: .color(TimelineStyle.zoom.opacity(on ? 1 : hot ? 0.94 : 0.86)))
                 if r.width > 40 {

@@ -12,10 +12,26 @@ import SwiftUI
 final class EditorModel {
     @ObservationIgnored let doc: ProjectDoc
     private(set) var project: Project
-    var canvas: Canvas = .wide { didSet { if canvas != oldValue { rebuild() } } }
+    var canvas: Canvas = .wide {
+        didSet {
+            guard canvas != oldValue else { return }
+            // Each canvas has its own layers: a picked layer or crop does not carry across.
+            if case .layer = selection { selection = .none }
+            cropLayerID = nil
+            rebuild()
+        }
+    }
     /// Preview colour: HDR for HDR sources unless the user previews the SDR (Shorts) look.
     var range: ExportRange { didSet { if range != oldValue { rebuild() } } }
-    var time = 0.0                  // playhead, source seconds (the preview is untrimmed: player time is source time)
+    var time = 0.0 { didSet { if time != oldValue { refreshActiveScene() } } }   // playhead, source seconds (the preview is untrimmed: player time is source time)
+    /// The scene at the playhead; kept apart from `time` so views that show the scene redraw when it changes, not
+    /// on every frame of playback.
+    private(set) var activeSceneID: UUID?
+    /// Crop mode for this layer of the scene at the playhead: dragging pans the source inside the frame.
+    var cropLayerID: UUID?
+    /// A text layer whose inspector field should take keyboard focus once shown.
+    var focusTextLayerID: UUID?
+    var addLayerOpen = false
     var duration = 0.0
     var playing = false
     var shuttleRate: Float = 0
@@ -37,6 +53,9 @@ final class EditorModel {
     @ObservationIgnored let player = AVPlayer()
     /// Owned by the model rather than the window, so the history goes away with the project and the same editor can
     /// live in its own window or inside the library window. Grouping is explicit: one group per edit or gesture.
+    @ObservationIgnored var sceneLayerActions = SceneActions()
+    /// Arrow keys, ⌫ and Esc for a layer selected in the preview, before the timeline's own keys (set by the preview).
+    @ObservationIgnored var layerKeys: ((NSEvent) -> Bool)?
     @ObservationIgnored let undoManager: UndoManager = {
         let u = UndoManager(); u.groupsByEvent = false; u.levelsOfUndo = 200; return u
     }()
@@ -70,6 +89,8 @@ final class EditorModel {
     @ObservationIgnored var settleWork: DispatchWorkItem?
     @ObservationIgnored var scrubbing = false
     @ObservationIgnored var reverseTimer: Timer?
+    /// Set from the compositor when a preview frame went out before an overlay was ready; cleared by the redraw.
+    @ObservationIgnored private let overlayRedraw = PendingFlag()
 
     var hasCamera: Bool { doc.hasCamera }
     var hasMic: Bool { doc.hasMic }
@@ -77,8 +98,12 @@ final class EditorModel {
     var editsLocked: Bool { exportQueue?.isRunning ?? false }
     var frameDuration: Double { 1 / max(1, project.fps) }
 
-    init(doc: ProjectDoc) {
+    /// Where the preview's overlay textures come from (the app's one cache; tests pass a cold one).
+    @ObservationIgnored let overlayCache: OverlayTextureCache
+
+    init(doc: ProjectDoc, overlayCache: OverlayTextureCache = .shared) {
         self.doc = doc
+        self.overlayCache = overlayCache
         project = doc.project
         range = doc.project.color == .sdr ? .sdr : .hdr
         filmstrip = FilmstripCache(doc: doc)
@@ -93,8 +118,15 @@ final class EditorModel {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 60), queue: .main) { [weak self] t in
             self?.playerTimeChanged(t.seconds)
         }
+        sceneLayerActions = makeLayerActions()
+        refreshActiveScene()
         rebuild()
         waveforms.load(game: true, mic: doc.hasMic)
+    }
+
+    func refreshActiveScene() {
+        let id = TimelineEdits.sceneRun(at: time * 1000, in: project)?.sceneID ?? project.scenes.first?.id
+        if id != activeSceneID { activeSceneID = id }
     }
 
     func close() {
@@ -139,6 +171,8 @@ final class EditorModel {
 
     /// Starts coalescing edits into one undo step (drag began, slider grabbed).
     func beginGesture() { if gestureBase == nil { gestureBase = project; gestureName = "Edit" } }
+    /// Ends a gesture under a name of the caller's (a picture drag: "Move Layer").
+    func endGesture(named name: String) { if gestureBase != nil { gestureName = name }; endGesture() }
     func endGesture() {
         guard let base = gestureBase else { return }
         gestureBase = nil
@@ -204,6 +238,7 @@ final class EditorModel {
     private func apply(_ p: Project, from old: Project) {
         project = p
         doc.project = p
+        refreshActiveScene()
         dirty = true
         scheduleSave()
         // The preview plays the uncut source, so only layer changes reload the composition. Its render instruction
@@ -280,7 +315,7 @@ final class EditorModel {
                     self.built = b
                     let item = AVPlayerItem(asset: b.asset)
                     // A scene or zoom edit can arrive while track loading is suspended.
-                    item.videoComposition = CompositionBuilder.videoComposition(self.project, canvas: canvas, size: canvas.size(.hd), built: b)
+                    item.videoComposition = self.previewComposition(b, canvas: canvas)
                     item.audioMix = b.audioMix
                     self.player.replaceCurrentItem(with: item)
                     self.previewRevision += 1
@@ -310,10 +345,36 @@ final class EditorModel {
             guard let self = self else { return }
             self.restylePending = false
             guard let b = self.built, let item = self.player.currentItem else { return }
-            item.videoComposition = CompositionBuilder.videoComposition(self.project, canvas: self.canvas, size: self.canvas.size(.hd), built: b)
+            item.videoComposition = self.previewComposition(b, canvas: self.canvas)
             self.previewRevision += 1
             if self.player.rate == 0 { self.requestSeek(CMTime(seconds: self.time, preferredTimescale: 60000)) }
         }
+    }
+
+    /// The preview never waits for an overlay texture (playback must not stall on a 4K image decode). A frame that
+    /// went out without one asks for a redraw once the cache has caught up, so a paused preview does not keep it.
+    private func previewComposition(_ b: BuiltComposition, canvas: Canvas) -> AVMutableVideoComposition {
+        let flag = overlayRedraw, cache = overlayCache
+        return CompositionBuilder.videoComposition(project, canvas: canvas, size: canvas.size(.hd), built: b, waitForOverlays: false,
+                                                   overlayCache: cache) { [weak self] in
+            guard flag.set() else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                cache.drain()
+                DispatchQueue.main.async { self?.redrawForOverlays() }
+            }
+        }
+    }
+    private func redrawForOverlays() {
+        overlayRedraw.clear()
+        guard !closed, player.rate == 0, let b = built, let item = player.currentItem else { return }
+        item.videoComposition = previewComposition(b, canvas: canvas)
+        previewRevision += 1
+        requestSeek(CMTime(seconds: time, preferredTimescale: 60000))
+    }
+
+    /// The preview's render description with blocking overlay lookups, for one-off frames (debug snapshots).
+    func stillComposition() -> AVVideoComposition? {
+        built.map { CompositionBuilder.videoComposition(project, canvas: canvas, size: canvas.size(.hd), built: $0) }
     }
 
     /// A RenderPlan at the playhead's canvas, for overlays that must line up with the rendered picture.
@@ -333,6 +394,12 @@ final class EditorModel {
         return plan
     }
     var gameSize: CGSize { built?.screenSize ?? (project.width > 0 ? CGSize(width: project.width, height: project.height) : CGSize(width: 1920, height: 1080)) }
+    var cameraSize: CGSize? { built?.cameraSize }
+    /// The recording has camera frames at source `ms` (the preview plays the uncut source).
+    func cameraShown(atMs ms: Double) -> Bool {
+        guard let built, let track = built.asset.track(withTrackID: built.cameraTrack) else { return false }
+        return track.segments.contains { !$0.isEmpty && ms >= $0.timeMapping.target.start.seconds * 1000 && ms < $0.timeMapping.target.end.seconds * 1000 }
+    }
 
     // MARK: Messages
 
@@ -353,6 +420,14 @@ struct EditorToast: Identifiable, Equatable {
     var detail: String? = nil
     var style: Toast.Style = .info
     var file: URL? = nil
+}
+
+/// A thread-safe "already asked" bit: `set` is true only for the call that turned it on.
+final class PendingFlag {
+    private let lock = NSLock()
+    private var on = false
+    func set() -> Bool { lock.lock(); defer { lock.unlock() }; if on { return false }; on = true; return true }
+    func clear() { lock.lock(); on = false; lock.unlock() }
 }
 
 /// Seek latency, logged so scrubbing responsiveness can be checked without a screen.

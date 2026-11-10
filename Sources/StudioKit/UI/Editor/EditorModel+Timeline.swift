@@ -35,6 +35,8 @@ extension EditorModel {
         case .marker(let id):
             update("Delete Marker") { $0.timeline.markers.removeAll { $0.id == id } }
             selection = .none
+        case .layer(let id):
+            deleteLayer(id)
         case .none:
             guard let s = TimelineEdits.section(at: playheadMs, in: project) else { return }
             selection = .section(s)
@@ -69,10 +71,16 @@ extension EditorModel {
     }
     func zoomBlock(_ id: UUID) -> ZoomBlock? { project.timeline.zooms.first { $0.id == id } }
 
+    /// A live-style block becomes an editor block over the same span: its ease is the live spring's length and the
+    /// focus is where live centred the zoom (recorded with the press).
+    func useEditorTiming(_ id: UUID) {
+        updateZoom(id, "Use Editor Timing") { $0.live = false; $0.easeMs = ZoomBlock.liveSpringMs }
+    }
+
     /// The preview parks where the block is fully zoomed, so adjusting it shows the result.
     func parkOnZoom(_ id: UUID) {
         guard let z = zoomBlock(id), !playing else { return }
-        let ease = min(z.easeMs, (z.endMs - z.startMs) / 2)
+        let ease = min(z.live ? ZoomBlock.liveSpringMs : z.easeMs, (z.endMs - z.startMs) / 2)
         let full = (z.startMs + ease) / 1000 ... max((z.startMs + ease) / 1000, (z.endMs - ease) / 1000)
         if !full.contains(time) { seek((z.startMs + z.endMs) / 2000) }
     }
@@ -171,6 +179,7 @@ extension EditorModel {
         case .none: return
         case .zoom(let id): if zoomBlock(id) == nil { selection = .none }
         case .marker(let id): if marker(id) == nil { selection = .none }
+        case .layer: return   // follows the scene at the playhead: `selectedLayerID`
         case .scene(let id):
             if !TimelineEdits.sceneRuns(project).contains(where: { $0.span?.id == id }) { selection = .none }
         case .section(let s):

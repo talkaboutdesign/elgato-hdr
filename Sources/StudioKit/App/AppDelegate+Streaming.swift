@@ -24,10 +24,14 @@ extension AppDelegate {
             session.onRateChange = { [weak self] canvas, divisor, fps in
                 guard let self else { return }
                 self.state.streaming.reducedRates[canvas] = divisor == 2 ? fps / 2 : nil
+                // The log line's wording is parsed by scripts/stream_checks.py; the toast names the canvas as the UI does.
                 let name = canvas == .vertical ? "Vertical" : "Horizontal"
-                let message = divisor == 2 ? "\(name) stream at \(Int(fps / 2)) fps — the video encoder is at capacity" : "\(name) stream restored to \(Int(fps)) fps"
-                log(message)
-                self.toast(message, style: .warning)
+                log(divisor == 2 ? "\(name) stream at \(Int(fps / 2)) fps — the video encoder is at capacity" : "\(name) stream restored to \(Int(fps)) fps")
+                if divisor == 2 {
+                    self.toast("\(canvas.label) stream at \(Int(fps / 2)) fps", detail: "The video encoder is at capacity, so this canvas streams at a lower frame rate.", style: .warning)
+                } else {
+                    self.toast("\(canvas.label) stream back to \(Int(fps)) fps", style: .success)
+                }
             }
             return session
         }

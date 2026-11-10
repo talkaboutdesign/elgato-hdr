@@ -114,6 +114,7 @@ struct EditToolbar: View {
         case .scene: return "Delete the selected scene change (⌫)"
         case .zoom: return "Delete the selected zoom (⌫)"
         case .marker: return "Delete the selected marker (⌫)"
+        case .layer: return "Delete the selected layer; the game and camera are hidden (⌫)"
         case .none: return "Remove the section under the playhead (⌫)"
         }
     }
@@ -166,6 +167,14 @@ struct SceneChangeMenu: View {
         for (i, c) in model.sceneChoices.enumerated() {
             let item = ClosureMenuItem(title: c.sceneID == nil && c.template != nil ? "\(c.name) (new)" : c.name) { [model] in model.addSceneChange(c) }
             if i < 9 { item.keyEquivalent = "\(i + 1)"; item.keyEquivalentModifierMask = .control }
+            menu.addItem(item)
+        }
+        let live = model.liveScenesToAdd
+        if !live.isEmpty {
+            menu.addItem(.separator())
+            let sub = NSMenu(title: "Add from Live Scenes")
+            for s in live { sub.addItem(ClosureMenuItem(title: s.name) { [model] in model.addLiveScene(s) }) }
+            let item = NSMenuItem(title: "Add from Live Scenes", action: nil, keyEquivalent: ""); item.submenu = sub
             menu.addItem(item)
         }
         menu.popUp(positioning: nil, at: content.convert(e.locationInWindow, from: nil), in: content)

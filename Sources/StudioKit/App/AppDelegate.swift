@@ -83,8 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         studio = StudioWindowController(state: state, metalView: view)
         window = studio.window
         window.delegate = self
+        #if DEBUG
+        BackgroundWindows.installIfRequested()
+        #endif
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if !BackgroundWindows.active { NSApp.activate(ignoringOtherApps: true) }
         audio.muted = UserDefaults.standard.bool(forKey: "muted"); state.muted = audio.muted
         #if DEBUG
         // Development: `--export <project folder> [hdr|sdr] [hd|uhd]` renders both canvases and quits (no capture).

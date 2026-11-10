@@ -11,6 +11,8 @@ struct RenderPlan {
     var cuts: TimeMap? = nil
 
     var cameraRanges: [Segment]? = nil
+    /// Where this plan's image and text layers come from; nil draws none (`RenderPlan+Overlays`).
+    var overlay: OverlaySource? = nil
 
     static func joinedCameraRanges(_ ranges: [Segment]) -> [Segment] {
         var out: [Segment] = []
@@ -22,17 +24,41 @@ struct RenderPlan {
         return out
     }
 
-    private func selection(at t: Double) -> (Scene?, Scene?, SceneTransition, Double) {
-        let s = map.source(fromTimeline: t)
-        let spans = timeline.sceneSpans.filter { span in scenes.contains { $0.id == span.sceneID } }.sorted { $0.startMs < $1.startMs }
-        guard let i = spans.lastIndex(where: { $0.startMs <= s }) else { return (nil, scenes.first, SceneTransition(style: .cut), 1) }
-        let span = spans[i]
-        let to = scenes.first { $0.id == span.sceneID }
-        let from = i > 0 ? scenes.first { $0.id == spans[i-1].sceneID } : nil
-        let done = span.transition.durationMs <= 0 || (cuts ?? map).crossedCut(from: span.startMs, through: s)
-        let progress = done ? 1 : min(1, max(0, (s - span.startMs) / span.transition.durationMs))
-        return (from, to, span.transition, progress)
+    /// Spans whose scene the plan has, in time order.
+    var orderedSpans: [SceneSpan] {
+        timeline.sceneSpans.filter { span in scenes.contains { $0.id == span.sceneID } }.sorted { $0.startMs < $1.startMs }
     }
+
+    /// The live engine's state that shows source time `s`, and the host time to evaluate it at (source milliseconds as
+    /// nanoseconds). Each switch is replayed onto the one before it: when a span starts while the previous span's
+    /// transition is still running, that state is evaluated at the new span's start and frozen as its starting picture,
+    /// the same snapshot the live engine takes, so rapid switching replays without a jump. The chain goes back at most
+    /// as many spans as start within the longest transition before this one. A transition never runs across a cut.
+    func liveState(atSourceMs s: Double) -> (state: LiveSceneState, ns: UInt64)? {
+        let spans = orderedSpans
+        func scene(_ span: SceneSpan) -> Scene { scenes.first { $0.id == span.sceneID }! }
+        guard let i = spans.lastIndex(where: { $0.startMs <= s }) else {
+            return scenes.first.map { (LiveSceneState(scene: $0), Self.hostNs(s)) }
+        }
+        let gaps = cuts ?? map
+        if spans[i].transition.durationMs <= 0 || gaps.crossedCut(from: spans[i].startMs, through: s) {
+            return (LiveSceneState(scene: scene(spans[i])), Self.hostNs(s))
+        }
+        let longest = spans.map { $0.transition.style == .cut ? 0 : $0.transition.durationMs }.max() ?? 0
+        let limit = spans[..<i].filter { $0.startMs > spans[i].startMs - longest }.count
+        func state(_ j: Int, depth: Int) -> LiveSceneState {
+            let to = scene(spans[j])
+            guard j > 0 else { return LiveSceneState(scene: to) }
+            let prev = spans[j - 1]
+            let running = depth > 0 && j > 1 && prev.transition.style != .cut && prev.transition.durationMs > 0
+                && spans[j].startMs - prev.startMs < prev.transition.durationMs && !gaps.crossedCut(from: prev.startMs, through: spans[j].startMs)
+            let base = running ? state(j - 1, depth: depth - 1) : LiveSceneState(scene: scene(prev))
+            return base.switching(to: to, atNs: Self.hostNs(spans[j].startMs), transition: spans[j].transition, sources: sources)
+        }
+        return (state(i, depth: limit), Self.hostNs(s))
+    }
+    static func hostNs(_ ms: Double) -> UInt64 { UInt64((max(0, ms) * 1e6).rounded()) }
+
     func layers(atTimelineMs t: Double) -> [ResolvedLayer] {
         guard let ranges = cameraRanges, sources[.camera] != nil else { return evaluatedLayers(atTimelineMs: t) }
         var absent = self; absent.sources.removeValue(forKey: .camera); absent.cameraRanges = nil
@@ -47,17 +73,20 @@ struct RenderPlan {
     }
 
     private func evaluatedLayers(atTimelineMs t: Double) -> [ResolvedLayer] {
-        let (from, to, transition, progress) = selection(at: t)
-        guard let to = to else { return [] }
-        var layers = Self.transitionLayers(from: from, to: to, transition: transition, progress: progress,
-                                           canvas: canvas, size: canvasSize, sources: sources)
         let s = map.source(fromTimeline: t)
-        let block = timeline.zooms.max { $0.weight(at: s) < $1.weight(at: s) }
-        for i in layers.indices {
-            if layers[i].key == .camera { layers[i].mirror = layers[i].mirror || mirrorCamera }
-            guard layers[i].key == .game, let z = block else { continue }
-            let weight = z.weight(at: s), scale = 1 + (max(1, z.scale) - 1) * weight
-            guard scale.isFinite, scale > 1 else { continue }
+        guard let (state, ns) = liveState(atSourceMs: s) else { return [] }
+        var layers = state.layers(canvas: canvas, size: canvasSize, sources: sources, atNs: ns)
+        for i in layers.indices where layers[i].key == .camera { layers[i].mirror = layers[i].mirror || mirrorCamera }
+        // Overlapping blocks: the one zoomed in furthest at this moment wins.
+        guard let z = timeline.zooms.max(by: { $0.scale(at: s) < $1.scale(at: s) }) else { return layers }
+        if z.live {
+            // A punch-in recorded live: the live engine's own spring and framing.
+            z.punchIn(at: s)?.apply(to: &layers, atNs: Self.hostNs(s))
+            return layers
+        }
+        let scale = z.scale(at: s)
+        guard scale.isFinite, scale > 1 else { return layers }
+        for i in layers.indices where layers[i].key == .game {
             let crop = layers[i].src
             let w = crop.width / scale, h = crop.height / scale
             // Map the source-space focus into the current crop, then shrink around that pivot. At scale one
@@ -70,19 +99,24 @@ struct RenderPlan {
         return layers
     }
     func background(atTimelineMs t: Double) -> SIMD4<Float> {
-        let (from, to, transition, progress) = selection(at: t)
-        let b = to?.composition(canvas).backgroundColor ?? SIMD4(0, 0, 0, 1)
-        guard transition.style != .cut, progress < 1, let from = from else { return b }
-        let a = from.composition(canvas).backgroundColor, e = Float(Self.ease(progress))
-        return a + (b-a)*e
+        guard let (state, ns) = liveState(atSourceMs: map.source(fromTimeline: t)) else { return SIMD4(0, 0, 0, 1) }
+        return state.frame(canvas: canvas, size: canvasSize, sources: sources, atNs: ns).background
     }
     private static func ease(_ t: Double) -> Double { SceneEasing.spring(t, duration: 1) }
 
     static func transitionLayers(from: Scene?, to: Scene, transition: SceneTransition, progress: Double,
                                  canvas: Canvas, size: CGSize, sources: [SourceKey: SourceInfo]) -> [ResolvedLayer] {
+        transitionState(from: from, to: to, transition: transition)
+            .layers(canvas: canvas, size: size, sources: sources, atNs: transitionNs(progress, transition))
+    }
+
+    /// The live engine's state for a span: switched at host time 0, so `transitionNs` is the time into the switch.
+    static func transitionState(from: Scene?, to: Scene, transition: SceneTransition) -> LiveSceneState {
         var state = LiveSceneState(scene: to)
         state.from = from; state.transition = transition
-        let time = UInt64(max(0, progress * max(0, transition.durationMs) * 1e6).rounded())
-        return state.layers(canvas: canvas, size: size, sources: sources, atNs: time)
+        return state
+    }
+    static func transitionNs(_ progress: Double, _ transition: SceneTransition) -> UInt64 {
+        UInt64(max(0, progress * max(0, transition.durationMs) * 1e6).rounded())
     }
 }

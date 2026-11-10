@@ -8,6 +8,7 @@
   "colorMode" : "pq",
   "createdAt" : "…",
   "durationMs" : 2000,
+  "eventTransitions" : false,
   "events" : [
 
   ],

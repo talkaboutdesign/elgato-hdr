@@ -148,7 +148,7 @@ struct LiveSceneState {
         next.startNs = t; next.transition = transition; next.punchIn = punchIn
         next.from = to
         if isTransitioning(atNs: t) || (t < startNs && (from != nil || snapshot != nil)) {
-            func flat(_ c: Canvas) -> SceneFrame { rawFrame(canvas: c, size: Snapshot.reference(c), sources: sources, atNs: t) }
+            func flat(_ c: Canvas) -> SceneFrame { rawFrame(canvas: c, size: Snapshot.reference(c), sources: textSources(sources, canvas: c, atNs: t), atNs: t) }
             next.snapshot = Snapshot(wide: flat(.wide), vertical: flat(.vertical),
                                      wideOverlays: overlayLayers(canvas: .wide, atNs: t), verticalOverlays: overlayLayers(canvas: .vertical, atNs: t))
         }
@@ -157,11 +157,22 @@ struct LiveSceneState {
 
     func changingSources(atNs t: UInt64, transition: SceneTransition, previous: [SourceKey: SourceInfo]) -> LiveSceneState {
         var next = self
-        next.snapshot = Snapshot(wide: rawFrame(canvas: .wide, size: Snapshot.reference(.wide), sources: previous, atNs: t),
-                                 vertical: rawFrame(canvas: .vertical, size: Snapshot.reference(.vertical), sources: previous, atNs: t),
+        next.snapshot = Snapshot(wide: rawFrame(canvas: .wide, size: Snapshot.reference(.wide), sources: textSources(previous, canvas: .wide, atNs: t), atNs: t),
+                                 vertical: rawFrame(canvas: .vertical, size: Snapshot.reference(.vertical), sources: textSources(previous, canvas: .vertical, atNs: t), atNs: t),
                                  wideOverlays: overlayLayers(canvas: .wide, atNs: t), verticalOverlays: overlayLayers(canvas: .vertical, atNs: t))
         next.from = nil; next.startNs = t; next.transition = transition
         return next
+    }
+
+    /// One source map serves both canvases, but a text layer's source is its own box, which differs per canvas: on the
+    /// other canvas the frozen text would be cropped to the wrong aspect. Text with a texture ready (in `sources`) gets
+    /// its box on `canvas`; text without one stays out, as the resolver leaves it out.
+    private func textSources(_ sources: [SourceKey: SourceInfo], canvas: Canvas, atNs t: UInt64) -> [SourceKey: SourceInfo] {
+        var s = sources
+        for l in overlayLayers(canvas: canvas, atNs: t) where l.source.type == "text" && s[.layer(l.id)] != nil {
+            s[.layer(l.id)] = SourceInfo(size: l.frame.rect(in: Snapshot.reference(canvas)).size)
+        }
+        return s
     }
 
     private func outgoingOverlays(_ canvas: Canvas) -> [Layer] {

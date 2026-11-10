@@ -6,7 +6,10 @@ import CoreVideo
 /// Small recordings written as fast as the encoder takes them, at any frame rate. Frame times are nanoseconds,
 /// rounded the way the recorder rounds them, so 59.94 fps frames do not sit on any small timescale.
 enum GeneratedMedia {
-    static func write(_ url: URL, frameDuration: Double? = nil, videoSeconds: Double = 0, audioSeconds: Double? = nil, startSeconds: Double = 0) async throws {
+    /// `videoDelaySeconds`: the first video frame comes this long after the session starts (the recorder's first game
+    /// frame lands about 0.13 s in).
+    static func write(_ url: URL, frameDuration: Double? = nil, videoSeconds: Double = 0, audioSeconds: Double? = nil, startSeconds: Double = 0,
+                      videoDelaySeconds: Double = 0) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         var video: (AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor)?
         if frameDuration != nil {
@@ -42,7 +45,7 @@ enum GeneratedMedia {
                     CVPixelBufferLockBaseAddress(buffer, [])
                     memset(CVPixelBufferGetBaseAddress(buffer), Int32(n * 7 % 255), CVPixelBufferGetDataSize(buffer))
                     CVPixelBufferUnlockBaseAddress(buffer, [])
-                    let t = CMTime(value: Int64(((startSeconds + Double(n) * fd) * 1e9).rounded()), timescale: 1_000_000_000)
+                    let t = CMTime(value: Int64(((startSeconds + videoDelaySeconds + Double(n) * fd) * 1e9).rounded()), timescale: 1_000_000_000)
                     if !a.append(buffer, withPresentationTime: t) { fail(writer.error ?? CompositionBuilder.err("append video")); n = frames; break }
                     n += 1
                 }

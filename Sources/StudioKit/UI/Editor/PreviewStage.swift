@@ -2,8 +2,8 @@ import AppKit
 import AVFoundation
 import SwiftUI
 
-/// The aspect-fitted canvas preview. On top: the zoom focus target while a zoom block is selected, otherwise the
-/// camera and game direct manipulation of the scene at the playhead.
+/// The aspect-fitted canvas preview. On top: the zoom focus target while a zoom block is selected, otherwise layer
+/// editing on the scene at the playhead (the live window's rules, `LayerInteraction`).
 struct PreviewStage: View {
     let model: EditorModel
 
@@ -34,77 +34,15 @@ struct PreviewStage: View {
     }
 }
 
-/// Picks the overlay; reading the playhead here keeps that 60 Hz read out of the stage's body.
+/// Picks the overlay: the zoom target while a zoom block is selected, otherwise layer editing on the picture.
 struct StageOverlay: View {
     let model: EditorModel
     var body: some View {
-        if case .zoom(let id) = model.selection {
+        // A live-style zoom centres as live did; it has no focus point to drag.
+        if case .zoom(let id) = model.selection, model.zoomBlock(id)?.live != true {
             FocusTargetOverlay(model: model, id: id)
-        } else if !model.editsLocked {
-            let c = model.sceneControls
-            if c.legacy { StageInteraction(model: model) } else if c.game || c.camera { LayerStageInteraction(model: model) }
-        }
-    }
-}
-
-/// Direct manipulation of a scene built from layers: drag the game to reframe it, drag the camera to move it and a
-/// corner to resize it. Edits go to the scene's own layers (`EditorModel.updateSceneLayer`).
-struct LayerStageInteraction: View {
-    let model: EditorModel
-    @State private var hover = false
-    @State private var panStart: (x: Double, y: Double)?
-    @State private var cameraStart: NRect?
-
-    var body: some View {
-        GeometryReader { geo in
-            let size = geo.size
-            let controls = model.sceneControls
-            ZStack(alignment: .topLeading) {
-                if controls.game, let r = model.renderPlan(size: size).layers(atTimelineMs: model.playheadMs).first(where: { $0.key == .game })?.dst {
-                    Color.clear.contentShape(Rectangle())
-                        .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
-                        .gesture(DragGesture(minimumDistance: 2)
-                            .onChanged { v in
-                                model.beginGesture()
-                                if panStart == nil, let g = model.sceneLayer(.game) { panStart = (g.panX, g.panY) }
-                                if let s = panStart { model.panSceneGame(from: s, translation: v.translation, stage: size) }
-                            }
-                            .onEnded { _ in panStart = nil; model.endGesture() })
-                        .help("Drag to reframe the game")
-                }
-                if controls.camera, let cam = model.sceneLayer(.camera),
-                   let r = model.renderPlan(size: size).layers(atTimelineMs: model.playheadMs).first(where: { $0.key == .camera })?.dst {
-                    let radius = CGFloat(min(0.5, max(0, cam.roundness))) * min(r.width, r.height)
-                    RoundedRectangle(cornerRadius: radius + 3, style: .circular)
-                        .strokeBorder(.white.opacity(hover || cameraStart != nil ? 0.9 : 0), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
-                        .frame(width: r.width + 6, height: r.height + 6)
-                        .contentShape(Rectangle())
-                        .position(x: r.midX, y: r.midY)
-                        .onHover { hover = $0; $0 ? NSCursor.openHand.push() : NSCursor.pop() }
-                        .gesture(DragGesture(minimumDistance: 1)
-                            .onChanged { v in
-                                model.beginGesture()
-                                if cameraStart == nil { cameraStart = model.sceneLayer(.camera)?.frame }
-                                if let s = cameraStart { model.moveSceneCamera(from: s, translation: v.translation, stage: size) }
-                            }
-                            .onEnded { _ in cameraStart = nil; model.endGesture() })
-                    ForEach(0..<4, id: \.self) { i in
-                        let c = CGPoint(x: i % 2 == 0 ? r.minX : r.maxX, y: i < 2 ? r.minY : r.maxY)
-                        Circle().fill(.white).frame(width: 10, height: 10).shadow(radius: 1.5)
-                            .opacity(hover || cameraStart != nil ? 1 : 0)
-                            .frame(width: 22, height: 22).contentShape(Rectangle())
-                            .position(c)
-                            .onHover { h in hover = h || hover; h ? NSCursor.crosshair.push() : NSCursor.pop() }
-                            .gesture(DragGesture(coordinateSpace: .named("sceneStage"))
-                                .onChanged { v in
-                                    model.beginGesture()
-                                    if cameraStart == nil { cameraStart = model.sceneLayer(.camera)?.frame }
-                                    if let s = cameraStart { model.resizeSceneCamera(from: s, corner: v.location, stage: size) }
-                                }
-                                .onEnded { _ in cameraStart = nil; model.endGesture() })
-                    }
-                }
-            }.coordinateSpace(name: "sceneStage")
+        } else {
+            EditorLayerStage(model: model)
         }
     }
 }
@@ -211,9 +149,7 @@ struct EditorToastOverlay: View {
 struct EditorToastView: View {
     let toast: EditorToast
     let dismiss: () -> Void
-    var tint: Color {
-        switch toast.style { case .info: .accentColor; case .success: DS.Color.ok; case .warning: DS.Color.warn; case .error: DS.Color.record }
-    }
+    var tint: Color { toast.style.tint }
     var body: some View {
         HStack(spacing: DS.Space.m) {
             if let f = toast.file {
@@ -221,7 +157,7 @@ struct EditorToastView: View {
                     .onDrag { NSItemProvider(contentsOf: f) ?? NSItemProvider() }
                     .help("Drag the file into a browser upload or another app")
             } else {
-                Image(systemName: Toast(text: "", style: toast.style).symbol).foregroundStyle(tint).font(.system(size: 15, weight: .semibold))
+                Image(systemName: toast.style.symbol).foregroundStyle(tint).font(.system(size: 13, weight: .semibold))
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(toast.text).font(.system(size: 13, weight: .semibold)).lineLimit(1)
@@ -257,100 +193,4 @@ struct PlayerLayerView: NSViewRepresentable {
     }
     func makeNSView(context: Context) -> View { let v = View(); v.playerLayer.player = player; return v }
     func updateNSView(_ v: View, context: Context) { if v.playerLayer.player !== player { v.playerLayer.player = player } }
-}
-
-/// Drag the camera window (snaps to corners/edges), drag its corner to resize, drag the game to reframe it, and drag
-/// the divider of a split layout.
-struct StageInteraction: View {
-    let model: EditorModel
-    @State private var hover = false
-    @State private var moveStart: (CGPoint, CameraPlacement)?
-    @State private var panStart: (Double, Double)?
-    @State private var resizing = false
-
-    var body: some View {
-        GeometryReader { geo in
-            let size = geo.size
-            let l = model.layout
-            let showCam = model.hasCamera && (l.kind == .pip)
-            let camRect = l.camera.rect(in: size)
-            let screenRegion = l.kind == .stacked && model.hasCamera
-                ? CGRect(x: 0, y: size.height * l.split, width: size.width, height: size.height * (1 - l.split))
-                : CGRect(origin: .zero, size: size)
-            ZStack(alignment: .topLeading) {
-                // Game framing (pan) on the whole stage.
-                Color.clear.contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 2)
-                        .onChanged { g in model.beginGesture(); pan(g, region: screenRegion) }
-                        .onEnded { _ in panStart = nil; model.endGesture() })
-                    .help(l.kind == .cameraOnly ? "" : "Drag to reframe the game")
-
-                if l.kind == .stacked && model.hasCamera {
-                    Rectangle().fill(Color.white.opacity(0.001)).frame(width: size.width, height: 16)
-                        .overlay(Capsule().fill(.white.opacity(0.85)).frame(width: 44, height: 5).shadow(radius: 2))
-                        .position(x: size.width / 2, y: size.height * l.split)
-                        .gesture(DragGesture()
-                            .onChanged { g in model.beginGesture(); model.binding(\.split).wrappedValue = min(0.7, max(0.2, g.location.y / size.height)) }
-                            .onEnded { _ in model.endGesture() })
-                        .onHover { $0 ? NSCursor.resizeUpDown.push() : NSCursor.pop() }
-                }
-
-                if showCam {
-                    let r = l.camera.radius(for: camRect)
-                    RoundedRectangle(cornerRadius: r + 3, style: .circular)
-                        .strokeBorder(.white.opacity(hover || moveStart != nil || resizing ? 0.9 : 0), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
-                        .frame(width: camRect.width + 6, height: camRect.height + 6)
-                        .contentShape(RoundedRectangle(cornerRadius: r))
-                        .position(x: camRect.midX, y: camRect.midY)
-                        .onHover { hover = $0; $0 ? NSCursor.openHand.push() : NSCursor.pop() }
-                        .gesture(DragGesture(minimumDistance: 1)
-                            .onChanged { g in
-                                model.beginGesture()
-                                if moveStart == nil { moveStart = (CGPoint(x: g.startLocation.x - camRect.midX, y: g.startLocation.y - camRect.midY), l.camera) }
-                                guard let (grab, start) = moveStart else { return }
-                                var p = start
-                                p.move(to: CGPoint(x: g.location.x - grab.x, y: g.location.y - grab.y), canvas: size, snap: !NSEvent.modifierFlags.contains(.option))
-                                model.binding(\.camera).wrappedValue = p
-                            }
-                            .onEnded { _ in moveStart = nil; model.endGesture() })
-                    ForEach(0..<4, id: \.self) { i in
-                        let c = CGPoint(x: i % 2 == 0 ? camRect.minX : camRect.maxX, y: i < 2 ? camRect.minY : camRect.maxY)
-                        Circle().fill(.white).frame(width: 10, height: 10).shadow(radius: 1.5)
-                            .opacity(hover || resizing ? 1 : 0)
-                            .frame(width: 22, height: 22).contentShape(Rectangle())
-                            .position(c)
-                            .onHover { h in hover = h || hover; h ? NSCursor.crosshair.push() : NSCursor.pop() }
-                            .gesture(DragGesture()
-                                .onChanged { g in
-                                    model.beginGesture()
-                                    resizing = true
-                                    var p = l.camera
-                                    let a = p.aspect.value
-                                    let halfShort = max(abs(g.location.x - camRect.midX) / (a >= 1 ? a : 1), abs(g.location.y - camRect.midY) * (a >= 1 ? 1 : a))
-                                    p.size = min(1, max(0.08, Double(2 * halfShort / min(size.width, size.height))))
-                                    model.binding(\.camera).wrappedValue = p
-                                }
-                                .onEnded { _ in resizing = false; model.endGesture() })
-                    }
-                }
-            }
-        }
-    }
-
-    private func pan(_ g: DragGesture.Value, region: CGRect) {
-        let l = model.layout
-        guard l.kind != .cameraOnly else { return }
-        if panStart == nil { panStart = (l.panX, l.panY) }
-        guard let (x0, y0) = panStart, let b = modelScreenSize() else { return }
-        let crop = l.fit ? LayoutMath.fillCrop(sourceSize: b, dst: b, zoom: l.zoom, panX: l.panX, panY: l.panY)
-                         : LayoutMath.fillCrop(sourceSize: b, dst: region.size, zoom: l.zoom, panX: l.panX, panY: l.panY)
-        var nl = l
-        nl.panX = min(1, max(0, x0 - Double(g.translation.width / region.width) * crop.width))
-        nl.panY = min(1, max(0, y0 - Double(g.translation.height / region.height) * crop.height))
-        model.layout = nl
-    }
-    private func modelScreenSize() -> CGSize? {
-        let p = model.project
-        return p.width > 0 ? CGSize(width: p.width, height: p.height) : CGSize(width: 16, height: 9)
-    }
 }
