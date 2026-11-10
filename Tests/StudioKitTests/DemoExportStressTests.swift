@@ -1,5 +1,7 @@
 import XCTest
 import AVFoundation
+import AppKit
+import SwiftUI
 @testable import StudioKit
 
 final class DemoExportStressTests: XCTestCase {
@@ -13,6 +15,13 @@ final class DemoExportStressTests: XCTestCase {
         doc.project.scenes.append(scene)
         doc.project.timeline.sceneSpans.append(SceneSpan(startMs: 7000, sceneID: scene.id))
         let model = await MainActor.run { EditorModel(doc: doc) }
+        let window = await MainActor.run {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 360), styleMask: [.borderless], backing: .buffered, defer: false)
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: PreviewStage(model: model))
+            w.makeKeyAndOrderFront(nil)
+            return w
+        }
         var rng = SeededRandom(state: 314), completed = 0, cancelled = 0
         for n in 0..<20 {
             let drain = expectation(description: "queue \(n)")
@@ -39,7 +48,7 @@ final class DemoExportStressTests: XCTestCase {
             let last = await MainActor.run { Array(model.exportQueue.items.suffix(2)) }
             for item in last { if case .done = item.state { completed += 1 } else { XCTFail("\(item.state)") } }
         }
-        await MainActor.run { model.close() }
+        await MainActor.run { model.close(); window.close() }
         print("Demo stress: 20 queues, \(cancelled) cancelled and restarted, \(completed)/40 final exports finished")
     }
 }
