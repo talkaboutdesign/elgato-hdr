@@ -331,3 +331,74 @@ final class TimelineInteractionTests: XCTestCase {
         XCTAssertEqual(TimelineEdits.kept(m.project)[1].startMs, 45_000, "a drag is one undo step")
     }
 }
+
+/// Every timeline drag through real AppKit mouse events (window → `TimelineInputView` → `TimelineInteraction`), with
+/// many intermediate positions: each drag must end as one edit of the item it grabbed, computed from the project as
+/// it was when the drag began. A dragged split used to leave every intermediate position behind as a new split.
+final class TimelineMouseEventTests: XCTestCase {
+    func testDragsThroughMouseEventsLeaveNoIntermediateEdits() throws {
+        let m = makeEditorModel(durationMs: 10_000, fps: 60)
+        m.setTimelineWidth(1000)                                  // 100 pt per second
+        let layout = TimelineLayout.make(hasMic: false)
+        let view = TimelineInputView(frame: NSRect(x: 0, y: 0, width: 1000, height: layout.height))
+        view.interaction = TimelineInteraction(model: m, layout: layout)
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        func y(_ k: LaneKind, _ f: Double = 0.5) -> Double { layout.lane(k)!.y + layout.lane(k)!.height * f }
+        func post(_ type: NSEvent.EventType, _ x: Double, _ y: Double) {
+            let p = view.convert(NSPoint(x: x, y: y), to: nil)
+            let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+            // The view's own event handlers, as AppKit calls them (the test process runs no event loop to post to).
+            switch type {
+            case .leftMouseDown: view.mouseDown(with: e)
+            case .leftMouseDragged: view.mouseDragged(with: e)
+            default: view.mouseUp(with: e)
+            }
+        }
+        func drag(_ k: LaneKind, _ from: Double, _ to: Double, at f: Double = 0.5, steps: Int = 12) {
+            post(.leftMouseDown, from * 100, y(k, f))
+            for i in 1...steps { post(.leftMouseDragged, (from + (to - from) * Double(i) / Double(steps)) * 100, y(k, f)) }
+            post(.leftMouseUp, to * 100, y(k, f))
+        }
+
+        m.seek(1); m.split(); m.seek(3); m.split()
+        func rounded(_ v: [Double]) -> [Double] { v.map { ($0 * 1000).rounded() / 1000 } }
+        func ranges(_ s: [Segment]) -> [[Double]] { s.map { rounded([$0.startMs, $0.endMs]) } }
+        XCTAssertEqual(rounded(m.project.timeline.splitPoints), [1000, 3000])
+        drag(.video, 1.0, 1.5)
+        XCTAssertEqual(rounded(m.project.timeline.splitPoints), [1500, 3000], "the dragged split moved; no intermediate position was kept")
+        XCTAssertEqual(TimelineEdits.sections(m.project).map { rounded([$0.startMs, $0.endMs]) }, [[0, 1500], [1500, 3000], [3000, 10_000]])
+        XCTAssertEqual(m.undoTitle, "Undo Trim")
+        m.undo()
+        XCTAssertEqual(rounded(m.project.timeline.splitPoints), [1000, 3000], "one drag, one undo step")
+        m.redo()
+
+        // An outer edge (trim handle) dragged back and forth ends where it is released.
+        m.select(.section(TimelineEdits.section(at: 500, in: m.project)!)); m.deleteSelection(); m.selection = .none
+        drag(.video, 1.5, 0.4); drag(.video, 0.4, 0.8)
+        XCTAssertEqual(ranges(TimelineEdits.kept(m.project)), [[800, 3000], [3000, 10_000]])
+        XCTAssertEqual(rounded(m.project.timeline.splitPoints), [3000], "no split left anywhere the edge passed")
+
+        // Zoom block: move by its body, then resize by its end edge.
+        m.seek(5); m.addZoom(); m.selection = .none
+        drag(.zoom, 6, 6.7)
+        XCTAssertEqual(m.project.timeline.zooms.map { rounded([$0.startMs, $0.endMs]) }, [[5700, 8700]])
+        drag(.zoom, 8.7, 9.5)
+        XCTAssertEqual(m.project.timeline.zooms.count, 1)
+        XCTAssertEqual(m.project.timeline.zooms[0].startMs, 5700, accuracy: 0.001)
+        XCTAssertEqual(m.project.timeline.zooms[0].endMs, 9500, accuracy: 0.001)
+
+        // Scene change boundary.
+        m.seek(4); m.addSceneChange(index: 2)
+        let spans = TimelineEdits.sortedSpans(m.project).count
+        drag(.scenes, 4, 4.6)
+        XCTAssertEqual(TimelineEdits.sortedSpans(m.project).count, spans)
+        XCTAssertEqual(rounded(TimelineEdits.sortedSpans(m.project).map(\.startMs).filter { $0 > 0 }), [4600])
+
+        // Marker flag on the ruler.
+        m.seek(2.2); m.addMarker()
+        drag(.ruler, 2.22, 2.72, at: 0.7)
+        XCTAssertEqual(rounded(m.project.timeline.markers.map(\.tMs)), [2700])
+    }
+}

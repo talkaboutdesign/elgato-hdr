@@ -267,6 +267,7 @@ struct ProjectCard: View {
     @State private var hover = false
     @State private var scrub: Int?
     @State private var frames: [CGImage] = []
+    @State private var framesKey = ""
     @State private var loadingFrames = false
 
     var body: some View {
@@ -365,20 +366,43 @@ struct ProjectCard: View {
     }
 
     private func loadFrames() {
+        // An edit made since the frames were loaded (the editor saved) makes them stale.
+        let key = ScrubFrames.fingerprint(project)
+        if framesKey != key { frames = []; framesKey = key }
         guard frames.isEmpty, !loadingFrames, project.state == "complete" else { return }
         loadingFrames = true
         let doc = self.doc, p = project
         Task {
             let f = await ScrubFrames.load(doc, project: p)
-            await MainActor.run { frames = f; loadingFrames = false }
+            await MainActor.run { if framesKey == key { frames = f }; loadingFrames = false }
         }
     }
 }
 
 /// Five frames evenly spaced over what the project exports (its kept ranges), from the 16:9 composite, generated on
-/// first hover and kept in memory and in the project's `.cache/scrub` folder.
+/// first hover and kept in memory and in the project's `.cache/scrub/<fingerprint>` folder. The fingerprint covers
+/// everything that changes the picture, so a visual edit never shows the frames from before it.
 enum ScrubFrames {
     private static let memory = NSCache<NSString, NSArray>()
+    private static let lock = NSLock()
+    private static var currentKey: [String: NSString] = [:]   // project folder -> its live memory key
+
+    /// What the composite depends on: scenes and layouts, the timeline, mirroring and the layers' sync offsets.
+    private struct RenderState: Encodable {
+        var scenes: [Scene]; var timeline: Timeline; var wide: CanvasLayout; var vertical: CanvasLayout
+        var mirror: Bool; var cameraOffsetMs: Double?; var micOffsetMs: Double?
+        var game: String; var camera: String?; var color: String; var durationMs: Double
+    }
+    /// FNV-1a over the sorted-key JSON: stable across launches (Swift's `Hasher` is seeded per process).
+    static func fingerprint(_ p: Project) -> String {
+        let state = RenderState(scenes: p.scenes, timeline: p.timeline, wide: p.wide, vertical: p.vertical, mirror: p.cameraMirror,
+                                cameraOffsetMs: p.camera?.offsetMs, micOffsetMs: p.mic?.offsetMs, game: p.game.file, camera: p.camera?.file,
+                                color: p.colorMode, durationMs: p.durationMs)
+        let e = JSONEncoder(); e.outputFormatting = .sortedKeys
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in (try? e.encode(state)) ?? Data() { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return String(format: "%016llx", h)
+    }
 
     static func times(_ p: Project) -> [Double] {
         let kept = TimelineEdits.kept(p)
@@ -388,11 +412,24 @@ enum ScrubFrames {
         return (0..<5).map { i in (map.source(fromTimeline: total * (Double(i) + 0.5) / 5) / 100).rounded() * 100 }
     }
 
+    private static func replaceKey(_ folder: String, with key: NSString) -> NSString? {
+        lock.lock(); defer { lock.unlock() }
+        let old = currentKey[folder]
+        currentKey[folder] = key
+        return old
+    }
+
     static func load(_ doc: ProjectDoc, project p: Project) async -> [CGImage] {
-        let ts = times(p)
-        let key = "\(doc.dir.path)|\(ts.map { Int($0) })" as NSString
+        let ts = times(p), fp = fingerprint(p)
+        let key = "\(doc.dir.path)|\(fp)|\(ts.map { Int($0) })" as NSString
+        if let old = replaceKey(doc.dir.path, with: key), old != key { memory.removeObject(forKey: old) }
         if let hit = memory.object(forKey: key) as? [CGImage] { return hit }
-        let dir = doc.dir.appendingPathComponent(".cache/scrub", isDirectory: true)
+        let root = doc.dir.appendingPathComponent(".cache/scrub", isDirectory: true)
+        let dir = root.appendingPathComponent(fp, isDirectory: true)
+        // Frames of earlier edits (and of builds before fingerprinting, loose in the root) are never shown again.
+        for f in (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] where f.lastPathComponent != fp {
+            try? FileManager.default.removeItem(at: f)
+        }
         var images: [CGImage] = []
         var generator: AVAssetImageGenerator?
         for t in ts {

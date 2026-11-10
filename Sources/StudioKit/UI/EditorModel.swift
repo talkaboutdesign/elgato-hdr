@@ -127,6 +127,16 @@ final class EditorModel {
         apply(p, from: old)
     }
 
+    /// A timeline drag update: the edit applied to the timeline as it was when the gesture began, never on top of the
+    /// previous update, so intermediate positions cannot leave anything behind (a dragged split stays one split).
+    func updateDrag(_ name: String, _ f: (inout Project) -> Void) {
+        let base = gestureBase
+        update(name) { p in
+            if let b = base { p.timeline = b.timeline; p.trimStartMs = b.trimStartMs; p.trimEndMs = b.trimEndMs }
+            f(&p)
+        }
+    }
+
     /// Starts coalescing edits into one undo step (drag began, slider grabbed).
     func beginGesture() { if gestureBase == nil { gestureBase = project; gestureName = "Edit" } }
     func endGesture() {
@@ -177,19 +187,12 @@ final class EditorModel {
         if redoTitle != rt { redoTitle = rt }
     }
 
-    /// Layout controls edit the scene active at the playhead; camera mirroring applies to every scene.
+    /// Camera mirroring applies to every scene. (Layout controls edit the active scene directly: `layout`.)
     private func syncDerived(_ p: inout Project, from old: Project) {
         if p.timeline.segments == old.timeline.segments && (p.trimStartMs != old.trimStartMs || p.trimEndMs != old.trimEndMs) {
             p.timeline = old.timeline.trimming(startMs: p.trimStartMs, endMs: p.trimmedRange.1, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
         }
         if let first = p.timeline.segments.first, let last = p.timeline.segments.last { p.trimStartMs = first.startMs; p.trimEndMs = last.endMs }
-        if p.wide != old.wide || p.vertical != old.vertical {
-            if let index = p.scenes.firstIndex(where: { $0.id == (p.timeline.activeSceneID(atSourceMs: time * 1000) ?? p.scenes.first?.id) }) {
-                let template = p.defaultScene
-                if p.wide != old.wide { p.scenes[index].wide = template.wide }
-                if p.vertical != old.vertical { p.scenes[index].vertical = template.vertical }
-            }
-        }
         if p.cameraMirror != old.cameraMirror {
             for i in p.scenes.indices {
                 for j in p.scenes[i].wide.layers.indices where p.scenes[i].wide.layers[j].source.type == "camera" { p.scenes[i].wide.layers[j].mirror = p.cameraMirror }
@@ -203,12 +206,14 @@ final class EditorModel {
         doc.project = p
         dirty = true
         scheduleSave()
-        // The preview ignores cuts (it shows source time), so only layer changes reload the composition.
+        // The preview plays the uncut source, so only layer changes reload the composition. Its render instruction
+        // knows the cuts (a transition ends at a cut, as in the export), so a cut edit swaps the instruction.
         if p.game != old.game || p.camera != old.camera || p.mic != old.mic {
             // Reloading the layers mid-drag stalls the preview: the lanes follow live, the composition once at the end.
             if gestureBase != nil { rebuildAfterGesture = true } else { rebuild() }
         } else if p.wide != old.wide || p.vertical != old.vertical || p.cameraMirror != old.cameraMirror || p.scenes != old.scenes
-                    || p.timeline.sceneSpans != old.timeline.sceneSpans || p.timeline.zooms != old.timeline.zooms {
+                    || p.timeline.sceneSpans != old.timeline.sceneSpans || p.timeline.zooms != old.timeline.zooms
+                    || p.editSegments != old.editSegments {
             restyle()
         }
         if p.editSegments != old.editSegments || p.durationMs != old.durationMs {
@@ -218,12 +223,24 @@ final class EditorModel {
         validateSelection()
     }
 
+    /// The fixed layout of the active scene when it was migrated from one (`sceneControls.legacy`). Setting it
+    /// regenerates that scene's layers from the layout; on any other scene it does nothing: a scene built from layers
+    /// is edited through `updateSceneLayer` and is never replaced by the project's default layout.
     var layout: CanvasLayout {
-        get {
-            let id = project.timeline.activeSceneID(atSourceMs: playheadMs) ?? project.scenes.first?.id
-            return project.scenes.first { $0.id == id }?.composition(canvas).legacyLayout ?? project.layout(canvas)
+        get { activeScene?.composition(canvas).legacyLayout ?? project.layout(canvas) }
+        set {
+            let c = canvas
+            guard let i = activeSceneIndex else { update("Layout") { $0.setLayout(c, newValue) }; return }
+            guard let current = project.scenes[i].composition(c).legacyLayout, current != newValue else { return }
+            update("Layout") { p in
+                var comp = Composition.from(layout: newValue, canvas: c.size(.hd), hasCamera: true, mirror: p.cameraMirror)
+                comp.legacyLayout = newValue
+                comp.background = p.scenes[i].composition(c).background
+                if c == .wide { p.scenes[i].wide = comp } else { p.scenes[i].vertical = comp }
+                // The project's own layouts follow, for templates made later and for older app versions.
+                p.setLayout(c, newValue)
+            }
         }
-        set { let c = canvas; update("Layout") { $0.setLayout(c, newValue) } }
     }
     func binding<T>(_ kp: WritableKeyPath<CanvasLayout, T>) -> Binding<T> {
         Binding(get: { self.layout[keyPath: kp] }, set: { v in var l = self.layout; l[keyPath: kp] = v; self.layout = l })
@@ -303,9 +320,11 @@ final class EditorModel {
     func renderPlan(size: CGSize) -> RenderPlan {
         var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: gameSize)]
         if let c = built?.cameraSize { sources[.camera] = SourceInfo(size: c) }
+        let sourceMs = built?.sourceDurationMs ?? project.durationMs, frameMs = built?.sourceFrameMs ?? 1000 / max(1, project.fps)
         return RenderPlan(scenes: project.scenes.isEmpty ? [project.defaultScene] : project.scenes, timeline: project.timeline,
-                          map: TimeMap(segments: [], sourceDurationMs: project.durationMs), canvas: canvas, canvasSize: size,
-                          sources: sources, mirrorCamera: project.cameraMirror)
+                          map: TimeMap(segments: [], sourceDurationMs: sourceMs, frameMs: frameMs), canvas: canvas, canvasSize: size,
+                          sources: sources, mirrorCamera: project.cameraMirror,
+                          cuts: CompositionBuilder.editMap(project, sourceDurationMs: sourceMs, frameMs: frameMs))
     }
     var gameSize: CGSize { built?.screenSize ?? (project.width > 0 ? CGSize(width: project.width, height: project.height) : CGSize(width: 1920, height: 1080)) }
 

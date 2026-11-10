@@ -150,12 +150,12 @@ final class TimelineInteraction {
         case .scrub: scrub(to: p, flags: flags)
         case .marker(let id, let original, let grab):
             let target = snapped(original + (t - grab) * 1000, on: snapOn)
-            m.update("Move Marker") { pr in
+            m.updateDrag("Move Marker") { pr in
                 if let i = pr.timeline.markers.firstIndex(where: { $0.id == id }) { pr.timeline.markers[i].tMs = TimelineEdits.snapToFrame(target, pr) }
             }
         case .sceneChange(let id):
             let target = snapped(t * 1000, on: snapOn)
-            m.update("Move Scene Change") { TimelineEdits.moveSceneChange(&$0, spanID: id, toMs: target) }
+            m.updateDrag("Move Scene Change") { TimelineEdits.moveSceneChange(&$0, spanID: id, toMs: target) }
         case .zoomMove(let id, let original, let grab, let room):
             let delta = (t - grab) * 1000
             // Snap whichever edge is closer to a snap point.
@@ -164,14 +164,14 @@ final class TimelineInteraction {
             let da = a - (original.startMs + delta), db = b - (original.endMs + delta)
             let adj = (da != 0 && (db == 0 || abs(da) <= abs(db))) ? da : db
             if da == 0 && db == 0 { m.snapGuide = nil } else { m.snapGuide = (adj == da ? a : b) / 1000 }
-            m.update("Move Zoom") { TimelineEdits.moveZoom(&$0, id: id, original: original, byMs: delta + adj, room: room) }
+            m.updateDrag("Move Zoom") { TimelineEdits.moveZoom(&$0, id: id, original: original, byMs: delta + adj, room: room) }
         case .zoomEdge(let id, let leading, let room):
             let target = snapped(t * 1000, on: snapOn)
-            m.update("Resize Zoom") { TimelineEdits.resizeZoom(&$0, id: id, leading: leading, toMs: target, room: room) }
+            m.updateDrag("Resize Zoom") { TimelineEdits.resizeZoom(&$0, id: id, leading: leading, toMs: target, room: room) }
             if let z = m.zoomBlock(id), !m.playing { m.seek((leading ? z.startMs : z.endMs) / 1000, fast: true) }
         case .cut(let b, let original):
             let target = snapped(t * 1000, on: snapOn)
-            m.update("Trim") { TimelineEdits.move(b, to: target, original: original, in: &$0) }
+            m.updateDrag("Trim") { TimelineEdits.move(b, to: target, original: original, in: &$0) }
             m.seek(TimelineEdits.snapToFrame(target, m.project) / 1000, fast: true)
         }
     }

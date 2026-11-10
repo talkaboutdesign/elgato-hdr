@@ -74,6 +74,9 @@ final class ExportQueue {
     @ObservationIgnored private let makeRunner: (ExportJob) throws -> ExportRunning
     @ObservationIgnored private var current: (id: UUID, runner: ExportRunning)?
     @ObservationIgnored private var cancelRequested = Set<UUID>()
+    /// A cancelled job that has not returned after this long is resolved anyway, so the queue moves on and editing
+    /// unlocks even if an export never calls back (the exporter's own watchdog should make this unreachable).
+    @ObservationIgnored var cancelGrace: TimeInterval = 5
 
     init(makeRunner: @escaping (ExportJob) throws -> ExportRunning) { self.makeRunner = makeRunner }
 
@@ -103,7 +106,14 @@ final class ExportQueue {
 
     func cancel(_ id: UUID) {
         guard let i = items.firstIndex(where: { $0.id == id }), items[i].isActive else { return }
-        if items[i].state == .running, let c = current, c.id == id { cancelRequested.insert(id); c.runner.cancel() }
+        if items[i].state == .running, let c = current, c.id == id {
+            cancelRequested.insert(id); c.runner.cancel()
+            DispatchQueue.main.asyncAfter(deadline: .now() + cancelGrace) { [weak self] in
+                guard let self = self, self.current?.id == id else { return }
+                log("export: \(self.items.first { $0.id == id }?.title ?? "job") did not stop within \(self.cancelGrace) s of cancel; abandoning it")
+                self.finish(id, .cancelled)
+            }
+        }
         else { items[i].state = .cancelled; drainedIfIdle() }
     }
     func cancelAll() { for i in items where i.isActive { cancel(i.id) } }
@@ -141,11 +151,11 @@ final class ExportQueue {
     private func finish(_ id: UUID, _ state: Item.State) {
         if current?.id == id { current = nil }
         cancelRequested.remove(id)
-        if let i = items.firstIndex(where: { $0.id == id }) {
-            items[i].state = state
-            if case .done = state { items[i].progress = 1 }
-            onFinished?(items[i])
-        }
+        // A job abandoned after cancel that reports late has already been resolved.
+        guard let i = items.firstIndex(where: { $0.id == id }), items[i].isActive else { return }
+        items[i].state = state
+        if case .done = state { items[i].progress = 1 }
+        onFinished?(items[i])
         startNext()
         drainedIfIdle()
     }
