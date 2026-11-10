@@ -1,5 +1,7 @@
 import XCTest
 import AVFoundation
+import CoreMedia
+import CoreVideo
 import VideoToolbox
 @testable import StudioKit
 
@@ -21,6 +23,17 @@ final class ExportTests: XCTestCase {
                 let start = Date()
                 let url = try await Exporter(doc:doc,job:ExportJob(canvas:canvas,resolution:.hd,range:range,fps:.source)).run { _ in }
                 print(String(format: "Fixture export %@ %@: %.3fs",canvas.rawValue,range.rawValue,Date().timeIntervalSince(start)))
+                if range == .hdr, FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/ffprobe") {
+                    let process = Process(), pipe = Pipe()
+                    process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe")
+                    process.arguments = ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=chroma_location", "-of", "default=nw=1", url.path]
+                    process.standardOutput = pipe
+                    try process.run(); process.waitUntilExit()
+                    let result = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                    print("HDR ffprobe: \(result)")
+                    XCTAssertEqual(process.terminationStatus, 0)
+                    XCTAssertTrue(result.contains("chroma_location=center"), result)
+                }
                 let asset = AVURLAsset(url:url)
                 let duration = try await asset.load(.duration)
                 XCTAssertEqual(duration.seconds,2,accuracy:1/60)

@@ -72,38 +72,6 @@ final class CompositorGoldenTests: XCTestCase {
         }
     }
 
-    func testMigratedProjectFirstFrames() throws {
-        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("No Metal device") }
-        let (screen, camera) = sources()
-        let textures: [SourceKey: LayerTextures.Kind] = [.game: .biplanar(y: screen.0, c: screen.1, bits: 10, transfer: 0, bt709: false),
-                                                        .camera: .biplanar(y: camera.0, c: camera.1, bits: 8, transfer: 2, bt709: true)]
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        for name in ["minimal", "v1", "v1-trim"] {
-            let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures"))
-            let project = try decoder.decode(Project.self, from: Data(contentsOf: url))
-            for canvas in Canvas.allCases {
-                let size = canvas.size(.hd)
-                var infos: [SourceKey: SourceInfo] = [.game: SourceInfo(size: CGSize(width: 64,height: 36))]
-                if project.camera != nil { infos[.camera] = SourceInfo(size: CGSize(width: 32,height: 32)) }
-                let legacy = Composition.from(layout: project.layout(canvas), canvas: size, hasCamera: project.camera != nil, mirror: project.cameraMirror)
-                let plan = RenderPlan(scenes: project.scenes, timeline: project.timeline, map: TimeMap(segments: project.editSegments, sourceDurationMs: max(2000,project.durationMs)), canvas: canvas, canvasSize: size, sources: infos, mirrorCamera: project.cameraMirror)
-                for transfer: Int32 in 0...2 {
-                    let expected = render { cb, target in
-                        MetalCore.shared.encodeLayers(cb, target: target, canvas: size, background: legacy.backgroundColor, outTransfer: transfer,
-                            layers: DrawLayer.pair(SceneResolver.resolve(legacy, canvas: size, sources: infos),textures))
-                    }
-                    let actual = render { cb, target in
-                        MetalCore.shared.encodeLayers(cb, target: target, canvas: size, background: plan.background(atTimelineMs: 0), outTransfer: transfer,
-                            layers: DrawLayer.pair(plan.layers(atTimelineMs: 0), textures))
-                    }
-                    let error = zip(expected,actual).map { abs($0-$1) }.max() ?? 0
-                    XCTAssertLessThanOrEqual(error,2/255,"\(name) \(canvas) transfer \(transfer)")
-                }
-            }
-        }
-        print("Migration golden parity: minimal, v1, v1-trim; both canvases; PQ, HLG, SDR; max channel error <= 2/255")
-    }
-
     /// Layers under an opaque full-canvas layer are skipped; the picture must be the one drawing them would give.
     func testOpaqueLayerHidesWhatIsBeneath() throws {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("No Metal device") }

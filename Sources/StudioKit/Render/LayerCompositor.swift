@@ -43,6 +43,7 @@ class LayerCompositor: NSObject, AVVideoCompositing {
     }
     // Keep SDR camera samples in their own encoding. Otherwise AVFoundation converts them to the game's PQ
     // space with different SDR-white levels in AVAssetImageGenerator and AVAssetReader.
+    // Previously that implicit conversion changed camera brightness/colour before our own transfer conversion.
     var canConformColorOfSourceFrames: Bool { true }
     var supportsHDRSourceFrames: Bool { true }
     var supportsWideColorSourceFrames: Bool { true }
@@ -103,6 +104,11 @@ class LayerCompositor: NSObject, AVVideoCompositing {
         case 0: (kCVImageBufferColorPrimaries_ITU_R_2020, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, kCVImageBufferYCbCrMatrix_ITU_R_2020)
         case 1: (kCVImageBufferColorPrimaries_ITU_R_2020, kCVImageBufferTransferFunction_ITU_R_2100_HLG, kCVImageBufferYCbCrMatrix_ITU_R_2020)
         default: (kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+        }
+        if hdrTransfer != nil {
+            // chromaFrag averages a 2x2 luma footprint: the sample sits at its centre, not its left edge.
+            CVBufferSetAttachment(pb, kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Center, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Center, .shouldPropagate)
         }
         CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, prim, .shouldPropagate)
         CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, tf, .shouldPropagate)
