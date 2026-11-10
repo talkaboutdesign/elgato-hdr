@@ -138,8 +138,10 @@ exported, scenes, transitions, zooms and overlays included, in HDR when the expo
 ![The editor: a text layer added to a recording's scene, selected on the picture](docs/editor.png)
 
 - **What happened live is already there.** Each scene switch comes back with the transition that was live (cut, fade
-  or morph, and its duration), each live zoom as a zoom block and each ⌃M marker as a marker, so the export plays
-  what viewers saw until you change it.
+  or morph, and its duration; a switch made mid-transition starts from the in-between picture, as it did live), each
+  live zoom as a zoom block with **Live timing** (the live spring from the press and from the release; **Use Editor
+  Timing** turns it into an ordinary block) and each ⌃M marker as a marker, so the export plays what viewers saw
+  until you change it.
 - **Cut.** The timeline shows the whole recording. **S** or **⌘B** splits at the playhead, **⌫** removes the selected
   section (it stays hatched, so ⌫ again or **Restore** brings it back), **I** and **O** set the in and out points,
   **H** hides removed sections. Playback skips what you removed.
@@ -176,7 +178,8 @@ project.json   The recording's own copy of its scenes, the live events (scene sw
                nothing is baked into the video files
 Assets/        The images its scenes use, copied in when recording starts and when you add one in the editor, so the
                folder stays complete when it is moved
-thumbnail.jpg  Library card (the 16:9 edit at the first marker)
+thumbnail.jpg  Library card (the 16:9 edit at the first marker); thumbnail.version notes the renderer that made it,
+               and the library remakes cards from an older one
 Exports/       Rendered videos
 .cache/        Filmstrip, waveforms and hover frames; safe to delete
 ```

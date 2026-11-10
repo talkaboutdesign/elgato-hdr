@@ -162,9 +162,6 @@ One line per plan on what turned out differently from the plan; the pull request
 - **Overlays are static images and text.** No animated GIFs (first frame only), video, browser sources, alerts or
   chat. Text has two live tokens: `{time}` (clock) and `{timer}` (stream or recording time live; edited-timeline time
   in an edit). Fonts missing on another Mac fall back to the system font.
-- **Replay of rapid live switching.** A switch made while a transition was still running starts, live, from the
-  in-between picture; the editor starts it from the previous scene. A live punch-in is replayed as a zoom block with
-  the editor's ease-in-out, not the live spring.
 - **The capture helper needs the administrator prompt.** Detaching Apple's video driver from the card needs root, so
   the app asks for the password when the helper is not running. A launch daemon is in plan 90.
 - **The app is unsigned.** Ad-hoc signed and not notarized: the first launch needs right-click → Open, and after a
