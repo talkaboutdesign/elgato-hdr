@@ -48,7 +48,8 @@ duration=float(d['format']['duration'])
 actual=int(v['nb_read_frames'])/duration
 print(f"{canvas}: {v['codec_name']} {v['width']}x{v['height']} {fps:.3f} fps; {a['codec_name']} {a['sample_rate']} Hz {a['channels']} channels; duration={duration:.3f}s; decoded={actual:.2f} fps")
 assert v['codec_name']=='h264' and (v['width'],v['height'])==((1920,1080) if canvas=='wide' else (1080,1920))
-assert abs(actual-60)<2 and abs(fps-60)<2 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
+# Allow 5% arrival-time selection jitter; nominal metadata alone is not sufficient.
+assert abs(actual-60)<=3 and abs(fps-60)<2 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
 assert abs(duration-20)<1
 # The bottom strip also encodes a binary counter. A flash is an isolated near-white peak, not just any rising bit.
 frames=[]; time=None
