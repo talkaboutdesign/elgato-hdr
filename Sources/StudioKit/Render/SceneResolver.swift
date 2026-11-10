@@ -15,6 +15,9 @@ struct ResolvedLayer: Equatable {
     var opacity: Double
     var mirror: Bool
     var color: SIMD4<Float>?            // color layers
+    /// Clip to `dst` with no edge anti-aliasing. The former fixed shader drew the game that way, so a letterboxed
+    /// game whose edge falls on a half pixel keeps whole edge rows instead of blending them with the background.
+    var hardEdge = false
 }
 
 /// Turns a composition into drawable layers for one canvas size. Pure; the rules are the ones the fixed layouts have
@@ -43,11 +46,14 @@ enum SceneResolver {
                     src = LayoutMath.fillCrop(sourceSize: size, dst: dst.size, zoom: l.zoom, panX: l.panX, panY: l.panY)
                 }
             }
-            return ResolvedLayer(key: key, dst: dst, src: src,
-                                 radius: min(0.5, max(0, l.roundness)) * min(dst.width, dst.height),
-                                 border: l.border ? max(2, dst.width * 0.018) : 0,
-                                 shadow: l.shadow ? max(6, dst.width * 0.08) : 0,
-                                 opacity: min(1, l.opacity), mirror: l.mirror, color: color)
+            var r = ResolvedLayer(key: key, dst: dst, src: src,
+                                  radius: min(0.5, max(0, l.roundness)) * min(dst.width, dst.height),
+                                  border: l.border ? max(2, dst.width * 0.018) : 0,
+                                  shadow: l.shadow ? max(6, dst.width * 0.08) : 0,
+                                  opacity: min(1, l.opacity), mirror: l.mirror, color: color)
+            // Only the plain game: a square-cornered facecam without border or shadow was always anti-aliased.
+            r.hardEdge = key == .game && r.radius == 0 && r.border == 0 && r.shadow == 0
+            return r
         }
     }
 

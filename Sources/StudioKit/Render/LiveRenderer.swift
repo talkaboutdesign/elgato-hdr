@@ -197,8 +197,8 @@ final class Renderer: NSObject {
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
         let scale = min(dw / Double(w), dh / Double(h))
-        // Whole pixels: layer edges are anti-aliased, so a letterbox at a half-pixel offset would blend the game's
-        // outermost rows with the background. Aligned, the game also takes encodeLayers' opaque path.
+        // Whole pixels, so canvas pixels are target pixels: only then may encodeLayers draw the full-canvas game on
+        // its opaque path and skip the background. The game's hard edge keeps whole rows either way.
         let vw = (Double(w) * scale).rounded(), vh = (Double(h) * scale).rounded()
         // Game passes through untouched in its own encoding; only the facecam is converted into it.
         let ov = overlay, transfer = colorMode.transfer

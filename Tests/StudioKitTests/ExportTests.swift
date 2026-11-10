@@ -18,7 +18,9 @@ final class ExportTests: XCTestCase {
         XCTAssertTrue(doc.hasCamera); XCTAssertTrue(doc.hasMic)
         for canvas in Canvas.allCases {
             for range in [ExportRange.hdr,.sdr] {
+                let start = Date()
                 let url = try await Exporter(doc:doc,job:ExportJob(canvas:canvas,resolution:.hd,range:range,fps:.source)).run { _ in }
+                print(String(format: "Fixture export %@ %@: %.3fs",canvas.rawValue,range.rawValue,Date().timeIntervalSince(start)))
                 let asset = AVURLAsset(url:url)
                 let duration = try await asset.load(.duration)
                 XCTAssertEqual(duration.seconds,2,accuracy:1/60)

@@ -186,6 +186,12 @@ struct TimelineView: View {
                 Button("Reset") { model.update { $0.trimStartMs = 0; $0.trimEndMs = 0 } }
                     .disabled(model.project.trimStartMs == 0 && model.project.trimEndMs == 0)
             }
+            HStack(spacing: 12) {
+                Button("Split") { model.split() }.keyboardShortcut("b", modifiers: .command)
+                Button("Delete Section") { model.deleteSection() }
+                Button("Add Zoom Here") { model.addZoom() }
+                Spacer()
+            }
             LayerLanes(model: model).frame(height: 24 + 22 * CGFloat(1 + (model.hasCamera ? 1 : 0) + (model.hasMic ? 1 : 0)))
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
