@@ -51,6 +51,9 @@ final class EditorWindows: NSObject, NSWindowDelegate {
     /// The editor that owns a project's state while it is open, so library actions go through it.
     func model(for dir: URL) -> EditorModel? { windows[dir]?.1 }
 
+    /// ⌘Z and ⇧⌘Z in the Edit menu reach the window, which asks its delegate: the project's own history.
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { windows.values.first { $0.0 === window }?.1.undoManager }
+
     func windowWillClose(_ n: Notification) {
         guard let w = n.object as? NSWindow, let (key, (_, model)) = windows.first(where: { $0.value.0 === w }) else { return }
         model.close()

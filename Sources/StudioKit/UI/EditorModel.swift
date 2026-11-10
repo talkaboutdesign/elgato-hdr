@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Observation
 import SwiftUI
 
 // MARK: - Editor model
@@ -11,26 +12,43 @@ struct ExportState {
     var error: String?
 }
 
-final class EditorModel: ObservableObject {
-    let doc: ProjectDoc
-    @Published var project: Project
-    @Published var canvas: Canvas = .wide { didSet { if canvas != oldValue { rebuild() } } }
-    @Published var range: ExportRange { didSet { if range != oldValue { rebuild() } } }
-    @Published var time = 0.0
-    @Published var duration = 0.0
-    @Published var playing = false
-    @Published var exportCanvases: Set<Canvas> = [.wide, .vertical]
-    @Published var resolution: ExportResolution = .hd
-    @Published var fps: ExportFPS = .source
-    @Published var exports: [Canvas: ExportState] = [:]
-    @Published var loadError: String?
-    let player = AVPlayer()
-    private var built: BuiltComposition?
-    private var timeObserver: Any?
-    private var saveWork: DispatchWorkItem?
-    private var buildGen = 0
-    private var exporters: [Exporter] = []
-    private var dirty = false
+/// One open project. `@Observable` tracks reads per property, so the 60 Hz playhead re-renders the playhead and the
+/// time read-out only, never the inspector or the timeline lanes. Main thread only.
+@Observable
+final class EditorModel {
+    @ObservationIgnored let doc: ProjectDoc
+    private(set) var project: Project
+    var canvas: Canvas = .wide { didSet { if canvas != oldValue { rebuild() } } }
+    var range: ExportRange { didSet { if range != oldValue { rebuild() } } }
+    var time = 0.0
+    var duration = 0.0
+    var playing = false
+    var exportCanvases: Set<Canvas> = [.wide, .vertical]
+    var resolution: ExportResolution = .hd
+    var fps: ExportFPS = .source
+    var exports: [Canvas: ExportState] = [:]
+    var loadError: String?
+    var canUndo = false
+    var canRedo = false
+    var undoTitle = "Undo"
+    var redoTitle = "Redo"
+
+    @ObservationIgnored let player = AVPlayer()
+    /// Owned by the model rather than the window, so the history goes away with the project and the same editor can
+    /// live in its own window or inside the library window. Grouping is explicit: one group per edit or gesture.
+    @ObservationIgnored let undoManager: UndoManager = {
+        let u = UndoManager(); u.groupsByEvent = false; u.levelsOfUndo = 200; return u
+    }()
+    @ObservationIgnored private var built: BuiltComposition?
+    @ObservationIgnored private var timeObserver: Any?
+    @ObservationIgnored private var saveWork: DispatchWorkItem?
+    @ObservationIgnored private var buildGen = 0
+    @ObservationIgnored private var exporters: [Exporter] = []
+    @ObservationIgnored private var dirty = false
+    /// The project as it was when a continuous gesture (drag, slider) began; the gesture becomes one undo step.
+    @ObservationIgnored private var gestureBase: Project?
+    @ObservationIgnored private var gestureName = ""
+    @ObservationIgnored private var rebuildAfterGesture = false
 
     var hasCamera: Bool { doc.hasCamera }
     var hasMic: Bool { doc.hasMic }
@@ -51,17 +69,68 @@ final class EditorModel: ObservableObject {
     func close() {
         player.pause()
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
+        endGesture()
         saveNow()
+        undoManager.removeAllActions()
         if dirty { Task { await doc.writeThumbnail(); await MainActor.run { Library.shared.objectWillChange.send() } } }
     }
 
-    // Edits
+    // MARK: Edits and undo
 
-    func update(_ f: (inout Project) -> Void) {
+    /// Every edit goes through here. Outside a gesture each call is one undo step; inside one, the whole gesture is.
+    func update(_ name: String = "Edit", _ f: (inout Project) -> Void) {
         let old = project
         var p = project; f(&p)
+        syncDerived(&p, from: old)
         guard p != old else { return }
-        // Existing layout controls edit the default scene while plan 31 supplies scene selection.
+        if gestureBase == nil { registerUndo(restoring: old, name: name) } else { gestureName = name }
+        apply(p, from: old)
+    }
+
+    /// Starts coalescing edits into one undo step (drag began, slider grabbed).
+    func beginGesture() { if gestureBase == nil { gestureBase = project; gestureName = "Edit" } }
+    func endGesture() {
+        guard let base = gestureBase else { return }
+        gestureBase = nil
+        if base != project { registerUndo(restoring: base, name: gestureName) }
+        if rebuildAfterGesture { rebuildAfterGesture = false; rebuild() }
+    }
+    /// For `Slider(onEditingChanged:)`.
+    func gesture(_ editing: Bool) { editing ? beginGesture() : endGesture() }
+
+    func undo() { endGesture(); if undoManager.canUndo { undoManager.undo() }; refreshUndoState() }
+    func redo() { endGesture(); if undoManager.canRedo { undoManager.redo() }; refreshUndoState() }
+
+    private func registerUndo(restoring old: Project, name: String) {
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { $0.revert(to: old, name: name) }
+        undoManager.setActionName(name)
+        undoManager.endUndoGrouping()
+        refreshUndoState()
+    }
+
+    /// Undo and redo swap whole project values; registering the current one here becomes the opposite step.
+    private func revert(to p: Project, name: String) {
+        let current = project
+        undoManager.registerUndo(withTarget: self) { $0.revert(to: current, name: name) }
+        undoManager.setActionName(name)
+        var restored = p
+        restored.lastExport = current.lastExport   // export history is not an edit
+        apply(restored, from: current)
+        DispatchQueue.main.async { [weak self] in self?.refreshUndoState() }
+    }
+
+    func refreshUndoState() {
+        let u = undoManager
+        if canUndo != u.canUndo { canUndo = u.canUndo }
+        if canRedo != u.canRedo { canRedo = u.canRedo }
+        let ut = u.canUndo ? u.undoMenuItemTitle : "Undo", rt = u.canRedo ? u.redoMenuItemTitle : "Redo"
+        if undoTitle != ut { undoTitle = ut }
+        if redoTitle != rt { redoTitle = rt }
+    }
+
+    /// Layout controls edit the project's default scene; camera mirroring applies to every scene.
+    private func syncDerived(_ p: inout Project, from old: Project) {
         if p.wide != old.wide || p.vertical != old.vertical {
             if !p.scenes.isEmpty {
                 let template = p.defaultScene
@@ -75,24 +144,30 @@ final class EditorModel: ObservableObject {
                 for j in p.scenes[i].vertical.layers.indices where p.scenes[i].vertical.layers[j].source.type == "camera" { p.scenes[i].vertical.layers[j].mirror = p.cameraMirror }
             }
         }
+    }
+
+    private func apply(_ p: Project, from old: Project) {
         project = p
         doc.project = p
         dirty = true
         scheduleSave()
-        if p.game != old.game || p.camera != old.camera || p.mic != old.mic || p.timeline.segments != old.timeline.segments { rebuild() }
+        if p.game != old.game || p.camera != old.camera || p.mic != old.mic || p.timeline.segments != old.timeline.segments {
+            // Reloading the layers mid-drag stalls the preview: the lanes follow live, the composition once at the end.
+            if gestureBase != nil { rebuildAfterGesture = true } else { rebuild() }
+        }
         else if p.wide != old.wide || p.vertical != old.vertical || p.cameraMirror != old.cameraMirror || p.scenes != old.scenes || p.timeline != old.timeline { restyle() }
         if p.trimStartMs != old.trimStartMs || p.trimEndMs != old.trimEndMs { applyTrim() }
     }
 
     var layout: CanvasLayout {
         get { project.layout(canvas) }
-        set { let c = canvas; update { $0.setLayout(c, newValue) } }
+        set { let c = canvas; update("Layout") { $0.setLayout(c, newValue) } }
     }
     func binding<T>(_ kp: WritableKeyPath<CanvasLayout, T>) -> Binding<T> {
         Binding(get: { self.layout[keyPath: kp] }, set: { v in var l = self.layout; l[keyPath: kp] = v; self.layout = l })
     }
-    func projectBinding<T>(_ kp: WritableKeyPath<Project, T>) -> Binding<T> {
-        Binding(get: { self.project[keyPath: kp] }, set: { v in self.update { $0[keyPath: kp] = v } })
+    func projectBinding<T>(_ kp: WritableKeyPath<Project, T>, _ name: String = "Edit") -> Binding<T> {
+        Binding(get: { self.project[keyPath: kp] }, set: { v in self.update(name) { $0[keyPath: kp] = v } })
     }
 
     private func scheduleSave() {
@@ -103,7 +178,7 @@ final class EditorModel: ObservableObject {
     }
     func saveNow() { saveWork?.cancel(); saveWork = nil; doc.project = project; doc.save() }
 
-    // Preview
+    // MARK: Preview
 
     /// Rebuilds the composition (layers, offsets, volumes) for the current canvas. The preview is untrimmed so trim
     /// handles can be dragged over the whole recording; playback is limited to the trim range.
@@ -157,11 +232,11 @@ final class EditorModel: ObservableObject {
         time = t
         player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
-    func setIn() { let t = time; update { $0.trimStartMs = t * 1000; if $0.trimEndMs > 0 && $0.trimEndMs <= $0.trimStartMs { $0.trimEndMs = 0 } } }
-    func setOut() { let t = time; update { $0.trimEndMs = t * 1000; if $0.trimStartMs >= $0.trimEndMs { $0.trimStartMs = 0 } } }
+    func setIn() { let t = time; update("Set In") { $0.trimStartMs = t * 1000; if $0.trimEndMs > 0 && $0.trimEndMs <= $0.trimStartMs { $0.trimEndMs = 0 } } }
+    func setOut() { let t = time; update("Set Out") { $0.trimEndMs = t * 1000; if $0.trimStartMs >= $0.trimEndMs { $0.trimStartMs = 0 } } }
 
     func split() {
-        update { p in
+        update("Split") { p in
             var map = TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
             let frameMs = 1000 / max(1, p.fps)
             map.split(atSourceMs: (time * 1000 / frameMs).rounded() * frameMs)
@@ -169,7 +244,7 @@ final class EditorModel: ObservableObject {
         }
     }
     func deleteSection() {
-        update { p in
+        update("Delete Section") { p in
             // In/Out selects the range to remove; it must not first restrict the kept ranges to that selection.
             var map = TimeMap(segments: p.timeline.segments, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
             map.remove(sourceRange: Segment(startMs: trimStart * 1000, endMs: trimEnd * 1000))
@@ -177,9 +252,9 @@ final class EditorModel: ObservableObject {
             p.trimStartMs = 0; p.trimEndMs = 0
         }
     }
-    func addZoom() { let s = time * 1000; update { $0.timeline.zooms.append(ZoomBlock(startMs: s, endMs: min($0.durationMs, s + 3000))) } }
+    func addZoom() { let s = time * 1000; update("Add Zoom") { $0.timeline.zooms.append(ZoomBlock(startMs: s, endMs: min($0.durationMs, s + 3000))) } }
 
-    // Export
+    // MARK: Export
 
     var anyExporting: Bool { exports.values.contains { $0.running } }
 
@@ -199,8 +274,7 @@ final class EditorModel: ObservableObject {
                     let url = try await ex.run { p in DispatchQueue.main.async { self.exports[j.canvas]?.progress = p } }
                     await MainActor.run {
                         self.exports[j.canvas] = ExportState(progress: 1, running: false, url: url)
-                        self.update { $0.lastExport[j.canvas.rawValue] = url.lastPathComponent }
-                        self.saveNow()
+                        self.recordExport(j.canvas, url)
                     }
                 } catch {
                     await MainActor.run { self.exports[j.canvas] = ExportState(running: false, error: ex.cancelled ? "Cancelled" : error.localizedDescription) }
@@ -210,5 +284,10 @@ final class EditorModel: ObservableObject {
         }
     }
     func cancelExports() { exporters.forEach { $0.cancel() } }
-}
 
+    /// Export history is bookkeeping, not an edit: it bypasses undo.
+    private func recordExport(_ canvas: Canvas, _ url: URL) {
+        var p = project; p.lastExport[canvas.rawValue] = url.lastPathComponent
+        project = p; doc.project = p; saveNow()
+    }
+}
