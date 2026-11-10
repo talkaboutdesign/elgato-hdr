@@ -53,8 +53,11 @@ struct PunchIn: Equatable {
 
     mutating func set(engaged on: Bool, atNs t: UInt64) {
         guard on != engaged else { return }
+        // A panned focus is forgotten only once a release has settled; re-engaging mid-way zooms back in where the
+        // picture is, rather than recentring it at once.
+        let settled = isIdle(atNs: t)
         fromScale = scale(atNs: t); startNs = t; engaged = on
-        if on { focus = nil; focusFrom = nil }
+        if on && settled { focus = nil; focusFrom = nil }
     }
 
     /// The focus point at `t`, given the crop centre `c` it starts from when none was set.
@@ -87,53 +90,63 @@ struct PunchIn: Equatable {
 }
 
 /// The renderer holds one of these behind its lock and copies it for every frame. A switch replaces it with
-/// `switching(to:atNs:transition:)`; edits to the active scene replace `to` without restarting anything.
+/// `switching(to:atNs:transition:sources:)`; edits to the active scene replace `to` without restarting anything.
 struct LiveSceneState {
     var from: Scene?
     var to: Scene
     var startNs: UInt64 = 0
     var transition = SceneTransition()
     var punchIn: PunchIn?
-    /// When a switch interrupts a transition, the picture at that instant is what the new one starts from.
-    private(set) var frozen: Frozen?
+    /// When a switch interrupts a transition, the picture on screen at that instant (both canvases) is what the new
+    /// one starts from. It is flattened into plain layers, so however fast switches come, a frame costs one blend.
+    private(set) var snapshot: Snapshot?
 
-    final class Frozen {
-        let state: LiveSceneState, atNs: UInt64
-        init(_ state: LiveSceneState, atNs: UInt64) { self.state = state; self.atNs = atNs }
+    /// A picture frozen at a switch, in pixels of `reference` for each canvas.
+    struct Snapshot: Equatable {
+        var wide: SceneFrame, vertical: SceneFrame
+        static func reference(_ c: Canvas) -> CGSize { c.size(.hd) }
+
+        /// The frozen picture at `size`. A source that has lost its frames since the switch is left out, as the
+        /// resolver does.
+        func frame(_ canvas: Canvas, size: CGSize, sources: [SourceKey: SourceInfo]) -> SceneFrame {
+            var f = canvas == .wide ? wide : vertical
+            f.layers.removeAll { $0.color == nil && sources[$0.key] == nil }
+            let ref = Snapshot.reference(canvas)
+            let sx: CGFloat = size.width / ref.width, sy: CGFloat = size.height / ref.height
+            guard sx != 1 || sy != 1 else { return f }
+            for i in f.layers.indices {
+                let d = f.layers[i].dst
+                f.layers[i].dst = CGRect(x: d.minX * sx, y: d.minY * sy, width: d.width * sx, height: d.height * sy)
+                f.layers[i].radius *= sx; f.layers[i].border *= sx; f.layers[i].shadow *= sx
+            }
+            return f
+        }
     }
-    /// Frozen pictures nest when switches come faster than transitions end; past this depth the oldest is replaced
-    /// by the scene it was heading to, which bounds the per-frame work.
-    static let maxDepth = 3
 
     init(scene: Scene) { to = scene }
 
     var durationNs: UInt64 { transition.style == .cut ? 0 : UInt64(max(0, transition.durationMs) * 1e6) }
-    func isTransitioning(atNs t: UInt64) -> Bool { (from != nil || frozen != nil) && t &- startNs < durationNs && t >= startNs }
+    func isTransitioning(atNs t: UInt64) -> Bool { (from != nil || snapshot != nil) && t &- startNs < durationNs && t >= startNs }
     /// Eased progress at `t`: 0 before the switch, 1 once it is over.
     func progress(atNs t: UInt64) -> Double {
-        guard from != nil || frozen != nil, transition.style != .cut else { return 1 }
+        guard from != nil || snapshot != nil, transition.style != .cut else { return 1 }
         guard t >= startNs else { return 0 }
         return SceneEasing.spring(Double(t - startNs) / 1e6, duration: transition.durationMs)
     }
-    var depth: Int { frozen.map { 1 + $0.state.depth } ?? 0 }
+    /// 1 while starting from a frozen picture; it never nests.
+    var depth: Int { snapshot == nil ? 0 : 1 }
 
     /// The state after switching to `scene` at `t`. Mid-transition, the current in-between picture is frozen as the
-    /// starting point so rapid switching never jumps.
-    func switching(to scene: Scene, atNs t: UInt64, transition: SceneTransition) -> LiveSceneState {
+    /// starting point so rapid switching never jumps; `sources` are the frame sizes it is resolved with.
+    func switching(to scene: Scene, atNs t: UInt64, transition: SceneTransition, sources: [SourceKey: SourceInfo]) -> LiveSceneState {
         var next = LiveSceneState(scene: scene)
         next.startNs = t; next.transition = transition; next.punchIn = punchIn
         next.from = to
-        if isTransitioning(atNs: t) || (t < startNs && (from != nil || frozen != nil)) {
-            next.frozen = Frozen(trimmed(depth: LiveSceneState.maxDepth - 1), atNs: t)
+        if isTransitioning(atNs: t) || (t < startNs && (from != nil || snapshot != nil)) {
+            func flat(_ c: Canvas) -> SceneFrame { rawFrame(canvas: c, size: Snapshot.reference(c), sources: sources, atNs: t) }
+            next.snapshot = Snapshot(wide: flat(.wide), vertical: flat(.vertical))
         }
         return next
-    }
-
-    private func trimmed(depth: Int) -> LiveSceneState {
-        var s = self
-        if depth <= 0 { if let f = frozen { s.from = f.state.to }; s.frozen = nil; return s }
-        if let f = frozen { s.frozen = Frozen(f.state.trimmed(depth: depth - 1), atNs: f.atNs) }
-        return s
     }
 
     /// The picture at host time `t` for one canvas. `size` is the canvas in pixels; `sources` the pixel sizes of the
@@ -153,7 +166,7 @@ struct LiveSceneState {
         let e = progress(atNs: t)
         guard e < 1 else { return target }
         let source: SceneFrame
-        if let f = frozen { source = f.state.rawFrame(canvas: canvas, size: size, sources: sources, atNs: f.atNs) }
+        if let snap = snapshot { source = snap.frame(canvas, size: size, sources: sources) }
         else if let from = from {
             let c = from.composition(canvas)
             source = SceneFrame(background: c.backgroundColor, layers: SceneResolver.resolve(c, canvas: size, sources: sources))
@@ -267,6 +280,9 @@ struct SceneBlend {
         l.radius = mix(a.radius, b.radius); l.border = mix(a.border, b.border); l.shadow = mix(a.shadow, b.shadow)
         l.opacity = a.opacity + (b.opacity - a.opacity) * e
         l.mirror = e < 0.5 ? a.mirror : b.mirror
+        // A game growing from a rounded window to full screen keeps anti-aliased edges until it arrives; at progress 0
+        // the picture is still exactly the old one.
+        l.hardEdge = e <= 0 ? a.hardEdge : a.hardEdge && b.hardEdge
         if let x = a.color, let y = b.color { l.color = x + (y - x) * Float(e) }
         return l
     }

@@ -19,7 +19,7 @@ final class SceneEngineTests: XCTestCase {
         st.layers(canvas: canvas, size: canvas == .wide ? size : CGSize(width: 1080, height: 1920), sources: sources, atNs: t)
     }
     func state(_ a: Scene, _ b: Scene, _ style: SceneTransition.Style, duration: Double = 400) -> LiveSceneState {
-        LiveSceneState(scene: a).switching(to: b, atNs: t0, transition: SceneTransition(style: style, durationMs: duration))
+        LiveSceneState(scene: a).switching(to: b, atNs: t0, transition: SceneTransition(style: style, durationMs: duration), sources: sources)
     }
     /// Time at which the spring reaches progress `e`.
     func time(for e: Double, duration: Double = 400) -> UInt64 {
@@ -144,7 +144,7 @@ final class SceneEngineTests: XCTestCase {
         let st = state(gameplay, focus, .morph)
         let tSwitch = time(for: 0.5)
         let before = frame(st, at: tSwitch)
-        let next = st.switching(to: justCamera, atNs: tSwitch, transition: SceneTransition(style: .morph, durationMs: 400))
+        let next = st.switching(to: justCamera, atNs: tSwitch, transition: SceneTransition(style: .morph, durationMs: 400), sources: sources)
         XCTAssertEqual(next.depth, 1)
         XCTAssertEqual(frame(next, at: tSwitch), before, "no jump at the switch")
         // Slightly later it is moving from there: close to `before`, not to Camera Focus or Gameplay.
@@ -154,15 +154,94 @@ final class SceneEngineTests: XCTestCase {
         XCTAssertEqual(frame(next, at: tSwitch + 400 * ms), resolve(justCamera))
         // Switching back and forth faster than transitions finish stays bounded.
         var s = next
-        for i in 0..<20 { s = s.switching(to: [gameplay, focus, justCamera, gameOnly][i % 4], atNs: tSwitch + UInt64(i + 1) * 30 * ms, transition: SceneTransition()) }
-        XCTAssertLessThanOrEqual(s.depth, LiveSceneState.maxDepth)
+        for i in 0..<20 { s = s.switching(to: [gameplay, focus, justCamera, gameOnly][i % 4], atNs: tSwitch + UInt64(i + 1) * 30 * ms, transition: SceneTransition(), sources: sources) }
+        XCTAssertLessThanOrEqual(s.depth, 1)
         let last = tSwitch + 21 * 30 * ms
         XCTAssertFalse(frame(s, at: last).isEmpty)
         XCTAssertEqual(frame(s, at: last + 400 * ms), resolve(gameOnly))
         // After a finished transition a switch starts clean.
-        let done = st.switching(to: justCamera, atNs: t0 + 500 * ms, transition: SceneTransition())
+        let done = st.switching(to: justCamera, atNs: t0 + 500 * ms, transition: SceneTransition(), sources: sources)
         XCTAssertEqual(done.depth, 0)
         XCTAssertEqual(frame(done, at: t0 + 500 * ms), resolve(focus))
+    }
+
+    /// Switches every 50 ms, faster than any transition ends. At each switch instant the picture is exactly the one
+    /// on screen just before it (every layer's rect, crop, opacity and stacking), and the next frame has moved by no
+    /// more than one frame of the spring allows. The starting picture is one flat snapshot, so depth never grows.
+    func testRapidSwitchingNeverJumps() {
+        let order = [focus, justCamera, gameOnly, gameplay, focus, gameOnly, justCamera, gameplay, focus, justCamera, gameplay, gameOnly]
+        let tr = SceneTransition()
+        // The spring's steepest step over one 60 Hz frame, as a fraction of the distance, with some slack.
+        let frameNs = 16_666_667 as UInt64, w = SceneEasing.x99 / tr.durationMs
+        let maxStep = 1.2 * w / M_E * 16.67   // e'(t) peaks at t = 1/ω with ω/e
+        for canvas in Canvas.allCases {
+            for size in [Canvas.wide == canvas ? self.size : CGSize(width: 1080, height: 1920), canvas.size(.uhd)] {
+                func pic(_ st: LiveSceneState, _ t: UInt64) -> [ResolvedLayer] { st.layers(canvas: canvas, size: size, sources: sources, atNs: t) }
+                let span = max(size.width, size.height)
+                var s = LiveSceneState(scene: gameplay)
+                for (i, sc) in order.enumerated() {
+                    let t = t0 + UInt64(i) * 50 * ms, what = "switch \(i + 1), \(canvas.label) at \(Int(size.width))"
+                    let before = pic(s, t)
+                    s = s.switching(to: sc, atNs: t, transition: tr, sources: sources)
+                    XCTAssertLessThanOrEqual(s.depth, 1)
+                    let after = pic(s, t)
+                    XCTAssertEqual(after.map(\.key), before.map(\.key), "stacking, \(what)")
+                    guard after.count == before.count else { continue }
+                    for (x, y) in zip(before, after) {
+                        assertRect(y.dst, x.dst, "dst, \(what)", accuracy: 0.5)
+                        assertRect(y.src, x.src, "src, \(what)", accuracy: 1e-4)
+                        XCTAssertEqual(y.opacity, x.opacity, accuracy: 0.01, "opacity, \(what)")
+                        XCTAssertEqual(y.radius, x.radius, accuracy: 0.5, "radius, \(what)")
+                    }
+                    // One frame later every layer that is still there has moved by at most one frame of motion.
+                    let next = pic(s, t + frameNs)
+                    for l in next {
+                        let d = after.filter { $0.key == l.key }.map { abs($0.dst.minX - l.dst.minX) + abs($0.dst.minY - l.dst.minY) }.min() ?? 0
+                        XCTAssertLessThanOrEqual(d, maxStep * 2 * span + 1, "\(l.key) moved \(d) px in one frame, \(what)")
+                    }
+                }
+                XCTAssertEqual(pic(s, t0 + UInt64(order.count - 1) * 50 * ms + 400 * ms),
+                               SceneResolver.resolve(order.last!.composition(canvas), canvas: size, sources: sources))
+            }
+        }
+    }
+
+    /// Re-engaging the punch-in before the zoom-out has finished keeps the panned focus: the crop does not move at
+    /// that instant. Once a release has settled, the next punch-in centres on the scene's crop again.
+    func testPunchInReengageKeepsFocus() {
+        var p = PunchIn(); p.amount = 1.6; p.durationMs = 400
+        p.set(engaged: true, atNs: t0)
+        let g = resolve(gameplay)[0].src
+        p.moveFocus(to: CGPoint(x: 0.95, y: 0.5), atNs: t0 + 400 * ms, centre: CGPoint(x: g.midX, y: g.midY))
+        var st = LiveSceneState(scene: gameplay)
+        p.set(engaged: false, atNs: t0 + 900 * ms)
+        let tAgain = t0 + 1000 * ms   // zoom-out under way
+        st.punchIn = p
+        let before = frame(st, at: tAgain)[0].src
+        p.set(engaged: true, atNs: tAgain); st.punchIn = p
+        let after = frame(st, at: tAgain)[0].src
+        assertRect(after, before, "no jump when re-engaging", accuracy: 1e-9)
+        XCTAssertLessThan(abs(frame(st, at: tAgain + 17 * ms)[0].src.midX - after.midX), 0.02)
+        XCTAssertGreaterThan(frame(st, at: tAgain + 400 * ms)[0].src.maxX, 0.999, "zooms back in on the panned focus")
+        // Fully released, then engaged again: centred on the crop.
+        p.set(engaged: false, atNs: tAgain + 500 * ms)
+        p.set(engaged: true, atNs: tAgain + 1000 * ms)
+        XCTAssertNil(p.focus)
+        st.punchIn = p
+        XCTAssertEqual(frame(st, at: tAgain + 1400 * ms)[0].src.midX, g.midX, accuracy: 1e-9)
+    }
+
+    /// The game is drawn with hard edges only while both ends of a morph are: growing from a rounded window to full
+    /// screen it stays anti-aliased until it arrives.
+    func testMorphHardEdge() {
+        XCTAssertTrue(resolve(gameplay)[0].hardEdge); XCTAssertFalse(resolve(focus).first { $0.key == .game }!.hardEdge)
+        for (a, b) in [(focus, gameplay), (gameplay, focus)] {
+            let half = frame(state(a, b, .morph), at: time(for: 0.5))
+            XCTAssertFalse(half.contains { $0.key == .game && $0.hardEdge }, "rounded at one end: never hard-clipped mid-way")
+            XCTAssertEqual(frame(state(a, b, .morph), at: t0 + 400 * ms), resolve(b))
+        }
+        let both = frame(state(gameplay, gameOnly, .morph), at: time(for: 0.5))
+        XCTAssertTrue(both.first { $0.key == .game }!.hardEdge, "full screen at both ends stays hard-edged")
     }
 
     func testPunchIn() throws {
@@ -215,9 +294,9 @@ final class SceneEngineTests: XCTestCase {
         let st = state(gameplay, focus, .morph), mid = time(for: 0.5)
         let morph = measure { _ = st.frame(canvas: .wide, size: size, sources: sources, atNs: mid) }
         var nested = st
-        for i in 0..<5 { nested = nested.switching(to: [justCamera, gameOnly, focus][i % 3], atNs: t0 + UInt64(i + 1) * 20 * ms, transition: SceneTransition()) }
+        for i in 0..<5 { nested = nested.switching(to: [justCamera, gameOnly, focus][i % 3], atNs: t0 + UInt64(i + 1) * 20 * ms, transition: SceneTransition(), sources: sources) }
         let deep = measure { _ = nested.frame(canvas: .wide, size: size, sources: sources, atNs: t0 + 110 * ms) }
-        print(String(format: "per-frame scene cost (µs): before (fixed layout) %.2f, scene %.2f, mid-morph %.2f, 3 nested switches %.2f", before, still, morph, deep))
+        print(String(format: "per-frame scene cost (µs): before (fixed layout) %.2f, scene %.2f, mid-morph %.2f, after 5 rapid switches %.2f", before, still, morph, deep))
         XCTAssertLessThan(deep, 200)
     }
 

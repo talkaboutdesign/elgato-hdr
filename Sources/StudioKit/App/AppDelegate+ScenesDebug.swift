@@ -78,7 +78,7 @@ extension AppDelegate {
         ]
         let t0: UInt64 = 1_000_000_000_000
         for (name, a, b, canvas, tr) in runs {
-            let st = LiveSceneState(scene: a).switching(to: b, atNs: t0, transition: tr)
+            let st = LiveSceneState(scene: a).switching(to: b, atNs: t0, transition: tr, sources: liveSources())
             let size = canvas == .wide ? CGSize(width: 1280, height: 720) : CGSize(width: 720, height: 1280)
             // Denser early on: the spring covers half the distance in the first quarter of the duration.
             for (i, ms) in [0.0, 25, 50, 75, 100, 150, 200, 280, tr.durationMs].enumerated() {

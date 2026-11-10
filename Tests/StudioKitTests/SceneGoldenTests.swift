@@ -60,7 +60,7 @@ final class SceneGoldenTests: XCTestCase {
         var lo = 0.0, hi = duration
         for _ in 0..<60 { let m = (lo + hi) / 2; if SceneEasing.spring(m, duration: duration) < 0.5 { lo = m } else { hi = m } }
         let half = t0 + UInt64((lo * 1e6).rounded())
-        let st = LiveSceneState(scene: gameplay).switching(to: focus, atNs: t0, transition: SceneTransition(style: .morph, durationMs: duration))
+        let st = LiveSceneState(scene: gameplay).switching(to: focus, atNs: t0, transition: SceneTransition(style: .morph, durationMs: duration), sources: sources)
         XCTAssertEqual(st.progress(atNs: half), 0.5, accuracy: 1e-6)
         let tex = textures()
         func scene(_ s: Scene) -> SceneFrame { SceneFrame(background: s.wide.backgroundColor, layers: SceneResolver.resolve(s.wide, canvas: Self.canvas, sources: sources)) }

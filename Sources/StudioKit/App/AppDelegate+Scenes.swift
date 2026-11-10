@@ -125,7 +125,7 @@ extension AppDelegate {
         var tr = m.collection.transition
         if DS.Motion.reduceMotion && tr.style != .cut { tr = SceneTransition(style: .fade, durationMs: 150) }
         let t = nowNs()
-        rt.live = rt.live.switching(to: scene, atNs: t, transition: tr)
+        rt.live = rt.live.switching(to: scene, atNs: t, transition: tr, sources: liveSources())
         // Keep editing the same source if the new scene has it (the camera stays selected across scenes).
         let kind = m.selectedLayer?.source.type
         m.collection.activeID = id
