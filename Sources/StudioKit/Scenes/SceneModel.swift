@@ -100,3 +100,64 @@ extension Layer {
         }
     }
 }
+
+// What the add-layer palette makes, the same live and in the editor.
+extension Layer {
+    /// A new layer of `type` ("game", "camera", "color", "text") for `c` on `canvas`; nil for anything else.
+    static func added(_ type: String, canvas: Canvas, to c: Composition, mirror: Bool) -> Layer? {
+        let size = canvas.size(.hd)
+        switch type {
+        case "camera":
+            var p = CameraPlacement(); p.shadow = true
+            return Layer(name: "Camera", source: .camera, frame: NRect(p.rect(in: size), in: size), roundness: p.roundness, shadow: true, mirror: mirror)
+        case "game":
+            // A second game layer starts as a window, so it is visible over the first.
+            let has = c.layers.contains { $0.source.type == "game" }
+            var l = Layer(name: "Game", source: .game, frame: has ? NRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5) : .full)
+            if has { l.roundness = 0.06; l.shadow = true }
+            return l
+        case "color":
+            return Layer(name: "Backdrop", source: LayerSource(type: "color", color: [0.11, 0.12, 0.16, 1]))
+        case "text":
+            // Unnamed, so the layer list shows what it says.
+            let v = canvas == .vertical
+            return Layer(source: LayerSource(type: "text", text: TextSpec(string: "Your text", weight: "bold")),
+                         frame: v ? NRect(x: 0.1, y: 0.45, w: 0.8, h: 0.06) : NRect(x: 0.25, y: 0.43, w: 0.5, h: 0.12))
+        default: return nil
+        }
+    }
+
+    /// An image layer's frame: centred at `point` (canvas pixels) or in the middle, at most 40% of the canvas and never
+    /// larger than the image, kept inside the canvas.
+    static func imageFrame(native: CGSize, canvas: CGSize, at point: CGPoint?) -> NRect {
+        let k = min(1, canvas.width * 0.4 / max(native.width, 1), canvas.height * 0.4 / max(native.height, 1))
+        let w = max(LayerResize.minSide, (native.width * k).rounded()), h = max(LayerResize.minSide, (native.height * k).rounded())
+        let c = point ?? CGPoint(x: canvas.width / 2, y: canvas.height / 2)
+        let r = CGRect(x: min(max(c.x - w / 2, 0), max(0, canvas.width - w)), y: min(max(c.y - h / 2, 0), max(0, canvas.height - h)), width: w, height: h)
+        return NRect(r, in: canvas)
+    }
+
+    /// The same place and width for a replacement image, its height from the new image's aspect.
+    func replacingImage(_ name: String, native: CGSize, canvas: CGSize) -> Layer {
+        var l = self, r = frame.rect(in: canvas)
+        r.size.height = (r.width * native.height / max(native.width, 1)).rounded()
+        l.source.file = name; l.frame = NRect(r, in: canvas)
+        return l
+    }
+}
+
+extension Composition {
+    /// Colour backdrops go to the bottom, everything else on top.
+    mutating func add(_ l: Layer) { if l.source.type == "color" { layers.insert(l, at: 0) } else { layers.append(l) } }
+    /// Game and camera are hidden rather than deleted: scenes keep their place in the stack. Returns the undo name.
+    @discardableResult mutating func delete(_ id: UUID) -> String? {
+        guard let j = layers.firstIndex(where: { $0.id == id }) else { return nil }
+        if layers[j].isGameOrCamera { layers[j].visible = false; return "Hide Layer" }
+        layers.remove(at: j); return "Delete Layer"
+    }
+    mutating func move(_ id: UUID, to index: Int) {
+        guard let i = layers.firstIndex(where: { $0.id == id }) else { return }
+        let l = layers.remove(at: i)
+        layers.insert(l, at: min(max(index, 0), layers.count))
+    }
+}

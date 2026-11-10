@@ -58,14 +58,10 @@ extension AppDelegate {
         var displayName = url?.deletingPathExtension().lastPathComponent ?? "Image"
         let completion = scenes.captureImageImport { [weak self] sceneID, targetCanvas, canvas, name, native in
             guard let self = self else { return }
-            let k = min(1, canvas.width * 0.4 / max(native.width, 1), canvas.height * 0.4 / max(native.height, 1))
-            let w = max(LayerResize.minSide, (native.width * k).rounded()), h = max(LayerResize.minSide, (native.height * k).rounded())
-            let c = point ?? CGPoint(x: canvas.width / 2, y: canvas.height / 2)
-            let r = CGRect(x: min(max(c.x - w / 2, 0), max(0, canvas.width - w)), y: min(max(c.y - h / 2, 0), max(0, canvas.height - h)), width: w, height: h)
-            let l = Layer(name: displayName, source: LayerSource(type: "image", file: name), frame: NRect(r, in: canvas))
+            let l = Layer(name: displayName, source: LayerSource(type: "image", file: name), frame: Layer.imageFrame(native: native, canvas: canvas, at: point))
             guard self.editComposition(sceneID: sceneID, canvas: targetCanvas, undo: "Add Image", { $0.layers.append(l) }) else { return }
             if self.scenes.collection.activeID == sceneID && self.scenes.canvas == targetCanvas { self.selectLayer(l.id) }
-            log("overlays: added image \(name) (\(Int(native.width))×\(Int(native.height))) at \(NSStringFromRect(r))")
+            log("overlays: added image \(name) (\(Int(native.width))×\(Int(native.height))) at \(NSStringFromRect(l.frame.rect(in: canvas)))")
         }
         if let url { importImage(url, completion) }
         else { chooseImage(prompt: "Add") { [weak self] chosen in
@@ -80,9 +76,7 @@ extension AppDelegate {
                 guard let self = self else { return }
                 self.editComposition(sceneID: sceneID, canvas: targetCanvas, undo: "Replace Image") { c in
                     guard let i = c.layers.firstIndex(where: { $0.id == id }) else { return }
-                    var r = c.layers[i].frame.rect(in: canvas)
-                    r.size.height = (r.width * native.height / max(native.width, 1)).rounded()
-                    c.layers[i].source.file = name; c.layers[i].frame = NRect(r, in: canvas)
+                    c.layers[i] = c.layers[i].replacingImage(name, native: native, canvas: canvas)
                 }
         }
         chooseImage(prompt: "Replace") { [weak self] in self?.importImage($0, completion) }

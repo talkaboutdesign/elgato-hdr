@@ -12,10 +12,26 @@ import SwiftUI
 final class EditorModel {
     @ObservationIgnored let doc: ProjectDoc
     private(set) var project: Project
-    var canvas: Canvas = .wide { didSet { if canvas != oldValue { rebuild() } } }
+    var canvas: Canvas = .wide {
+        didSet {
+            guard canvas != oldValue else { return }
+            // Each canvas has its own layers: a picked layer or crop does not carry across.
+            if case .layer = selection { selection = .none }
+            cropLayerID = nil
+            rebuild()
+        }
+    }
     /// Preview colour: HDR for HDR sources unless the user previews the SDR (Shorts) look.
     var range: ExportRange { didSet { if range != oldValue { rebuild() } } }
-    var time = 0.0                  // playhead, source seconds (the preview is untrimmed: player time is source time)
+    var time = 0.0 { didSet { if time != oldValue { refreshActiveScene() } } }   // playhead, source seconds (the preview is untrimmed: player time is source time)
+    /// The scene at the playhead; kept apart from `time` so views that show the scene redraw when it changes, not
+    /// on every frame of playback.
+    private(set) var activeSceneID: UUID?
+    /// Crop mode for this layer of the scene at the playhead: dragging pans the source inside the frame.
+    var cropLayerID: UUID?
+    /// A text layer whose inspector field should take keyboard focus once shown.
+    var focusTextLayerID: UUID?
+    var addLayerOpen = false
     var duration = 0.0
     var playing = false
     var shuttleRate: Float = 0
@@ -37,6 +53,9 @@ final class EditorModel {
     @ObservationIgnored let player = AVPlayer()
     /// Owned by the model rather than the window, so the history goes away with the project and the same editor can
     /// live in its own window or inside the library window. Grouping is explicit: one group per edit or gesture.
+    @ObservationIgnored var sceneLayerActions = SceneActions()
+    /// Arrow keys, ⌫ and Esc for a layer selected in the preview, before the timeline's own keys (set by the preview).
+    @ObservationIgnored var layerKeys: ((NSEvent) -> Bool)?
     @ObservationIgnored let undoManager: UndoManager = {
         let u = UndoManager(); u.groupsByEvent = false; u.levelsOfUndo = 200; return u
     }()
@@ -95,8 +114,15 @@ final class EditorModel {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 60), queue: .main) { [weak self] t in
             self?.playerTimeChanged(t.seconds)
         }
+        sceneLayerActions = makeLayerActions()
+        refreshActiveScene()
         rebuild()
         waveforms.load(game: true, mic: doc.hasMic)
+    }
+
+    func refreshActiveScene() {
+        let id = TimelineEdits.sceneRun(at: time * 1000, in: project)?.sceneID ?? project.scenes.first?.id
+        if id != activeSceneID { activeSceneID = id }
     }
 
     func close() {
@@ -141,6 +167,8 @@ final class EditorModel {
 
     /// Starts coalescing edits into one undo step (drag began, slider grabbed).
     func beginGesture() { if gestureBase == nil { gestureBase = project; gestureName = "Edit" } }
+    /// Ends a gesture under a name of the caller's (a picture drag: "Move Layer").
+    func endGesture(named name: String) { if gestureBase != nil { gestureName = name }; endGesture() }
     func endGesture() {
         guard let base = gestureBase else { return }
         gestureBase = nil
@@ -206,6 +234,7 @@ final class EditorModel {
     private func apply(_ p: Project, from old: Project) {
         project = p
         doc.project = p
+        refreshActiveScene()
         dirty = true
         scheduleSave()
         // The preview plays the uncut source, so only layer changes reload the composition. Its render instruction
@@ -360,6 +389,12 @@ final class EditorModel {
         return plan
     }
     var gameSize: CGSize { built?.screenSize ?? (project.width > 0 ? CGSize(width: project.width, height: project.height) : CGSize(width: 1920, height: 1080)) }
+    var cameraSize: CGSize? { built?.cameraSize }
+    /// The recording has camera frames at source `ms` (the preview plays the uncut source).
+    func cameraShown(atMs ms: Double) -> Bool {
+        guard let built, let track = built.asset.track(withTrackID: built.cameraTrack) else { return false }
+        return track.segments.contains { !$0.isEmpty && ms >= $0.timeMapping.target.start.seconds * 1000 && ms < $0.timeMapping.target.end.seconds * 1000 }
+    }
 
     // MARK: Messages
 

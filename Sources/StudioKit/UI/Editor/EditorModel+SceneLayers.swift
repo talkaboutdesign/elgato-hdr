@@ -19,8 +19,7 @@ extension EditorModel {
 
     /// The scene at the playhead, resolved as `RenderPlan` resolves it (spans of deleted scenes are ignored).
     var activeSceneIndex: Int? {
-        let id = TimelineEdits.sceneRun(at: playheadMs, in: project)?.sceneID ?? project.scenes.first?.id
-        return project.scenes.firstIndex { $0.id == id } ?? (project.scenes.isEmpty ? nil : 0)
+        project.scenes.firstIndex { $0.id == activeSceneID } ?? (project.scenes.isEmpty ? nil : 0)
     }
     var activeScene: Scene? { activeSceneIndex.map { project.scenes[$0] } }
 

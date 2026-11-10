@@ -35,6 +35,7 @@ struct EditorInspector: View {
         case .scene: SceneInspector(model: model)
         case .zoom(let id): ZoomInspector(model: model, id: id)
         case .marker(let id): MarkerInspector(model: model, id: id)
+        case .layer: LayerSelectionInspector(model: model)
         }
     }
 }
@@ -49,6 +50,7 @@ struct InspectorHeader: View {
             case .scene: return ("Scene", "rectangle.3.group")
             case .zoom: return ("Zoom", "plus.magnifyingglass")
             case .marker: return ("Marker", "flag")
+            case .layer: return ("Layer", "square.3.layers.3d")
             }
         }()
         HStack(spacing: DS.Space.s) {
@@ -104,49 +106,13 @@ func recordingSummary(_ p: Project, duration: Double) -> String {
     return parts.joined(separator: " · ")
 }
 
-/// Layout of the scene at the playhead for the current canvas: the fixed-layout controls for a scene migrated from
-/// one, otherwise the scene's own game and camera layers.
+/// The scene at the playhead on the current canvas: its layers (as in the live Scene tab), and for a scene migrated
+/// from a fixed layout, the layout controls it started with.
 struct LayoutInspector: View {
     @Bindable var model: EditorModel
     var body: some View {
-        if model.sceneControls.legacy { LegacyLayoutInspector(model: model) } else { SceneLayersInspector(model: model) }
-    }
-}
-
-/// A scene built from layers (templates, live scenes): only what its layers have, edited in place.
-struct SceneLayersInspector: View {
-    @Bindable var model: EditorModel
-    var body: some View {
-        let controls = model.sceneControls
-        InspectorSection(title: "\(model.activeScene?.name ?? "Scene") · \(model.canvas.label)") {
-            if controls.game {
-                InspectorRow(label: "Game") {
-                    SegmentedSwitch(selection: model.sceneLayerBinding(.game, \.fit, "Game Fit", fallback: false),
-                                    options: [.init(value: false, label: "Fill"), .init(value: true, label: "Fit")]).frame(width: 120)
-                }
-                LabeledSlider(label: "Game zoom", value: model.sceneLayerBinding(.game, \.zoom, "Game Zoom", fallback: 1), range: 1...3, defaultValue: 1,
-                              format: { String(format: "%.2f×", $0) }, onEditingChanged: model.gesture)
-                HStack {
-                    Text("Drag the preview to reframe").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Center") { model.updateSceneLayer(.game, "Center") { $0.panX = 0.5; $0.panY = 0.5; $0.zoom = 1 } }.controlSize(.small)
-                }
-            }
-            if controls.camera {
-                LabeledSlider(label: "Corners", value: model.sceneLayerBinding(.camera, \.roundness, "Camera Corners", fallback: 0), range: 0...0.5,
-                              defaultValue: 0.16, onEditingChanged: model.gesture)
-                HStack {
-                    Toggle("Shadow", isOn: model.sceneLayerBinding(.camera, \.shadow, "Camera Shadow", fallback: false))
-                    Toggle("Border", isOn: model.sceneLayerBinding(.camera, \.border, "Camera Border", fallback: false))
-                }
-                .toggleStyle(.checkbox).font(.system(size: 12))
-                Toggle("Mirror camera", isOn: model.projectBinding(\.cameraMirror, "Mirror")).toggleStyle(.checkbox).font(.system(size: 12))
-                Text("Drag the camera in the preview to move it, a corner to resize it.").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            if !controls.game && !controls.camera {
-                Text("This scene has no game or camera layer to adjust.").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-        }
+        EditorSceneLayers(model: model)
+        if model.sceneControls.legacy { LegacyLayoutInspector(model: model) }
     }
 }
 
@@ -276,6 +242,7 @@ struct SceneInspector: View {
                         }
                     }
                 }
+                AddLiveSceneMenu(model: model, run: run)
                 Text("Scenes here belong to this project; changing them never touches your live scenes.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -291,7 +258,7 @@ struct SceneInspector: View {
                     }), range: 0.1...1.5, defaultValue: 0.38, format: { String(format: "%.2f s", $0) }, onEditingChanged: model.gesture)
                     .disabled(span.transition.style == .cut)
                     if span.transition.style == .morph {
-                        Text("Morph moves shared layers into place; until live scenes arrive it renders as a fade.")
+                        Text("Morph glides the game, the camera and overlays shared by both scenes into place, as it did live.")
                             .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }

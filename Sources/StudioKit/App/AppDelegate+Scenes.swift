@@ -45,6 +45,8 @@ extension AppDelegate {
         m.punchAmount = PunchIn.range.contains(amount) ? amount : 1.6
         rt.live = LiveSceneState(scene: m.collection.active)
         installSceneActions()
+        LiveSceneLibrary.shared = LiveSceneLibrary(scenes: { [weak self] in self?.scenes.collection.scenes ?? [] },
+                                                   add: { [weak self] in self?.addSavedScene($0) })
         view.scenes = m
         view.sources = { [weak self] in self?.liveSources() ?? [:] }
         view.contextMenu = { [weak self] id in self?.pictureMenu(layer: id) }
@@ -176,6 +178,19 @@ extension AppDelegate {
         sceneDidChange()
         switchScene(to: s.id)
     }
+    /// A scene saved from the editor: added at the end of the strip without switching to it (what is live is not the
+    /// editor's to change). A clash of id or name gets a new one.
+    func addSavedScene(_ scene: Scene) {
+        let m = scenes, before = m.collection
+        var s = scene
+        if m.collection[s.id] != nil { s.id = UUID() }
+        s.name = m.collection.uniqueName(s.name)
+        m.collection.scenes.append(s)
+        registerSceneUndo("Add Scene", before: before)
+        sceneDidChange()
+        log("scenes: added \(s.name) from a recording")
+    }
+
     func deleteScene(_ id: UUID) {
         let m = scenes
         guard m.collection.scenes.count > 1, let i = m.collection.index(of: id) else {
@@ -270,36 +285,13 @@ extension AppDelegate {
     }
 
     func moveLayer(_ id: UUID, to index: Int) {
-        editComposition(undo: "Reorder Layers") { c in
-            guard let i = c.layers.firstIndex(where: { $0.id == id }) else { return }
-            let l = c.layers.remove(at: i)
-            c.layers.insert(l, at: min(max(index, 0), c.layers.count))
-        }
+        editComposition(undo: "Reorder Layers") { $0.move(id, to: index) }
     }
 
     func addLayer(_ type: String) {
-        let size = scenes.canvasSize
-        var l: Layer
-        switch type {
-        case "camera":
-            var p = CameraPlacement(); p.shadow = true
-            l = Layer(name: "Camera", source: .camera, frame: NRect(p.rect(in: size), in: size), roundness: p.roundness, shadow: true, mirror: cameraMirror)
-        case "game":
-            // A second game layer starts as a window, so it is visible over the first.
-            let has = scenes.composition.layers.contains { $0.source.type == "game" }
-            l = Layer(name: "Game", source: .game, frame: has ? NRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5) : .full)
-            if has { l.roundness = 0.06; l.shadow = true }
-        case "color":
-            l = Layer(name: "Backdrop", source: LayerSource(type: "color", color: [0.11, 0.12, 0.16, 1]))
-        case "text":
-            // Unnamed, so the layer list shows what it says.
-            let v = scenes.canvas == .vertical
-            l = Layer(source: LayerSource(type: "text", text: TextSpec(string: "Your text", weight: "bold")),
-                      frame: v ? NRect(x: 0.1, y: 0.45, w: 0.8, h: 0.06) : NRect(x: 0.25, y: 0.43, w: 0.5, h: 0.12))
-        default: return
-        }
+        guard let l = Layer.added(type, canvas: scenes.canvas, to: scenes.composition, mirror: cameraMirror) else { return }
         let id = l.id
-        editComposition(undo: "Add Layer") { c in if type == "color" { c.layers.insert(l, at: 0) } else { c.layers.append(l) } }
+        editComposition(undo: "Add Layer") { $0.add(l) }
         selectLayer(id)
         if type == "text" { editText(id) }
     }
@@ -307,8 +299,7 @@ extension AppDelegate {
     /// Game and camera are hidden rather than deleted: scenes keep their place in the stack.
     func deleteLayer(_ id: UUID) {
         guard let l = scenes.composition.layers.first(where: { $0.id == id }) else { return }
-        if l.isGameOrCamera { editComposition(undo: "Hide Layer") { c in if let j = c.layers.firstIndex(where: { $0.id == id }) { c.layers[j].visible = false } }; return }
-        editComposition(undo: "Delete Layer") { c in c.layers.removeAll { $0.id == id } }
+        editComposition(undo: l.isGameOrCamera ? "Hide Layer" : "Delete Layer") { $0.delete(id) }
     }
 
     func copyLayoutToOtherCanvas() {

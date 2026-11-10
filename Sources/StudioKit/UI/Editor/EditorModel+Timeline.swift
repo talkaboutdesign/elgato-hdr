@@ -35,6 +35,8 @@ extension EditorModel {
         case .marker(let id):
             update("Delete Marker") { $0.timeline.markers.removeAll { $0.id == id } }
             selection = .none
+        case .layer(let id):
+            deleteLayer(id)
         case .none:
             guard let s = TimelineEdits.section(at: playheadMs, in: project) else { return }
             selection = .section(s)
@@ -171,6 +173,7 @@ extension EditorModel {
         case .none: return
         case .zoom(let id): if zoomBlock(id) == nil { selection = .none }
         case .marker(let id): if marker(id) == nil { selection = .none }
+        case .layer: return   // follows the scene at the playhead: `selectedLayerID`
         case .scene(let id):
             if !TimelineEdits.sceneRuns(project).contains(where: { $0.span?.id == id }) { selection = .none }
         case .section(let s):
