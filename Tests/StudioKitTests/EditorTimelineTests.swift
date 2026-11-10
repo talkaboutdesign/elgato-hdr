@@ -302,3 +302,35 @@ final class TimelineSelectionTests: XCTestCase {
         }
     }
 }
+
+/// Pointer logic through `TimelineInteraction`, as the AppKit view drives it: drags land where they end and never
+/// snap to the item being dragged.
+final class TimelineInteractionTests: XCTestCase {
+    func testDragsLandWhereReleasedAndSnapToOthers() {
+        let m = makeEditorModel(durationMs: 100_000, fps: 50)   // 10 pt per second at 1000 pt
+        m.setTimelineWidth(1000)
+        let layout = TimelineLayout.make(hasMic: false)
+        let ui = TimelineInteraction(model: m, layout: layout)
+        func y(_ k: LaneKind) -> Double { layout.lane(k)!.y + layout.lane(k)!.height / 2 }
+        func drag(_ k: LaneKind, _ from: Double, _ to: Double, steps: Int = 8) {
+            ui.mouseDown(at: CGPoint(x: from * 10, y: y(k)), clickCount: 1, flags: [])
+            for i in 1..<steps { ui.mouseDragged(to: CGPoint(x: (from + (to - from) * Double(i) / Double(steps)) * 10, y: y(k)), flags: []) }
+            ui.mouseUp(at: CGPoint(x: to * 10, y: y(k)))   // the last movement arrives with the release
+        }
+        m.seek(20); m.split(); m.seek(40); m.split()
+        m.select(.section(TimelineEdits.section(at: 30_000, in: m.project)!)); m.deleteSelection(); m.selection = .none
+        drag(.video, 40, 45)
+        XCTAssertEqual(TimelineEdits.kept(m.project)[1].startMs, 45_000, "a trim moves the edge to the release point, not to itself")
+        XCTAssertEqual(m.undoTitle, "Undo Trim")
+        m.seek(60); m.addZoom(); m.selection = .none
+        drag(.zoom, 61.5, 70)
+        XCTAssertEqual(m.project.timeline.zooms[0].startMs, 68_500, accuracy: 0.001, "moved by the drag distance")
+        drag(.zoom, 71.5, 80)
+        XCTAssertEqual(m.project.timeline.zooms[0].endMs, 80_000, accuracy: 0.001, "the end edge resizes")
+        m.seek(90); m.addSceneChange(index: 2)
+        drag(.video, 45, 89.4)
+        XCTAssertEqual(TimelineEdits.kept(m.project)[1].startMs, 90_000, "within eight points of the scene change, a trim snaps to it")
+        m.undo()
+        XCTAssertEqual(TimelineEdits.kept(m.project)[1].startMs, 45_000, "a drag is one undo step")
+    }
+}

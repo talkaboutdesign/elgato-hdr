@@ -64,6 +64,7 @@ enum EditorHarness {
         case "redoall": while m.canRedo { m.redo() }
         case "key": if let c = keyCommand(arg) { m.perform(c) }
         case "type": for k in parts.dropFirst() { postKey(k, to: m.window) }
+        case "drag": postDrag(parts, m); delay = 0.8   // drag <lane> <from s> <to s> [flag]
         case "canvas": m.canvas = arg == "vertical" ? .vertical : .wide
         case "hide": m.hideRemoved = arg == "on"
         case "fit": m.fitTimeline()
@@ -80,7 +81,11 @@ enum EditorHarness {
             log(String(format: "harness: state %@ t=%.3f playing=%d rate=%.0f reverse=%d pps=%.2f fitted=%d hide=%d sections=%d markers=%d zooms=%d undo=%@ sel=%@", arg, m.time, m.playing ? 1 : 0, m.shuttleRate,
                        m.player.currentItem?.canPlayReverse == true ? 1 : 0, m.axis.pps, m.axis.fitted ? 1 : 0, m.hideRemoved ? 1 : 0, TimelineEdits.sections(m.project).count,
                        m.project.timeline.markers.count, m.project.timeline.zooms.count, m.undoTitle, sel))
-        case "dump": m.saveNow(); try? FileManager.default.copyItem(at: m.doc.dir.appendingPathComponent("project.json"), to: URL(fileURLWithPath: arg))
+        case "dump":
+            m.saveNow()
+            let dst = URL(fileURLWithPath: arg)
+            try? FileManager.default.removeItem(at: dst)
+            try? FileManager.default.copyItem(at: m.doc.dir.appendingPathComponent("project.json"), to: dst)
         case "hover": hover(parts, m)
         case "exportsheet": showExport?(arg != "off"); delay = 1
         case "export":
@@ -131,6 +136,32 @@ enum EditorHarness {
                                        windowNumber: w.windowNumber, context: nil, characters: shown, charactersIgnoringModifiers: shown,
                                        isARepeat: false, keyCode: code) else { return }
         NSApp.postEvent(e, atStart: false)
+    }
+
+    /// Real mouse events on the timeline's input view: down, a few drags, up.
+    private static func postDrag(_ parts: [String], _ m: EditorModel) {
+        guard parts.count >= 4, let w = m.window, let v = findInput(w.contentView),
+              let from = Double(parts[2]), let to = Double(parts[3]) else { log("harness: drag needs lane, from, to"); return }
+        let layout = TimelineLayout.make(hasMic: m.hasMic)
+        let kinds: [String: LaneKind] = ["ruler": .ruler, "scenes": .scenes, "zoom": .zoom, "video": .video, "game": .gameAudio, "mic": .micAudio]
+        guard let lane = layout.lane(kinds[parts[1]] ?? .video) else { return }
+        let y = lane.y + lane.height * (parts.count > 4 ? 0.75 : 0.5)
+        func windowPoint(_ t: Double) -> NSPoint { v.convert(NSPoint(x: m.axis.x(t), y: y), to: nil) }
+        func post(_ type: NSEvent.EventType, _ p: NSPoint) {
+            if let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) {
+                NSApp.postEvent(e, atStart: false)
+            }
+        }
+        post(.leftMouseDown, windowPoint(from))
+        for i in 1...8 { post(.leftMouseDragged, windowPoint(from + (to - from) * Double(i) / 8)) }
+        post(.leftMouseUp, windowPoint(to))
+    }
+    private static func findInput(_ v: NSView?) -> TimelineInputView? {
+        guard let v = v else { return nil }
+        if let t = v as? TimelineInputView { return t }
+        for s in v.subviews { if let t = findInput(s) { return t } }
+        return nil
     }
 
     private static func select(_ parts: [String], _ m: EditorModel) {

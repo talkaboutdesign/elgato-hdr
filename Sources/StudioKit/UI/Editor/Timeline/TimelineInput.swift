@@ -48,9 +48,15 @@ final class TimelineInputView: NSView {
 
     private func point(_ e: NSEvent) -> CGPoint { convert(e.locationInWindow, from: nil) }
 
-    override func mouseDown(with e: NSEvent) { window?.makeFirstResponder(self); interaction?.mouseDown(at: point(e), clickCount: e.clickCount, flags: e.modifierFlags); setCursor() }
-    override func mouseDragged(with e: NSEvent) { interaction?.mouseDragged(to: point(e), flags: e.modifierFlags); setCursor() }
-    override func mouseUp(with e: NSEvent) { interaction?.mouseUp(at: point(e)); interaction?.mouseMoved(to: point(e)); setCursor() }
+    #if DEBUG
+    static var trace = ProcessInfo.processInfo.environment["EHDR_TRACE_POINTER"] != nil
+    private func trace(_ what: String, _ e: NSEvent) { if Self.trace { log("pointer: \(what) x=\(Int(point(e).x)) y=\(Int(point(e).y))") } }
+    #else
+    private func trace(_ what: String, _ e: NSEvent) {}
+    #endif
+    override func mouseDown(with e: NSEvent) { trace("down", e); window?.makeFirstResponder(self); interaction?.mouseDown(at: point(e), clickCount: e.clickCount, flags: e.modifierFlags); setCursor() }
+    override func mouseDragged(with e: NSEvent) { trace("drag", e); interaction?.mouseDragged(to: point(e), flags: e.modifierFlags); setCursor() }
+    override func mouseUp(with e: NSEvent) { trace("up", e); interaction?.mouseUp(at: point(e)); interaction?.mouseMoved(to: point(e)); setCursor() }
     override func mouseMoved(with e: NSEvent) { interaction?.mouseMoved(to: point(e)); setCursor() }
     override func mouseExited(with e: NSEvent) { interaction?.mouseExited(); cursor = .arrow; cursor.set() }
     override func cursorUpdate(with e: NSEvent) { cursor.set() }
@@ -87,6 +93,9 @@ final class TimelineInteraction {
         case cut(CutBoundary, original: [Segment])
     }
     private var drag = Drag.none
+    /// Snap targets fixed when the drag began, without the dragged item: recomputed live, the item would snap to
+    /// itself, and so would the playhead that a trim moves along with the edge.
+    private var snapTargets: [Double] = []
     static let dragThreshold = 3.0
     static let snapPoints = 8.0
 
@@ -105,6 +114,7 @@ final class TimelineInteraction {
         m.hover = h
         switch h {
         case .ruler:
+            snapTargets = TimelineEdits.editPoints(m.project)
             m.beginScrub(); scrub(to: p, flags: flags); drag = .scrub
         case .marker(let id):
             m.select(.marker(id))
@@ -121,6 +131,7 @@ final class TimelineInteraction {
         case .section(let s):
             m.selection = .section(s); m.beginScrub(); m.seek(t); drag = .pending(h, start: p, time: t)
         case .lane:
+            snapTargets = TimelineEdits.editPoints(m.project)
             m.selection = .none; m.beginScrub(); m.seek(t); drag = .scrub
         }
         updateCursor(h, dragging: false)
@@ -138,30 +149,28 @@ final class TimelineInteraction {
         case .none, .pending: return
         case .scrub: scrub(to: p, flags: flags)
         case .marker(let id, let original, let grab):
-            let target = snapped((original + (t - grab) * 1000), excluding: [original], on: snapOn)
+            let target = snapped(original + (t - grab) * 1000, on: snapOn)
             m.update("Move Marker") { pr in
                 if let i = pr.timeline.markers.firstIndex(where: { $0.id == id }) { pr.timeline.markers[i].tMs = TimelineEdits.snapToFrame(target, pr) }
             }
         case .sceneChange(let id):
-            let own = m.project.timeline.sceneSpans.first { $0.id == id }?.startMs ?? -1
-            let target = snapped(t * 1000, excluding: [own], on: snapOn)
+            let target = snapped(t * 1000, on: snapOn)
             m.update("Move Scene Change") { TimelineEdits.moveSceneChange(&$0, spanID: id, toMs: target) }
         case .zoomMove(let id, let original, let grab, let room):
             let delta = (t - grab) * 1000
             // Snap whichever edge is closer to a snap point.
-            let a = snapped(original.startMs + delta, excluding: [original.startMs, original.endMs], on: snapOn)
-            let b = snapped(original.endMs + delta, excluding: [original.startMs, original.endMs], on: snapOn)
+            let a = snapped(original.startMs + delta, on: snapOn)
+            let b = snapped(original.endMs + delta, on: snapOn)
             let da = a - (original.startMs + delta), db = b - (original.endMs + delta)
             let adj = (da != 0 && (db == 0 || abs(da) <= abs(db))) ? da : db
             if da == 0 && db == 0 { m.snapGuide = nil } else { m.snapGuide = (adj == da ? a : b) / 1000 }
             m.update("Move Zoom") { TimelineEdits.moveZoom(&$0, id: id, original: original, byMs: delta + adj, room: room) }
         case .zoomEdge(let id, let leading, let room):
-            let z = m.zoomBlock(id)
-            let target = snapped(t * 1000, excluding: [z?.startMs ?? -1, z?.endMs ?? -1], on: snapOn)
+            let target = snapped(t * 1000, on: snapOn)
             m.update("Resize Zoom") { TimelineEdits.resizeZoom(&$0, id: id, leading: leading, toMs: target, room: room) }
             if let z = m.zoomBlock(id), !m.playing { m.seek((leading ? z.startMs : z.endMs) / 1000, fast: true) }
         case .cut(let b, let original):
-            let target = snapped(t * 1000, excluding: [b.ms], on: snapOn)
+            let target = snapped(t * 1000, on: snapOn)
             m.update("Trim") { TimelineEdits.move(b, to: target, original: original, in: &$0) }
             m.seek(TimelineEdits.snapToFrame(target, m.project) / 1000, fast: true)
         }
@@ -169,6 +178,15 @@ final class TimelineInteraction {
 
     private func beginDrag(_ h: TimelineHit, at t0: Double) {
         guard let m = model else { return }
+        var own: [Double] = []
+        switch h {
+        case .marker(let id): own = [m.marker(id)?.tMs ?? -1]
+        case .sceneChange(let id): own = [m.project.timeline.sceneSpans.first { $0.id == id }?.startMs ?? -1]
+        case .zoom(let id), .zoomEdge(let id, _): own = m.zoomBlock(id).map { [$0.startMs, $0.endMs] } ?? []
+        case .cut(let b): own = [b.ms]
+        default: break
+        }
+        snapTargets = (TimelineEdits.editPoints(m.project) + [m.playheadMs]).filter { c in !own.contains { abs($0 - c) < 0.5 } }
         if m.editsLocked {
             // Exporting: looking around (scrubbing) is fine, edits wait.
             if case .section = h { drag = .scrub } else { drag = .none; NSSound.beep() }
@@ -188,6 +206,7 @@ final class TimelineInteraction {
         case .cut(let b):
             m.beginGesture(); m.beginScrub(); drag = .cut(b, original: TimelineEdits.kept(m.project))
         case .section:
+            snapTargets = TimelineEdits.editPoints(m.project)
             drag = .scrub
         default:
             drag = .none
@@ -197,6 +216,11 @@ final class TimelineInteraction {
 
     func mouseUp(at p: CGPoint) {
         guard let m = model else { return }
+        // The release can come from further along than the last drag event (a quick flick, coalesced events).
+        switch drag {
+        case .none, .pending: break
+        default: mouseDragged(to: p, flags: NSEvent.modifierFlags)
+        }
         switch drag {
         case .scrub, .pending(.section, _, _): m.endScrub()
         case .cut: m.endScrub(); m.endGesture()
@@ -229,19 +253,16 @@ final class TimelineInteraction {
         guard let m = model else { return }
         let t = m.axis.time(atX: p.x) * 1000
         // Scrubbing lands exactly on cuts and markers when it passes close to them.
-        let s = flags.contains(.option) ? t : snapped(t, excluding: [], on: true, points: 5, includePlayhead: false)
+        let s = flags.contains(.option) ? t : snapped(t, on: true, points: 5)
         m.seek(s / 1000, fast: true)
     }
 
-    /// Snaps a time (ms) to the playhead, markers, cuts, scene changes and zoom edges within a few points.
-    private func snapped(_ ms: Double, excluding: [Double], on: Bool, points: Double = snapPoints, includePlayhead: Bool = true) -> Double {
+    /// Snaps a time (ms) to the targets fixed at drag start (playhead, markers, cuts, scene changes, zoom edges).
+    private func snapped(_ ms: Double, on: Bool, points: Double = snapPoints) -> Double {
         guard let m = model else { return ms }
         guard on else { m.snapGuide = nil; return ms }
-        var candidates = TimelineEdits.editPoints(m.project)
-        if includePlayhead { candidates.append(m.playheadMs) }
-        candidates.removeAll { c in excluding.contains { abs($0 - c) < 0.5 } }
         let tol = points / max(m.axis.pps, 0.0001) * 1000
-        let r = Snapping.snap(ms, to: candidates, tolerance: tol)
+        let r = Snapping.snap(ms, to: snapTargets, tolerance: tol)
         m.snapGuide = r.target.map { $0 / 1000 }
         return r.value
     }
