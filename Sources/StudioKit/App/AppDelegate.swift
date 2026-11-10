@@ -34,9 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var recStart = Date()
     var recTimer: Timer?
     var meterTimer: Timer?
+    var deviceObservers: [NSObjectProtocol] = []
     var measuredFps: Double = 30
     var lastInfo = ""
-    var focusRestoreSidebar = true     // sidebar state to restore when leaving focus mode
+    var panels = PanelLayout()         // sidebar across focus mode
     var galleryWindow: NSWindow?
 
     // Facecam + microphone layers
@@ -225,5 +226,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }
-    func applicationWillTerminate(_ n: Notification) { session?.stop(); demoSource?.stop() }
+    func applicationWillTerminate(_ n: Notification) { stopStudioObservers(); session?.stop(); demoSource?.stop() }
 }

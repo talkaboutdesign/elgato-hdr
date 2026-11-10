@@ -160,7 +160,7 @@ extension AppDelegate {
     func selectColor(mode: ColorMode) {
         colorMode = mode; UserDefaults.standard.set(colorMode.rawValue, forKey: "color")
         refreshChecks(); renderer?.colorMode = colorMode
-        if let s = session, s.w > 0 { state.applyStats(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: measuredFps, nominal: nominalFps), latencyMs: state.latencyMs, demo: demoSource != nil) }
+        if let s = session, s.w > 0 { state.formatSignal(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: measuredFps, nominal: nominalFps)) }
     }
     @objc func toggleMute() {
         audio.muted.toggle(); state.muted = audio.muted; UserDefaults.standard.set(audio.muted, forKey: "muted"); refreshChecks()

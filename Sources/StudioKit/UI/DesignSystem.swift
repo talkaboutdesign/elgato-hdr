@@ -52,6 +52,11 @@ enum DS {
         static var fade: Animation { .easeInOut(duration: 0.25) }
         /// Moving transitions become plain opacity under Reduce Motion.
         static func transition(_ t: AnyTransition) -> AnyTransition { reduceMotion ? .opacity : t }
+        /// Rolling digits and symbol swaps move content; under Reduce Motion they cross-fade.
+        static var numericText: ContentTransition { reduceMotion ? .opacity : .numericText() }
+        static var symbolReplace: ContentTransition { reduceMotion ? .opacity : .symbolEffect(.replace) }
+        /// Press feedback scale; none under Reduce Motion.
+        static func pressScale(_ pressed: Bool) -> CGFloat { pressed && !reduceMotion ? 0.97 : 1 }
     }
 }
 
@@ -80,7 +85,7 @@ struct PillButton<Label: View>: View {
                 }
                 .overlay { Capsule().strokeBorder(SwiftUI.Color.white.opacity(prominent ? 0.18 : 0.06)) }
                 .contentShape(Capsule())
-                .scaleEffect(pressed ? 0.97 : 1)
+                .scaleEffect(DS.Motion.pressScale(pressed))
                 .opacity(enabled ? 1 : 0.5)
         }
         .buttonStyle(PressTracking(pressed: $pressed))
@@ -192,7 +197,7 @@ struct StatusPill: View {
                     .onAppear { pulse = true }
             }
             Text(text).font(.system(size: 12, weight: .medium).monospacedDigit())
-                .contentTransition(.numericText())
+                .contentTransition(DS.Motion.numericText)
                 .lineLimit(1)
         }
         .padding(.horizontal, 10).frame(height: 26)
@@ -340,7 +345,7 @@ struct SegmentedSwitch<T: Hashable>: View {
                             RoundedRectangle(cornerRadius: DS.Radius.control - 1, style: .continuous)
                                 .fill(DS.Color.raised)
                                 .shadow(color: .black.opacity(0.18), radius: 1, y: 0.5)
-                                .matchedGeometryEffect(id: "sel", in: ns)
+                                .modifier(SlidingSelection(ns: ns))
                         }
                     }
                     .contentShape(Rectangle())
@@ -373,7 +378,7 @@ struct LabeledSlider: View {
                 Text(label).font(.system(size: 12)).foregroundStyle(.secondary)
                 Spacer()
                 Text(format(value)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
+                    .contentTransition(DS.Motion.numericText)
             }
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { withAnimation(DS.Motion.snappy) { value = defaultValue } }
@@ -383,5 +388,13 @@ struct LabeledSlider: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
         .accessibilityValue(format(value))
+    }
+}
+
+/// The segmented switch's highlight slides between options; under Reduce Motion it cross-fades in place.
+private struct SlidingSelection: ViewModifier {
+    let ns: Namespace.ID
+    @ViewBuilder func body(content: Content) -> some View {
+        if DS.Motion.reduceMotion { content.transition(.opacity) } else { content.matchedGeometryEffect(id: "sel", in: ns) }
     }
 }
