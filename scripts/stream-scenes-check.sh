@@ -6,7 +6,8 @@
 #   CHECK_SCENES=my-scenes.json CHECK_SCRIPT="9:scene=Overlays" CHECK_PROBES="10,11,12,13" scripts/stream-scenes-check.sh
 # CHECK_SCENES is copied, never written. CHECK_ASSETS is the overlay asset folder (default: an empty one in the
 # output folder). CHECK_PROBES are extra stream times (seconds) to extract frames at. CHECK_RECORD=<seconds> also
-# records during the stream (from 4 s after launch). CHECK_LIVE_FOR is the stream length (default 25 s). Ports
+# records during the stream (from 4 s after launch). CHECK_LIVE_FOR is the stream length (default 25 s); CHECK_ARGS
+# adds app arguments (for example --stream-restart-after 8, a capture restart while live). Ports
 # default to 23935 (wide) and 23936 (vertical).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,6 +18,8 @@ mkdir -p "$out/frames"
 wide_port="${CHECK_WIDE_PORT:-23935}" tall_port="${CHECK_TALL_PORT:-23936}"
 script="${CHECK_SCRIPT:-8:next,12:punch,16:next}"
 live_for="${CHECK_LIVE_FOR:-25}"
+extra=()
+if [[ -n "${CHECK_ARGS:-}" ]]; then read -ra extra <<< "$CHECK_ARGS"; fi
 pids=()
 cleanup() { for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
@@ -37,7 +40,7 @@ JSON
 EHDR_STREAM_KEY=test EHDR_STREAMING_FILE="$out/streaming.json" EHDR_SCENES_FILE="$scenes" \
     EHDR_ASSETS_DIR="${CHECK_ASSETS:-$out/Assets}" "dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" \
     --demo-source "${CHECK_SOURCE:-2560x1440@60}" --demo-camera -presentation game -recordingsDir "$out/recordings" \
-    ${CHECK_RECORD:+--record "$CHECK_RECORD"} --scene-script "$script" --go-live-for "$live_for" > "$out/app.log" 2>&1 &
+    ${CHECK_RECORD:+--record "$CHECK_RECORD"} --scene-script "$script" --go-live-for "$live_for" ${extra[@]+"${extra[@]}"} > "$out/app.log" 2>&1 &
 app=$!; pids+=("$app")
 for ((i=0;i<live_for+25;i++)); do kill -0 "$app" 2>/dev/null || break; sleep 1; done
 if kill -0 "$app" 2>/dev/null; then echo 'FAIL: app did not terminate'; exit 1; fi

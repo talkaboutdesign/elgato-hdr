@@ -57,7 +57,7 @@ window, stream and (later) the replay in the editor agree.
 
 ### Punch-in zoom
 
-Holding ⌃Space (or toggling ⌃Z) zooms the game layer to 1.6× around its current pan centre with the same spring;
+Holding ⌃⇧Space (or toggling ⌃Z) zooms the game layer to 1.6× around its current pan centre with the same spring;
 releasing returns. Arrow keys while zoomed move the focus. It scales the game layer's `src` crop in every scene.
 The amount is a setting (1.3…2.5×).
 
@@ -90,7 +90,8 @@ Generalize today's camera-only interaction:
   layer: position and size fields, fit or fill, zoom, corner roundness, border, shadow, mirror, opacity. A "Copy
   layout to 9:16 / 16:9" action. Transition style and duration. The camera controls plan 13 put here move into the
   camera layer's inspector.
-- Menu **Scenes**: the scene list with ⌃1…⌃9, Next/Previous (⌃→ / ⌃←), transition style.
+- Menu **Scenes**: the scene list with ⌃1…⌃9, Next/Previous (⌃⇧→ / ⌃⇧←), transition style. (⌃Space and ⌃← / ⌃→
+  alone belong to macOS: input sources and Mission Control.)
 
 ### Event log (additive fields in `Project`)
 

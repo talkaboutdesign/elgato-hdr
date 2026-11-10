@@ -67,7 +67,11 @@ final class StreamController {
 
     var isActive: Bool { session != nil || pendingStart != nil }
 
-    func replaceRenderer(_ renderer: Renderer) { session?.replaceRenderer(renderer) }
+    func replaceRenderer(_ renderer: Renderer) {
+        guard let session else { return }
+        session.replaceRenderer(renderer)
+        log("stream: capture restarted; \(session.activeCanvases.count) lane(s) moved to the new renderer")
+    }
 
     // MARK: Configuration
 
