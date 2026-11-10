@@ -21,16 +21,18 @@ final class FakeRTMPServer {
     var rejectSession = 0
     var rejectOptional = false
     var malformedConnect = false
+    /// The rejection's description; the default names the test key so redaction can be checked.
+    var rejectDescription = "Invalid secret-test-key"
     private var sentBytes: UInt64 = 3073
     var wireBytes: UInt64 { queue.sync { sentBytes } }
     var onMessage: ((Int, RTMPMessage) -> Void)?
     var messages: [(Int, RTMPMessage)] { queue.sync { recorded } }
     var port: UInt16 { listener.port!.rawValue }
 
-    init() throws {
+    init(port: UInt16 = 0) throws {
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
         let p = NWParameters(tls: nil, tcp: tcp)
-        p.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        p.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port == 0 ? .any : NWEndpoint.Port(rawValue: port)!)
         listener = try NWListener(using: p)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { state in if case .ready = state { ready.signal() }; if case .failed = state { ready.signal() } }
@@ -101,7 +103,7 @@ final class FakeRTMPServer {
                 case "publish":
                     command(s, [.string("onStatus"), .number(0), .null, .object([
                         "code": .string((reject || s.number == rejectSession) ? "NetStream.Publish.BadName" : "NetStream.Publish.Start"),
-                        "description": .string((reject || s.number == rejectSession) ? "Invalid secret-test-key" : "Started")
+                        "description": .string((reject || s.number == rejectSession) ? rejectDescription : "Started")
                     ])], stream: 1)
                 default: break
                 }

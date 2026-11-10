@@ -93,7 +93,7 @@ final class StudioWindowController: NSWindowController, NSToolbarDelegate {
         switch id {
         case .canvas: return hosted(CanvasSwitch(), label: "Canvas", tip: "Live 16:9 and 9:16 canvases are coming with scenes")
         case .record: return hosted(RecordButton(state: state), label: "Record", tip: "Start or stop recording (⌘R)")
-        case .goLive: return hosted(GoLiveButton(state: state), label: "Go Live", tip: "Streaming arrives in a later update")
+        case .goLive: return hosted(GoLiveButton(state: state), label: "Go Live", tip: "Go live to your stream destinations (⇧⌘L)")
         default: return nil
         }
     }

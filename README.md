@@ -76,12 +76,24 @@ open "dist/Elgato HDR.app"
 
 ### The studio window
 
-- **Toolbar:** the **Record** button turns into a running timer while recording. **Go Live** and the 16:9 / 9:16 canvas switch are shown greyed out until streaming and scenes arrive.
+- **Toolbar:** the **Record** button turns into a running timer while recording. **Go Live** shows how many destinations are on; clicking it lists them with switches and a confirm button, so going live always takes two clicks. While live it reads **LIVE 12:34** and opens per-destination health with **End Stream**. The 16:9 / 9:16 canvas switch stays greyed out until scenes arrive.
 - **Picture:** the live game, letterboxed to any window size. The status pill in the bottom-left corner shows the signal and the delay to the screen (or *Connecting…*, *No signal*, *Demo source*); it fades away when you stop moving the mouse.
 - **Bottom bar:** the current layout, game-audio monitoring and a live microphone meter.
-- **Sidebar** (⌥⌘S): **Scene** holds the camera window (device, shape, aspect, size, position, mirror, border, shadow) and the picture settings; **Audio** holds game monitoring and the microphone with its level; **Stream** is where destinations will live.
+- **Sidebar** (⌥⌘S): **Scene** holds the camera window (device, shape, aspect, size, position, mirror, border, shadow) and the picture settings; **Audio** holds game monitoring and the microphone with its level; **Stream** lists your destinations with their switches and, while live, each one's state, bitrate, dropped frames and uptime, plus the output settings (resolution, frame rate, bitrate with the total upload, mic delay).
 - **Focus mode** (⌘F): full screen with the sidebar and bottom bar out of the way, so the game fills the display. Move the pointer to the top edge for the toolbar; leaving full screen brings the panels back as they were.
 - Messages such as *Recording saved* appear briefly at the top of the picture instead of in the window title.
+
+### Streaming
+
+Add Twitch, YouTube, Kick or any RTMP/RTMPS server in the sidebar's **Stream** tab (or **Stream → Add Destination…**):
+pick the service, paste the stream key (the URL is prefilled for Twitch and YouTube; Kick gives you a personal URL),
+choose 16:9 or 9:16, and use **Test Connection** to check URL and key without going live. Every destination on the
+same canvas shares one encode; each uploads its own copy, so three destinations at 6,000 kbps need about 18.5 Mbps
+of upload. While live you can switch single destinations off and on; one failing never stops the others.
+
+Stream keys are stored in your login Keychain, never in files or logs. The app is ad-hoc signed until it is
+notarized (plan 90), so after installing a new build macOS may ask for your password the first time the app reads
+a saved key; choose **Always Allow**. If you deny it, enter the key again in the destination's sheet.
 
 ### Editing and exporting
 
@@ -117,6 +129,8 @@ Exports/       Rendered videos
 | Record | Start / Stop Recording | ⌘R (also the toolbar's Record button) |
 | Record | Recordings Library | ⌘O |
 | Record | Show Recordings in Finder | — |
+| Stream | Go Live… / Stream Health… | ⇧⌘L (also the toolbar's Go Live button) |
+| Stream | End Stream, Add Destination…, Destinations and Settings | — |
 | View | Show Live View | ⌘0 |
 | View | Focus Mode (Full Screen) | ⌘F |
 | View | Hide / Show Sidebar | ⌥⌘S |
@@ -216,6 +230,12 @@ Demo mode uses synthetic P010 game video, game audio, a 720p camera and mono mic
 camera/microphone access. Use both flags to bypass saved real-device selections. The moving picture flashes with
 a 50 ms 1 kHz beep each second. Recordings and exports use the normal code paths.
 Logs are in `~/Library/Logs/Elgato HDR.log` and stderr.
+
+Streaming without touching your own destinations or keys: `EHDR_STREAMING_FILE=<path>` uses another
+`streaming.json`, `EHDR_KEYCHAIN_SERVICE=<name>` another Keychain service, and `--go-live-for <seconds>` goes live to
+the enabled destinations and quits afterwards (with `EHDR_STREAM_KEY` as the key for all of them; used by
+`scripts/stream-selftest.sh`). Debug builds take `EHDR_STREAM_UI="tab@1,popover@4,sheet:twitch@8,close@12"` to open
+the stream UI for `EHDR_SNAPSHOT` screenshots.
 
 `RECORD_GOLDENS=1 swift test --filter CompositorGoldenTests` regenerates the twelve PQ/HLG/SDR layout goldens;
 review changes before committing. Metal tests skip without a Metal device; export tests skip without hardware HEVC.

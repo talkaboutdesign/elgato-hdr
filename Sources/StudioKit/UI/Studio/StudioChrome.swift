@@ -54,14 +54,10 @@ struct RecordButton: View {
     }
 }
 
+/// Idle, connecting and live states and both popovers are in `UI/Studio/Stream/GoLiveControl.swift`.
 struct GoLiveButton: View {
     let state: StudioState
-    var body: some View {
-        let available = state.streaming != .unavailable
-        PillButton("Go Live", systemImage: "dot.radiowaves.left.and.right", tint: DS.Color.live, prominent: available,
-                   help: available ? "Go Live" : "Streaming arrives in a later update") { state.actions.goLive() }
-            .disabled(!available)
-    }
+    var body: some View { GoLiveControl(state: state) }
 }
 
 // MARK: - Overlays

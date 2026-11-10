@@ -12,7 +12,7 @@ final class CompositionInstruction: NSObject, AVVideoCompositionInstructionProto
     let passthroughTrackID = kCMPersistentTrackID_Invalid
     let screenTrack: CMPersistentTrackID
     let cameraTrack: CMPersistentTrackID
-    let composition: Composition
+    let plan: RenderPlan
     let canvas: CGSize
     let outTransfer: Int32
     let screenTransfer: Int32       // assumed for game frames that carry no transfer tag
@@ -20,27 +20,30 @@ final class CompositionInstruction: NSObject, AVVideoCompositionInstructionProto
     let cameraSize: CGSize?
     let hdrOutput: Bool
 
-    init(timeRange: CMTimeRange, screenTrack: CMPersistentTrackID, cameraTrack: CMPersistentTrackID, composition: Composition, canvas: CGSize,
+    init(timeRange: CMTimeRange, screenTrack: CMPersistentTrackID, cameraTrack: CMPersistentTrackID, plan: RenderPlan,
          outTransfer: Int32, screenTransfer: Int32, screenSize: CGSize, cameraSize: CGSize?) {
         self.timeRange = timeRange; self.screenTrack = screenTrack; self.cameraTrack = cameraTrack
-        self.composition = composition; self.canvas = canvas; self.outTransfer = outTransfer; self.screenTransfer = screenTransfer
+        self.plan = plan; self.canvas = plan.canvasSize; self.outTransfer = outTransfer; self.screenTransfer = screenTransfer
         self.screenSize = screenSize; self.cameraSize = cameraSize; hdrOutput = outTransfer != 2
         requiredSourceTrackIDs = [screenTrack, cameraTrack].filter { $0 != kCMPersistentTrackID_Invalid }.map { NSNumber(value: $0) }
     }
 }
 
-/// Base compositor. Sources arrive as 10-bit biplanar YCbCr; the HDR subclass writes 10-bit P010 (BT.2020), the SDR
+/// Base compositor. Sources keep their native 8/10-bit biplanar YCbCr; HDR writes 10-bit P010 (BT.2020), SDR
 /// one writes 8-bit BGRA (BT.709).
 class LayerCompositor: NSObject, AVVideoCompositing {
     class var hdr: Bool { false }
     var sourcePixelBufferAttributes: [String: any Sendable]? {
-        [kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange],
+        [kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange],
          kCVPixelBufferMetalCompatibilityKey as String: true]
     }
     var requiredPixelBufferAttributesForRenderContext: [String: any Sendable] {
         [kCVPixelBufferPixelFormatTypeKey as String: [Self.hdr ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA],
          kCVPixelBufferMetalCompatibilityKey as String: true]
     }
+    // Keep SDR camera samples in their own encoding. Otherwise AVFoundation converts them to the game's PQ
+    // space with different SDR-white levels in AVAssetImageGenerator and AVAssetReader.
+    var canConformColorOfSourceFrames: Bool { true }
     var supportsHDRSourceFrames: Bool { true }
     var supportsWideColorSourceFrames: Bool { true }
     let renderQueue = DispatchQueue(label: "compositor")
@@ -57,14 +60,14 @@ class LayerCompositor: NSObject, AVVideoCompositing {
             }
             let core = MetalCore.shared
             var keep: [CVMetalTexture] = []
-            var sources: [SourceKey: SourceInfo] = [:], textures: [SourceKey: LayerTextures.Kind] = [:]
+            var textures: [SourceKey: LayerTextures.Kind] = [:]
             for (key, track, size, fallback) in [(SourceKey.game, ins.screenTrack, Optional(ins.screenSize), ins.screenTransfer), (.camera, ins.cameraTrack, ins.cameraSize, 2)] {
-                guard track != kCMPersistentTrackID_Invalid, let size = size, let pb = request.sourceFrame(byTrackID: track), let p = core.planes(pb) else { continue }
+                guard track != kCMPersistentTrackID_Invalid, size != nil, let pb = request.sourceFrame(byTrackID: track), let p = core.planes(pb) else { continue }
                 let tags = MetalCore.colorTags(pb, fallback: fallback)
-                keep += p.2; sources[key] = SourceInfo(size: size)
+                keep += p.2
                 textures[key] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: tags.transfer, bt709: tags.bt709)
             }
-            let layers = DrawLayer.pair(SceneResolver.resolve(ins.composition, canvas: ins.canvas, sources: sources), textures)
+            let layers = DrawLayer.pair(ins.plan.layers(atTimelineMs: request.compositionTime.seconds * 1000), textures)
             guard let cb = core.queue.makeCommandBuffer() else { request.finish(with: NSError(domain: "Compositor", code: 2)); return }
             let w = CVPixelBufferGetWidth(out), h = CVPixelBufferGetHeight(out)
             if Self.hdr {
@@ -77,14 +80,14 @@ class LayerCompositor: NSObject, AVVideoCompositing {
                     request.finish(with: NSError(domain: "Compositor", code: 3)); return
                 }
                 keep += [yRef, cRef]
-                core.encodeLayers(cb, target: mid, canvas: ins.canvas, background: ins.composition.backgroundColor, outTransfer: ins.outTransfer, layers: layers)
+                core.encodeLayers(cb, target: mid, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, layers: layers)
                 core.encodeConvert(cb, fragment: "lumaFrag", source: mid, target: yT)
                 core.encodeConvert(cb, fragment: "chromaFrag", source: mid, target: cT)
                 tag(out, hdrTransfer: ins.outTransfer)
             } else {
                 guard let (t, ref) = core.texture(out, .bgra8Unorm) else { request.finish(with: NSError(domain: "Compositor", code: 3)); return }
                 keep.append(ref)
-                core.encodeLayers(cb, target: t, canvas: ins.canvas, background: ins.composition.backgroundColor, outTransfer: ins.outTransfer, layers: layers)
+                core.encodeLayers(cb, target: t, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, layers: layers)
                 tag(out, hdrTransfer: nil)
             }
             cb.addCompletedHandler { _ in

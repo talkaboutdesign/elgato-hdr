@@ -23,7 +23,7 @@ struct StudioSidebar: View {
                     switch tab {
                     case .scene: SceneTab(state: state)
                     case .audio: AudioTab(state: state)
-                    case .stream: StreamTab()
+                    case .stream: StreamTab(state: state)
                     }
                 }
                 .padding(DS.Space.l)
@@ -197,19 +197,7 @@ struct MicDbReadout: View {
     }
 }
 
-// MARK: - Stream
-
-struct StreamTab: View {
-    var body: some View {
-        VStack {
-            Spacer(minLength: 40)
-            EmptyState(systemImage: "dot.radiowaves.left.and.right", title: "Go live from here",
-                       message: "Streaming to Twitch, YouTube, Kick or your own server arrives in a later update. Your destinations and stream health will show up here.")
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
+// MARK: - Stream (UI/Studio/Stream/StreamTab.swift)
 
 // MARK: - Rows
 

@@ -17,6 +17,18 @@ let logFile: FileHandle? = {
 func log(_ s: String) {
     let d = (s + "\n").data(using: .utf8)!
     FileHandle.standardError.write(d); logFile?.write(d)
+    LogTap.shared.record(s)
+}
+
+/// Lets tests read what reached the log, for example to prove that a stream key never does.
+final class LogTap: @unchecked Sendable {
+    static let shared = LogTap()
+    private let lock = NSLock()
+    private var lines: [String]?
+    func start() { lock.lock(); lines = []; lock.unlock() }
+    /// Returns everything logged since `start` and stops collecting.
+    func stop() -> [String] { lock.lock(); defer { lines = nil; lock.unlock() }; return lines ?? [] }
+    fileprivate func record(_ s: String) { lock.lock(); lines?.append(s); lock.unlock() }
 }
 
 func readFully(_ fd: Int32, _ p: UnsafeMutableRawPointer, _ n: Int) -> Bool {

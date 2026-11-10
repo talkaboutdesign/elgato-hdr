@@ -4,14 +4,14 @@ import VideoToolbox
 
 /// Shared by the bundled --make-fixture command and export tests; never opens capture devices.
 enum FixtureProject {
-    static func make(at dir: URL) async throws -> ProjectDoc {
+    static func make(at dir: URL, frameCount: Int = 120) async throws -> ProjectDoc {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let zero: UInt64 = 1_000_000_000
         let recorder = try Recorder(url: dir.appendingPathComponent("game.mov"), width: 1920, height: 1080, fps: 60, colorMode: .pq, startNs: zero)
         let camera = try LayerWriter(cameraURL: dir.appendingPathComponent("camera.mov"), width: 1280, height: 720, startNs: zero)
         let mic = try LayerWriter(micURL: dir.appendingPathComponent("mic.mov"), startNs: zero)
         let source = DemoSource(width: 1920, height: 1080, fps: 60)
-        for frame in 0..<120 {
+        for frame in 0..<frameCount {
             var out: CVPixelBuffer?
             CVPixelBufferCreate(nil, 1920, 1080, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
                 [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary, &out)
