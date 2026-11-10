@@ -21,6 +21,11 @@ final class Renderer: NSObject {
     let layer: CAMetalLayer
     private var _overlay = LiveOverlay()
     var overlay: LiveOverlay { get { lock.lock(); defer { lock.unlock() }; return _overlay } set { lock.lock(); _overlay = newValue; lock.unlock() } }
+    private var _programOutputs: [ProgramOutput] = []
+    var programOutputs: [ProgramOutput] {
+        get { lock.lock(); defer { lock.unlock() }; return _programOutputs }
+        set { lock.lock(); _programOutputs = newValue; lock.unlock() }
+    }
     var slotBuffers: [MTLBuffer] = []
     var shmTextures: [Int: (MTLTexture, MTLTexture)] = [:]   // key: slot<<40 | w<<20 | h
     var colorMode: ColorMode = .pq { didSet { applyColor() } }
@@ -130,6 +135,11 @@ final class Renderer: NSObject {
     /// Reader thread: copy the shared-memory slot into the ring on the GPU and schedule it. Never blocks on drawables.
     func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64) {
         guard let (sy, sc) = shmTextures(slot: slot, w: w, h: h) else { return }
+        let outputs = programOutputs
+        if !outputs.isEmpty {
+            let camera = overlay.camera?.latest
+            for output in outputs { output.gameFrame(y: sy, c: sc, size: CGSize(width: w, height: h), colorMode: colorMode, camera: camera, hostNs: arrivalNs) }
+        }
         let a = Double(arrivalNs) / 1e9
         if presentation == .immediate { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }
         if presentation == .game { gameSubmit(y: sy, c: sc, w: w, h: h, arrival: a); return }

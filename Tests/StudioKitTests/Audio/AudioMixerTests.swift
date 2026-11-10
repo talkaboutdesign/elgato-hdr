@@ -245,17 +245,22 @@ final class AudioMixerTests: XCTestCase {
         wait(for: [calls], timeout: 0.05)
     }
     func testRestartSkipsStoppedTimeAndStopCancelsQueuedTicks() {
-        let mixer = AudioMixer(blockFrames: 480, targetLatencyMs: 0)
+        let queue = DispatchQueue(label: "restart.timer")
+        let mixer = AudioMixer(blockFrames: 480, targetLatencyMs: 0, queue: queue)
         let lock = NSLock(); var starts: [UInt64] = []
         mixer.onBlock = { _, _, start in lock.lock(); starts.append(start); lock.unlock() }
         mixer.start(); Thread.sleep(forTimeInterval: 0.06); mixer.stop()
-        Thread.sleep(forTimeInterval: 0.03)
+        queue.sync {}
         lock.lock(); let stoppedCount = starts.count; lock.unlock()
         Thread.sleep(forTimeInterval: 0.15)
         lock.lock(); XCTAssertEqual(starts.count, stoppedCount); lock.unlock()
         let restart = nowNs(); mixer.start(); Thread.sleep(forTimeInterval: 0.04); mixer.stop()
+        let stoppedAt = nowNs()
+        queue.sync {}
         lock.lock(); let resumed = Array(starts.dropFirst(stoppedCount)); lock.unlock()
-        XCTAssertFalse(resumed.isEmpty); XCTAssertLessThanOrEqual(resumed.count, 5)
+        // A loaded CI host may oversleep 40 ms. Bound emitted blocks by elapsed host time, not requested sleep.
+        let maximumBlocks = Int((stoppedAt - restart) / 10_000_000) + 1
+        XCTAssertFalse(resumed.isEmpty); XCTAssertLessThanOrEqual(resumed.count, maximumBlocks)
         XCTAssertTrue(resumed.allSatisfy { $0 >= restart })
     }
     func testRealtimeDriver() throws {
