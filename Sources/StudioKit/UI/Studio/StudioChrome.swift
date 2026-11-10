@@ -6,17 +6,16 @@ import SwiftUI
 
 // MARK: - Toolbar
 
+/// Which canvas the window shows and edits. The 9:16 picture is letterboxed in the window.
 struct CanvasSwitch: View {
-    @State private var canvas = Canvas.wide
+    let state: StudioState
     var body: some View {
-        SegmentedSwitch(selection: $canvas, options: [
-            .init(value: .wide, label: "16:9", help: "Widescreen canvas"),
-            .init(value: .vertical, label: "9:16", help: "Vertical canvas"),
+        SegmentedSwitch(selection: Binding(get: { state.scenes.canvas }, set: { state.scenes.actions.setCanvas($0) }), options: [
+            .init(value: .wide, label: "16:9", help: "Show and edit the widescreen canvas"),
+            .init(value: .vertical, label: "9:16", help: "Show and edit the vertical canvas, as phones get it"),
         ], height: 26)
         .frame(width: 120)
-        .disabled(true)
-        .help("Live 16:9 and 9:16 canvases are coming with scenes")
-        .accessibilityLabel("Canvas, coming with scenes")
+        .accessibilityLabel("Canvas")
     }
 }
 
@@ -78,7 +77,8 @@ struct PillOverlay: View {
             case .noSignal: return (DS.Color.record, false)
             }
         }()
-        StatusPill(text: state.pillText, dot: dot, pulsing: pulsing)
+        // In 9:16 the game is cropped for viewers too, so the pill says which canvas this is.
+        StatusPill(text: (state.scenes.canvas == .vertical ? "9:16 view · " : "") + state.pillText, dot: dot, pulsing: pulsing)
             .opacity(chrome.pillVisible ? 1 : 0)
             .animation(DS.Motion.snappy, value: state.pillText)
             .help(state.signal.isEmpty ? state.pillText : state.signal)
@@ -135,54 +135,6 @@ struct BottomBar: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(DS.Color.panel)
         .overlay(alignment: .top) { Rectangle().fill(DS.Color.stroke).frame(height: 1) }
-    }
-}
-
-/// Placeholder until scenes (plan 22): the one live layout, and a disabled slot for more.
-struct SceneStrip: View {
-    let state: StudioState
-    var body: some View {
-        HStack(spacing: DS.Space.s) {
-            SceneChip(title: state.cameraOn ? "Game + Camera" : "Game", camera: state.cameraOn, selected: true)
-                .help("The live layout. Move the camera by dragging it on the picture.")
-            Button {} label: {
-                Image(systemName: "plus").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
-                    .frame(width: 40, height: 36)
-                    .background(RoundedRectangle(cornerRadius: DS.Radius.control + 2, style: .continuous)
-                        .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 3])).foregroundStyle(DS.Color.stroke))
-            }
-            .buttonStyle(.plain)
-            .disabled(true)
-            .help("More scenes are coming in a later update")
-            .accessibilityLabel("Add scene, coming later")
-        }
-    }
-}
-
-struct SceneChip: View {
-    let title: String
-    let camera: Bool
-    var selected = false
-    var body: some View {
-        HStack(spacing: DS.Space.s) {
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(white: 0.28), Color(white: 0.16)], startPoint: .top, endPoint: .bottom))
-                    .frame(width: 40, height: 24)
-                    .overlay(Image(systemName: "gamecontroller.fill").font(.system(size: 9)).foregroundStyle(.white.opacity(0.55)))
-                if camera {
-                    RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.white.opacity(0.85))
-                        .frame(width: 11, height: 11).padding(2)
-                }
-            }
-            Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1)
-        }
-        .padding(.leading, 6).padding(.trailing, 10).frame(height: 36)
-        .background(RoundedRectangle(cornerRadius: DS.Radius.control + 2, style: .continuous).fill(Color.white.opacity(selected ? 0.10 : 0.05)))
-        .overlay(RoundedRectangle(cornerRadius: DS.Radius.control + 2, style: .continuous)
-            .strokeBorder(selected ? Color.accentColor.opacity(0.9) : DS.Color.stroke, lineWidth: selected ? 1.5 : 1))
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 

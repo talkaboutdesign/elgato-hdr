@@ -101,7 +101,7 @@ private struct GalleryColumn: View {
                         RecordButton(state: idle).fixedSize()
                         RecordButton(state: rec)
                         GoLiveButton(state: idle).fixedSize()
-                        CanvasSwitch()
+                        CanvasSwitch(state: idle)
                     }
                 }
 

@@ -87,7 +87,7 @@ final class SceneEngineTests: XCTestCase {
         XCTAssertEqual(start.map(\.key), [.game, .camera])
         XCTAssertEqual(start, [aGame, aCam].map { var l = $0; l.opacity = 1; return l })
         // Progress 0.5: geometry half-way for both; the game is drawn at its old depth (below the camera) and its
-        // copy at the new depth (above) is half faded in.
+        // copy at the new depth (above) is fading in, late so the camera's growth reads first.
         let half = frame(st, at: time(for: 0.5))
         XCTAssertEqual(half.map(\.key), [.game, .camera, .game])
         assertRect(half[1].dst, mid(aCam.dst, bCam.dst), "camera dst")
@@ -97,7 +97,8 @@ final class SceneEngineTests: XCTestCase {
         assertRect(half[0].dst, mid(aGame.dst, bGame.dst), "game dst")
         assertRect(half[2].dst, half[0].dst, "both game copies at one place")
         XCTAssertEqual(half[0].opacity, 1, accuracy: 1e-6)
-        XCTAssertEqual(half[2].opacity, 0.5, accuracy: 1e-3)
+        XCTAssertEqual(half[2].opacity, SceneEasing.rise(0.5), accuracy: 1e-3)
+        XCTAssertEqual(SceneEasing.rise(0.3), 0); XCTAssertEqual(SceneEasing.rise(0.9), 1)
         // Progress 1: the target scene.
         XCTAssertEqual(frame(st, at: t0 + 400 * ms), b)
         XCTAssertFalse(st.isTransitioning(atNs: t0 + 400 * ms))
@@ -197,12 +198,17 @@ final class SceneEngineTests: XCTestCase {
         for (m, q) in zip(mid, plain) where m.key == .game { XCTAssertEqual(m.src.width, q.src.width / 2, accuracy: 1e-9) }
     }
 
-    /// The 9:16 canvas transitions with the same rules.
+    /// The 9:16 canvas transitions with the same rules. Gameplay's camera and game sit side by side (stacked), so
+    /// the game, which has no partner in Just Camera, goes beneath the camera: the camera grows over it.
     func testVerticalMorph() {
         let st = state(gameplay, justCamera, .morph)
         let a = resolve(gameplay, .vertical), b = resolve(justCamera, .vertical)
         let half = frame(st, at: time(for: 0.5), .vertical)
-        let cam = half.first { $0.key == .camera }!
-        assertRect(cam.dst, mid(a.first { $0.key == .camera }!.dst, b[0].dst))
+        XCTAssertEqual(half.map(\.key), [.game, .camera])
+        XCTAssertEqual(half[0].opacity, 1, accuracy: 1e-6, "held until the camera covers it")
+        assertRect(half[1].dst, mid(a.first { $0.key == .camera }!.dst, b[0].dst))
+        // And back: the game appears beneath the shrinking camera at once.
+        let back = frame(state(justCamera, gameplay, .morph), at: time(for: 0.5), .vertical)
+        XCTAssertEqual(back.map(\.key), [.game, .camera]); XCTAssertEqual(back[0].opacity, 1, accuracy: 1e-6)
     }
 }

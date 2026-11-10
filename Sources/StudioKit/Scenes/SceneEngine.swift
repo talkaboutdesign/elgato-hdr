@@ -26,6 +26,9 @@ enum SceneEasing {
     static func hold(_ e: Double) -> Double { min(1, max(0, (1 - e) / 0.25)) }
     /// The mirror image: reaches 1 within the first quarter, for a layer that starts hidden under an opaque one.
     static func early(_ e: Double) -> Double { min(1, max(0, e / 0.25)) }
+    /// For a layer passing in front of another: nothing for the first third, all of it by 85%, so the motion reads
+    /// before the two trade places.
+    static func rise(_ e: Double) -> Double { let x = min(1, max(0, (e - 0.35) / 0.5)); return x * x * (3 - 2 * x) }
 }
 
 /// Live zoom on the game layer. Engaging and releasing both spring from the scale at that moment, so pressing again
@@ -182,7 +185,9 @@ struct SceneBlend {
     /// Layers bottom first. z-order follows the target. A matched layer that rises above another matched layer is
     /// also drawn at its old depth while its copy at the new depth fades in, so it passes through instead of popping
     /// in front. Unmatched old layers stay just above the matched layer they sat above and fade out (late, if
-    /// something opaque will cover them anyway); unmatched new layers fade in (early, if they start covered).
+    /// something opaque will cover them anyway); unmatched new layers fade in (early, if they start covered). An
+    /// unmatched layer that overlaps nothing beneath it in its own picture goes to the bottom, where its depth makes
+    /// no difference to that picture, so moving layers glide over it rather than through it.
     func mix(_ a: [ResolvedLayer], _ b: [ResolvedLayer], e: Double, match: Bool) -> [ResolvedLayer] {
         var oldFor = [Int?](repeating: nil, count: b.count), used = Set<Int>()
         if match {
@@ -191,10 +196,15 @@ struct SceneBlend {
             }
         }
         let newFor = Dictionary(uniqueKeysWithValues: oldFor.enumerated().compactMap { j, i in i.map { ($0, j) } })
+        func overlaps(_ r: CGRect, _ s: CGRect) -> Bool { let x = r.intersection(s); return !x.isNull && x.width * x.height > 1 }
+        func free(_ l: [ResolvedLayer], _ i: Int) -> Bool { match && !l[..<i].contains { overlaps($0.dst, l[i].dst) } }
         // Old layers not matched go after the target position of the matched layer below them (-1: bottom).
         var oldAfter: [Int: [Int]] = [:]
         var anchor = -1
-        for i in a.indices { if let j = newFor[i] { anchor = j } else { oldAfter[anchor, default: []].append(i) } }
+        for i in a.indices {
+            if let j = newFor[i] { anchor = j } else { oldAfter[free(a, i) ? -1 : anchor, default: []].append(i) }
+        }
+        let sunk = b.indices.filter { oldFor[$0] == nil && free(b, $0) }
         // Rising layers: matched j whose old index is below that of a matched layer it now sits above.
         var lowerCopyBefore: [Int: [Int]] = [:]   // target index of the lowest layer it rises over -> rising layers
         var rising = Set<Int>()
@@ -204,9 +214,10 @@ struct SceneBlend {
         }
         var parts: [Part] = []
         for i in oldAfter[-1] ?? [] { parts.append(.old(i)) }
+        for j in sunk { parts.append(.new(j)) }
         for (j, i) in oldFor.enumerated() {
             for r in lowerCopyBefore[j] ?? [] { parts.append(.lowerCopy(oldFor[r]!, r)) }
-            if let i = i { parts.append(.matched(i, j)) } else { parts.append(.new(j)) }
+            if let i = i { parts.append(.matched(i, j)) } else if !sunk.contains(j) { parts.append(.new(j)) }
             for o in oldAfter[j] ?? [] { parts.append(.old(o)) }
         }
         // What lies above each part, at the start (old geometry) and at the end (new geometry).
@@ -226,7 +237,7 @@ struct SceneBlend {
             switch p {
             case .matched(let i, let j):
                 var l = lerp(a[i], b[j], e)
-                if rising.contains(j) { l.opacity *= e }
+                if rising.contains(j) { l.opacity *= SceneEasing.rise(e) }
                 out.append(l)
             case .lowerCopy(let i, let j):
                 var l = lerp(a[i], b[j], e); l.opacity *= SceneEasing.hold(e); out.append(l)

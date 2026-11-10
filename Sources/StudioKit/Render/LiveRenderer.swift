@@ -174,7 +174,7 @@ final class Renderer: NSObject {
     /// and arrive a refresh or two late, so they must not gate or trigger drawing.
     func gameSubmit(y: MTLTexture, c: MTLTexture, w: Int, h: Int, arrival: Double) {
         lock.lock()
-        if gameQueued >= 3 { pacingDrops += 1; lock.unlock(); return }
+        if gameQueued >= 3 { pacingDrops += 1; _lastGame = LiveGameFrame(y: y, c: c, size: CGSize(width: w, height: h), transfer: colorMode.transfer); lock.unlock(); return }
         gameQueued += 1
         lock.unlock()
         let ok = drawNow(y: y, c: c, w: w, h: h, arrival: arrival, onPresented: { [weak self] in
@@ -206,9 +206,9 @@ final class Renderer: NSObject {
 
     @discardableResult
     func drawNow(y yT: MTLTexture, c cT: MTLTexture, w gw: Int, h gh: Int, arrival: Double, onPresented: (() -> Void)? = nil) -> Bool {
+        let live = drawState(y: yT, c: cT, w: gw, h: gh)   // before the drawable: thumbnails need the frame even if it is not shown
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
-        let live = drawState(y: yT, c: cT, w: gw, h: gh)
         let (w, h) = live.canvas == .wide ? (16, 9) : (9, 16)   // the letterbox fits the canvas, not the game
         let scale = min(dw / Double(w), dh / Double(h))
         // Whole pixels: layer edges are anti-aliased, so a letterbox at a half-pixel offset would blend the game's
@@ -262,7 +262,7 @@ final class Renderer: NSObject {
         scene.frame(canvas: canvas, size: size, sources: sources, atNs: atNs)
     }
 
-    /// The game frame drawn last, for thumbnails. In Smooth mode it is a ring texture and otherwise shared memory, so
+    /// The game frame drawn (or dropped) last, for thumbnails. In Smooth mode it is a ring texture and otherwise shared memory, so
     /// a later frame may overwrite it while a thumbnail reads it; that only ever tears a 160-pixel thumbnail.
     var latestGameFrame: LiveGameFrame? { lock.lock(); defer { lock.unlock() }; return _lastGame }
 

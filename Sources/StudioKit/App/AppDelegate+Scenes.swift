@@ -43,6 +43,9 @@ extension AppDelegate {
         installSceneKeys()
         startThumbnails()
         scheduleSceneTorture()
+        #if DEBUG
+        startSceneDebug()
+        #endif
         trackChanges({ [weak self] in self?.state.focusMode ?? false }) { [weak self] focus in self?.view.editingEnabled = !focus }
         sceneDidChange(save: false)
         log("scenes: \(m.collection.scenes.count) scenes, active \(m.active.name), canvas \(m.canvas.label), transition \(m.collection.transition.style.rawValue) \(Int(m.collection.transition.durationMs)) ms")
