@@ -141,6 +141,8 @@ final class KeychainStoreTests: XCTestCase {
         }
         do { return try result!.get() }
         catch KeychainStore.Failure.accessDenied { throw XCTSkip("Keychain \(what) needs user interaction here; skipped") }
+        // CI runners may have no usable login keychain (errSecNoSuchKeychain, errSecNotAvailable, missing entitlement).
+        catch KeychainStore.Failure.unexpected(let status) { throw XCTSkip("Keychain \(what) unavailable here (OSStatus \(status)); skipped") }
     }
 
     func testSetGetUpdateDelete() throws {
