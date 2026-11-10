@@ -45,6 +45,9 @@ final class EditorModel {
     @ObservationIgnored let undoManager: UndoManager = {
         let u = UndoManager(); u.groupsByEvent = false; u.levelsOfUndo = 200; return u
     }()
+    /// Text fields (names) keep their own typing history: AppKit's field editor registers undo without opening a
+    /// group, which the explicitly grouped project history above would reject.
+    @ObservationIgnored let textUndoManager = UndoManager()
     @ObservationIgnored let filmstrip: FilmstripCache
     @ObservationIgnored let waveforms: WaveformCache
     @ObservationIgnored var exportQueue: ExportQueue!
@@ -66,6 +69,10 @@ final class EditorModel {
     @ObservationIgnored var pendingSeek: CMTime?
     @ObservationIgnored var seekStats = SeekStats()
     @ObservationIgnored var scrubStats = SeekStats()
+    @ObservationIgnored var exactStats = SeekStats()
+    @ObservationIgnored var pendingFast = false
+    @ObservationIgnored var settling = false
+    @ObservationIgnored var settleWork: DispatchWorkItem?
     @ObservationIgnored var scrubbing = false
     @ObservationIgnored var reverseTimer: Timer?
 
@@ -159,6 +166,12 @@ final class EditorModel {
         DispatchQueue.main.async { [weak self] in self?.refreshUndoState() }
     }
 
+    /// What a window hosting this editor answers for ⌘Z: the project, or the focused text field's own history.
+    func undoManager(for window: NSWindow) -> UndoManager? {
+        if window.firstResponder is NSText { return textUndoManager }
+        return editsLocked ? nil : undoManager
+    }
+
     func refreshUndoState() {
         let u = undoManager
         let can = u.canUndo && !editsLocked, canR = u.canRedo && !editsLocked
@@ -239,7 +252,6 @@ final class EditorModel {
     func rebuild() {
         buildGen += 1
         let gen = buildGen, canvas = canvas, range = range
-        let keep = player.currentTime()
         let started = CACurrentMediaTime()
         Task {
             do {
@@ -257,10 +269,11 @@ final class EditorModel {
                     if abs(d - self.duration) > 0.0005 { self.duration = d }
                     if self.axis.duration != d { self.axis.duration = d; self.axis.clampOffset() }
                     self.applyPlaybackBounds()
+                    // The playhead is the model's: it may have moved while the layers loaded (Make Short seeks, then
+                    // switches canvas). A first load starts at the first kept frame.
                     let start = TimelineEdits.kept(self.project).first.map { $0.startMs / 1000 } ?? 0
-                    let target = keep.isValid && gen > 1 ? keep : CMTime(seconds: start, preferredTimescale: 60000)
-                    self.time = target.seconds
-                    self.requestSeek(target)
+                    if gen == 1 && self.time == 0 { self.time = start }
+                    self.requestSeek(CMTime(seconds: self.time, preferredTimescale: 60000))
                     self.loadError = nil
                     if gen == 1 { log(String(format: "editor: preview ready in %.0f ms (%@)", (CACurrentMediaTime() - started) * 1000, self.doc.dir.lastPathComponent)) }
                 }

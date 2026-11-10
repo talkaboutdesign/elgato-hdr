@@ -37,7 +37,6 @@ struct ExportSheet: View {
                     .transition(DS.Motion.transition(.opacity.combined(with: .move(edge: .top))))
             }
 
-            Spacer(minLength: DS.Space.l)
             HStack {
                 Button { NSWorkspace.shared.open(model.doc.exportsDir.deletingLastPathComponent()) } label: {
                     Label("Saved in the project's Exports folder", systemImage: "folder").font(.system(size: 11))
@@ -55,10 +54,10 @@ struct ExportSheet: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(jobCount == 0)
             }
-            .padding(DS.Space.xl)
+            .padding(DS.Space.xl).padding(.top, DS.Space.s)
         }
         .frame(width: 600)
-        .frame(minHeight: 430)
+        .fixedSize(horizontal: false, vertical: true)
         .background(DS.Color.panel)
     }
 

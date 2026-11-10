@@ -137,7 +137,7 @@ struct SceneLane: View {
                 let color = TimelineStyle.sceneColor(run.sceneID, in: p)
                 let r = CGRect(x: x0 + 1, y: 1, width: max(1, x1 - x0 - 2), height: h - 2)
                 let shape = Path(roundedRect: r, cornerRadius: 5)
-                ctx.fill(shape, with: .color(color.opacity(isSel ? 0.95 : isHot ? 0.82 : 0.7)))
+                ctx.fill(shape, with: .color(color.opacity(isSel ? 1 : isHot ? 0.94 : 0.86)))
                 if let t = run.span?.transition, t.style != .cut, run.startMs > 0 {
                     // The transition as a soft wedge at the start of the span.
                     let w = min(r.width / 2, max(4, t.durationMs / 1000 * axis.pps))
@@ -195,7 +195,7 @@ struct ZoomLane: View {
                 curve.move(to: CGPoint(x: r.minX, y: r.maxY)); curve.addLine(to: CGPoint(x: r.minX + ramp, y: r.minY + 3))
                 curve.addLine(to: CGPoint(x: r.maxX - ramp, y: r.minY + 3)); curve.addLine(to: CGPoint(x: r.maxX, y: r.maxY)); curve.closeSubpath()
                 var c = ctx; c.clip(to: Path(roundedRect: r, cornerRadius: 5))
-                c.fill(curve, with: .color(TimelineStyle.zoom.opacity(on ? 0.95 : hot ? 0.85 : 0.72)))
+                c.fill(curve, with: .color(TimelineStyle.zoom.opacity(on ? 1 : hot ? 0.94 : 0.86)))
                 if r.width > 40 {
                     let label = ctx.resolve(Text(String(format: "%.1f×", z.scale)).font(.system(size: 10, weight: .bold).monospacedDigit()).foregroundStyle(.white))
                     c.draw(label, at: CGPoint(x: max(r.minX, 0) + 8 + min(ramp, 12), y: h / 2 + 1), anchor: .leading)
@@ -380,7 +380,7 @@ struct PlayheadOverlay: View {
         ZStack(alignment: .topLeading) {
             if x > -8 && x < width + 8 {
                 Rectangle().fill(TimelineStyle.playhead).frame(width: 1.5, height: layout.height).offset(x: x - 0.75)
-                PlayheadCap().fill(TimelineStyle.playhead).frame(width: 11, height: 14).offset(x: x - 5.5, y: 4)
+                PlayheadCap().fill(TimelineStyle.playhead).frame(width: 11, height: 14).offset(x: min(max(x, 5.5), width - 5.5) - 5.5, y: 4)
                     .shadow(color: .black.opacity(0.3), radius: 1, y: 0.5)
             }
         }

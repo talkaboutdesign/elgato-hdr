@@ -47,6 +47,7 @@ final class LibraryNavigation {
         let m = EditorModel(doc: doc)
         growWindowForEditor()
         withAnimation(DS.Motion.gentle) { editor = m }
+        window?.title = doc.project.name
     }
 
     func back() {
@@ -56,6 +57,7 @@ final class LibraryNavigation {
         if let w = window {
             w.minSize = NSSize(width: 640, height: 440)
             if let f = frameBeforeEditor { w.setFrame(f, display: true, animate: !DS.Motion.reduceMotion) }
+            w.title = "Recordings"
             w.subtitle = ""
         }
         frameBeforeEditor = nil
@@ -83,9 +85,9 @@ final class LibraryNavigation {
 private final class LibraryWindowDelegate: NSObject, NSWindowDelegate {
     /// ⌘Z and ⇧⌘Z reach the window, which asks here: the open project's history, none while it exports.
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
-        guard let m = LibraryNavigation.shared.editor, !m.editsLocked else { return nil }
-        return m.undoManager
+        LibraryNavigation.shared.editor?.undoManager(for: window) ?? searchUndo
     }
+    private let searchUndo = UndoManager()
     func windowWillClose(_ notification: Notification) { LibraryNavigation.shared.windowWillClose() }
 }
 
@@ -127,8 +129,7 @@ final class EditorWindows: NSObject, NSWindowDelegate {
 
     /// ⌘Z and ⇧⌘Z in the Edit menu reach the window, which asks its delegate: the project's own history.
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
-        guard let m = windows.values.first(where: { $0.0 === window })?.1, !m.editsLocked else { return nil }
-        return m.undoManager
+        windows.values.first { $0.0 === window }?.1.undoManager(for: window)
     }
 
     func windowWillClose(_ n: Notification) {
@@ -210,7 +211,8 @@ struct LibraryView: View {
         }
         .frame(minWidth: 560, minHeight: 400)
         .background(DS.Color.panel)
-        .background(WindowTitle(title: "Recordings", subtitle: lib.docs.isEmpty ? "" : "\(lib.docs.count) recording\(lib.docs.count == 1 ? "" : "s")"))
+        .background(WindowTitle(title: "Recordings", subtitle: lib.docs.isEmpty ? "" : "\(lib.docs.count) recording\(lib.docs.count == 1 ? "" : "s")",
+                                active: { LibraryNavigation.shared.editor == nil }))
         .searchable(text: $search, placement: .toolbar, prompt: "Search recordings")
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -218,7 +220,7 @@ struct LibraryView: View {
                     .init(value: .all, label: "All", help: "Every recording"),
                     .init(value: .live, label: "Live Sessions", help: "Recordings with scene switches, zooms or markers from a live session"),
                 ], height: 26)
-                .frame(width: 200)
+                .frame(width: 240)
                 .accessibilityLabel("Filter")
             }
             ToolbarItemGroup(placement: .primaryAction) {
@@ -231,7 +233,12 @@ struct LibraryView: View {
             Button("Rename") { if let d = renaming { lib.rename(d, to: newName) }; renaming = nil }
             Button("Cancel", role: .cancel) { renaming = nil }
         }
-        .onAppear { lib.reload() }
+        .onAppear {
+            lib.reload()
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["EHDR_LIBRARY_FILTER"] == "live" { filter = .live }
+            #endif
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { n in
             if (n.object as? NSWindow) === LibraryNavigation.shared.window, LibraryNavigation.shared.editor == nil { lib.reload() }
         }
@@ -345,6 +352,13 @@ struct ProjectCard: View {
         .onHover { hover = $0 }
         .contentShape(Rectangle())
         .task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+        #if DEBUG
+        .onAppear {
+            // EHDR_LIBRARY_SCRUB="<name prefix>:<frame>" shows a card mid-scrub for screenshots (no pointer in CI).
+            let v = (ProcessInfo.processInfo.environment["EHDR_LIBRARY_SCRUB"] ?? "").split(separator: ":")
+            if v.count == 2, p.name.hasPrefix(v[0]), let i = Int(v[1]) { hover = true; scrub = i; loadFrames() }
+        }
+        #endif
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(p.name), \(formatTime(p.durationMs / 1000))")
         .accessibilityHint("Double-click to open")

@@ -14,10 +14,12 @@ enum EditorHarness {
     static var showExport: ((Bool) -> Void)?
 
     static func start() {
+        // The library and editor follow the system appearance; this checks the other one without changing it.
+        if let a = env["EHDR_APPEARANCE"] { NSApp.appearance = NSAppearance(named: a == "light" ? .aqua : .darkAqua) }
         if let n = env["EHDR_LIBRARY_OPEN"].flatMap(Int.init) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 (NSApp.delegate as? AppDelegate)?.showLibrary()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + (env["EHDR_LIBRARY_OPEN_DELAY"].flatMap(Double.init) ?? 0.8)) {
                     if n < Library.shared.docs.count { LibraryNavigation.shared.open(Library.shared.docs[n]) }
                 }
             }
@@ -61,6 +63,7 @@ enum EditorHarness {
         case "undoall": while m.canUndo { m.undo() }
         case "redoall": while m.canRedo { m.redo() }
         case "key": if let c = keyCommand(arg) { m.perform(c) }
+        case "type": for k in parts.dropFirst() { postKey(k, to: m.window) }
         case "canvas": m.canvas = arg == "vertical" ? .vertical : .wide
         case "hide": m.hideRemoved = arg == "on"
         case "fit": m.fitTimeline()
@@ -72,6 +75,11 @@ enum EditorHarness {
         case "transition": if case .scene(let id?) = m.selection { m.update { TimelineEdits.setTransition(&$0, spanID: id, SceneTransition(style: .fade, durationMs: num)) } }
         case "short": if case .marker(let id) = m.selection { m.makeShort(from: id) }
         case "save": m.saveNow()
+        case "state":
+            let sel: String = { switch m.selection { case .none: "none"; case .section(let s): "section \(Int(s.startMs))-\(Int(s.endMs)) \(s.kept ? "kept" : "removed")"; case .scene: "scene"; case .zoom: "zoom"; case .marker(let id): "marker \(Int(m.marker(id)?.tMs ?? -1))" } }()
+            log(String(format: "harness: state %@ t=%.3f playing=%d rate=%.0f reverse=%d pps=%.2f fitted=%d hide=%d sections=%d markers=%d zooms=%d undo=%@ sel=%@", arg, m.time, m.playing ? 1 : 0, m.shuttleRate,
+                       m.player.currentItem?.canPlayReverse == true ? 1 : 0, m.axis.pps, m.axis.fitted ? 1 : 0, m.hideRemoved ? 1 : 0, TimelineEdits.sections(m.project).count,
+                       m.project.timeline.markers.count, m.project.timeline.zooms.count, m.undoTitle, sel))
         case "dump": m.saveNow(); try? FileManager.default.copyItem(at: m.doc.dir.appendingPathComponent("project.json"), to: URL(fileURLWithPath: arg))
         case "hover": hover(parts, m)
         case "exportsheet": showExport?(arg != "off"); delay = 1
@@ -84,11 +92,12 @@ enum EditorHarness {
         case "popover": NotificationCenter.default.post(name: .harnessShowQueue, object: nil); delay = 1
         case "shortcuts": ShortcutsWindow.show(); delay = 1
         case "shot": shot(arg, window: m.window)
+        case "shotlib": shot(arg, window: LibraryNavigation.shared.window)
         case "shotwin": if parts.count > 2, let w = NSApp.windows.first(where: { $0.title == parts[1] && $0.isVisible }) { shot(parts[2], window: w) }
         case "closewin": NSApp.windows.first { $0.title == arg }?.close()
         case "scrubtest": scrubTest(m) { run(rest, m) }; return
         case "perftest": MainActor.assumeIsolated { perfTest(m) }; delay = 0.5
-        case "axdump": axDump(m.window)
+        case "axdump": axDump(m.window, verbose: arg != "quiet")
         case "back": LibraryNavigation.shared.back(); delay = 1
         case "quit": NSApp.terminate(nil); return
         default: log("harness: unknown step \(step)")
@@ -102,6 +111,24 @@ enum EditorHarness {
         for (p, f) in mods where rest.hasPrefix(p) { rest.removeFirst(p.count); flags.insert(f) }
         let codes: [String: UInt16] = ["space": 49, "left": 123, "right": 124, "down": 125, "up": 126, "delete": 51, "esc": 53]
         return EditorShortcut.command(chars: codes[rest] == nil ? rest : "", keyCode: codes[rest] ?? 0xFFFF, flags: flags)
+    }
+
+    /// A real key-down through the application's event queue, so the editor's key handler sees what a keyboard sends.
+    private static func postKey(_ s: String, to w: NSWindow?) {
+        guard let w = w else { return }
+        let mods: [(String, NSEvent.ModifierFlags)] = [("cmd+", .command), ("shift+", .shift), ("opt+", .option), ("ctrl+", .control)]
+        var rest = s, flags: NSEvent.ModifierFlags = []
+        for (p, f) in mods where rest.hasPrefix(p) { rest.removeFirst(p.count); flags.insert(f) }
+        let special: [String: (UInt16, String)] = ["space": (49, " "), "left": (123, "\u{F702}"), "right": (124, "\u{F703}"), "down": (125, "\u{F701}"),
+                                                    "up": (126, "\u{F700}"), "delete": (51, "\u{7F}"), "esc": (53, "\u{1B}")]
+        let letters: [Character: UInt16] = ["a": 0, "s": 1, "d": 2, "h": 4, "z": 6, "x": 7, "b": 11, "e": 14, "1": 18, "2": 19, "3": 20, "=": 24, "-": 27,
+                                            "o": 31, "i": 34, "l": 37, "j": 38, "k": 40, "/": 44, "m": 46]
+        let (code, chars) = special[rest] ?? (letters[Character(rest.lowercased())] ?? 0, rest)
+        let shown = flags.contains(.shift) ? chars.uppercased() : chars
+        guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: w.windowNumber, context: nil, characters: shown, charactersIgnoringModifiers: shown,
+                                       isARepeat: false, keyCode: code) else { return }
+        NSApp.postEvent(e, atStart: false)
     }
 
     private static func select(_ parts: [String], _ m: EditorModel) {
@@ -178,13 +205,29 @@ enum EditorHarness {
         var i = 0
         let t = Timer(timeInterval: 1.0 / 60, repeats: true) { timer in
             let x = Double(i) / 119
-            m.seek(d * (0.1 + 0.8 * (0.5 - 0.5 * cos(x * .pi * 3))))
+            m.seek(d * (0.1 + 0.8 * (0.5 - 0.5 * cos(x * .pi * 3))), fast: true)
             i += 1
             if i == 120 {
                 timer.invalidate()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    log("harness: scrub test \(m.scrubStats.summary); requests 120")
-                    m.endScrub(); done()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    log("harness: scrub test, 120 drag positions at 60 Hz: \(m.scrubStats.summary) while dragging")
+                    m.endScrub()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        log("harness: scrub test, exact seek on release: \(m.exactStats.summary)")
+                        // Pointer resting mid-drag: an exact seek after each pause.
+                        var targets = [0.2, 0.45, 0.7, 0.33, 0.9, 0.12, 0.58, 0.81].map { $0 * d }
+                        m.beginScrub()
+                        func nextRest() {
+                            guard !targets.isEmpty else {
+                                m.endScrub()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { log("harness: scrub test, exact seeks after resting: \(m.exactStats.summary)"); done() }
+                                return
+                            }
+                            m.seek(targets.removeFirst(), fast: true)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: nextRest)
+                        }
+                        nextRest()
+                    }
                 }
             }
         }
@@ -216,22 +259,42 @@ enum EditorHarness {
     }
 
     /// Every control the accessibility tree exposes in the window, and the ones without a name.
-    private static func axDump(_ w: NSWindow?) {
+    private static func axDump(_ w: NSWindow?, verbose: Bool) {
         guard let w = w else { return }
         var named: [String] = [], unnamed: [String] = []
+        var seen = Set<ObjectIdentifier>()
         let roles: Set<NSAccessibility.Role> = [.button, .popUpButton, .menuButton, .slider, .checkBox, .radioButton, .textField, .group, .toolbar]
+        // What an assistive client sets on the app; SwiftUI builds its accessibility tree once someone asks.
+        NSApp.perform(Selector(("accessibilitySetValue:forAttribute:")), with: NSNumber(value: true), with: "AXEnhancedUserInterface")
+        func children(_ e: Any) -> [Any] {
+            let el = e as? NSAccessibilityProtocol
+            var out = el?.accessibilityChildren() ?? []
+            if let o = e as? NSObject, o.responds(to: Selector(("accessibilityAttributeValue:"))) {
+                for a in [NSAccessibility.Attribute.children, NSAccessibility.Attribute(rawValue: "AXChildrenInNavigationOrder")] {
+                    out += (o.perform(Selector(("accessibilityAttributeValue:")), with: a.rawValue)?.takeUnretainedValue() as? NSArray as? [Any]) ?? []
+                }
+            }
+            return out
+        }
         func walk(_ e: Any, depth: Int) {
             guard depth < 60, let el = e as? NSAccessibilityProtocol else { return }
             if let role = el.accessibilityRole(), roles.contains(role), role != .group, role != .toolbar {
                 let label = el.accessibilityLabel() ?? el.accessibilityTitle() ?? ""
-                if label.isEmpty { unnamed.append(role.rawValue) } else { named.append("\(role.rawValue.replacingOccurrences(of: "AX", with: "")): \(label)") }
+                if label.isEmpty {
+                    let f = el.accessibilityFrame()
+                    unnamed.append("\(role.rawValue) help=\(el.accessibilityHelp() ?? "-") value=\(String(describing: el.accessibilityValue() ?? "-")) at \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) \(type(of: e))")
+                } else { named.append("\(role.rawValue.replacingOccurrences(of: "AX", with: "")): \(label)") }
             }
-            for c in el.accessibilityChildren() ?? [] { walk(c, depth: depth + 1) }
+            for c in children(e) {
+                let id = ObjectIdentifier(c as AnyObject)
+                if seen.insert(id).inserted { walk(c, depth: depth + 1) }
+            }
         }
-        if let frame = w.contentView?.superview { walk(frame, depth: 0) }
+        walk(w, depth: 0)
+        if let host = w.contentView { walk(host, depth: 0) }
         log("harness: accessibility \(named.count) named controls, \(unnamed.count) without a name")
-        for n in named { log("harness: ax \(n)") }
-        for u in unnamed { log("harness: ax UNNAMED \(u)") }
+        if verbose { for n in named { log("harness: ax \(n)") } }
+        if verbose { for u in unnamed { log("harness: ax UNNAMED \(u)") } }
     }
 }
 
@@ -293,7 +356,8 @@ struct SnapshotFrameOverlay: View {
                     guard let item = model.player.currentItem else { return }
                     let g = AVAssetImageGenerator(asset: item.asset)
                     g.videoComposition = item.videoComposition
-                    g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
+                    let half = CMTime(value: 1, timescale: 120)
+                    g.requestedTimeToleranceBefore = half; g.requestedTimeToleranceAfter = half
                     g.maximumSize = model.canvas.size(.hd)
                     if let img = try? await g.image(at: CMTime(seconds: model.time, preferredTimescale: 60000)).image { image = img }
                 }

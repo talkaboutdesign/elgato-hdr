@@ -160,7 +160,11 @@ struct SceneChangeMenu: View {
                 }
             }
         } label: {
-            Label("Scene", systemImage: "rectangle.3.group").labelStyle(.titleAndIcon).font(.system(size: 12, weight: .medium))
+            HStack(spacing: 4) {
+                Image(systemName: "rectangle.3.group").accessibilityHidden(true)
+                Text("Scene")
+            }
+            .font(.system(size: 12, weight: .medium))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.visible)

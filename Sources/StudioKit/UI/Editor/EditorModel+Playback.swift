@@ -107,9 +107,18 @@ extension EditorModel {
     }
     private func stopReverse() { reverseTimer?.invalidate(); reverseTimer = nil }
 
+    /// ←/→ step through the decoder (no keyframe round trip); the time observer reports the new frame.
     func step(frames n: Int) {
         if playing { pause() }
-        seek(time + Double(n) * frameDuration)
+        if let item = player.currentItem, !seekInFlight, pendingSeek == nil, n > 0 ? item.canStepForward : item.canStepBackward {
+            let target = min(max(0, time + Double(n) * frameDuration), duration)
+            time = (target / frameDuration).rounded() * frameDuration
+            var a = axis; a.reveal(time)
+            if a != axis { axis = a }
+            item.step(byCount: n)
+        } else {
+            seek(time + Double(n) * frameDuration)
+        }
     }
     func jump(seconds s: Double) {
         if playing { pause() }
@@ -117,37 +126,56 @@ extension EditorModel {
     }
 
     /// Moves the playhead. The model shows the target at once; the player follows with at most one seek in flight.
-    func seek(_ s: Double, quantize: Bool = true) {
+    /// `fast` (while scrubbing) lets the player show the nearest keyframe: recordings have a two-second GOP with
+    /// B-frames, so an exact seek decodes up to 120 frames. When the pointer rests or lets go, an exact seek lands on
+    /// the frame.
+    func seek(_ s: Double, quantize: Bool = true, fast: Bool = false) {
         let d = duration > 0 ? duration : project.durationMs / 1000
         var t = min(max(0, s), max(0, d - frameDuration * 0.5))
         if quantize { t = (t / frameDuration).rounded() * frameDuration }
         time = t
         var a = axis; a.reveal(t)
         if a != axis { axis = a }
-        requestSeek(CMTime(seconds: t, preferredTimescale: 60000))
+        settleWork?.cancel(); settleWork = nil
+        requestSeek(CMTime(seconds: t, preferredTimescale: 60000), fast: fast)
+        if fast {
+            let w = DispatchWorkItem { [weak self] in self?.settle() }
+            settleWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: w)
+        }
     }
 
-    func requestSeek(_ target: CMTime) {
-        if seekInFlight { pendingSeek = target; return }
+    /// The exact frame at the playhead, after fast seeks.
+    func settle() {
+        settleWork?.cancel(); settleWork = nil
+        requestSeek(CMTime(seconds: time, preferredTimescale: 60000), fast: false)
+    }
+
+    func requestSeek(_ target: CMTime, fast: Bool = false) {
+        if seekInFlight { pendingSeek = target; pendingFast = fast; return }
         guard player.currentItem != nil else { return }
         seekInFlight = true
         let started = CACurrentMediaTime()
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        let tolerance: CMTime = fast ? .positiveInfinity : .zero
+        player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 let took = CACurrentMediaTime() - started
                 self.seekStats.add(took)
-                if self.scrubbing { self.scrubStats.add(took) }
+                if self.scrubbing || self.settling { fast ? self.scrubStats.add(took) : self.exactStats.add(took) }
                 self.seekInFlight = false
-                if let next = self.pendingSeek { self.pendingSeek = nil; self.requestSeek(next) }
+                if let next = self.pendingSeek { self.pendingSeek = nil; self.requestSeek(next, fast: self.pendingFast) }
+                else if !fast { self.settling = false }
             }
         }
     }
 
-    func beginScrub() { scrubbing = true; if playing { pause() }; scrubStats = SeekStats() }
+    func beginScrub() { scrubbing = true; if playing { pause() }; scrubStats = SeekStats(); exactStats = SeekStats() }
     func endScrub() {
         guard scrubbing else { return }
         scrubbing = false
-        if scrubStats.count > 2 { log("scrub: \(scrubStats.summary)") }
+        settling = true
+        settle()
+        if scrubStats.count > 2 { log("scrub: \(scrubStats.summary) while dragging (keyframe-tolerant)") }
     }
 }

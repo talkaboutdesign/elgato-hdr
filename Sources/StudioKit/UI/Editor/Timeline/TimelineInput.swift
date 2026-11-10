@@ -23,6 +23,18 @@ final class TimelineInputView: NSView {
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    /// The timeline holds keyboard focus, so the editor's single-key shortcuts work from the start: otherwise AppKit
+    /// gives it to the first text field (the project name) and every key would type there.
+    override var acceptsFirstResponder: Bool { true }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let w = window else { return }
+        w.initialFirstResponder = self
+        DispatchQueue.main.async { [weak self, weak w] in
+            guard let self = self, let w = w, w.firstResponder === w || w.firstResponder is NSText else { return }
+            w.makeFirstResponder(self)
+        }
+    }
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
     override func accessibilityLabel() -> String? { "Timeline" }
@@ -36,7 +48,7 @@ final class TimelineInputView: NSView {
 
     private func point(_ e: NSEvent) -> CGPoint { convert(e.locationInWindow, from: nil) }
 
-    override func mouseDown(with e: NSEvent) { interaction?.mouseDown(at: point(e), clickCount: e.clickCount, flags: e.modifierFlags); setCursor() }
+    override func mouseDown(with e: NSEvent) { window?.makeFirstResponder(self); interaction?.mouseDown(at: point(e), clickCount: e.clickCount, flags: e.modifierFlags); setCursor() }
     override func mouseDragged(with e: NSEvent) { interaction?.mouseDragged(to: point(e), flags: e.modifierFlags); setCursor() }
     override func mouseUp(with e: NSEvent) { interaction?.mouseUp(at: point(e)); interaction?.mouseMoved(to: point(e)); setCursor() }
     override func mouseMoved(with e: NSEvent) { interaction?.mouseMoved(to: point(e)); setCursor() }
@@ -147,11 +159,11 @@ final class TimelineInteraction {
             let z = m.zoomBlock(id)
             let target = snapped(t * 1000, excluding: [z?.startMs ?? -1, z?.endMs ?? -1], on: snapOn)
             m.update("Resize Zoom") { TimelineEdits.resizeZoom(&$0, id: id, leading: leading, toMs: target, room: room) }
-            if let z = m.zoomBlock(id), !m.playing { m.seek((leading ? z.startMs : z.endMs) / 1000) }
+            if let z = m.zoomBlock(id), !m.playing { m.seek((leading ? z.startMs : z.endMs) / 1000, fast: true) }
         case .cut(let b, let original):
             let target = snapped(t * 1000, excluding: [b.ms], on: snapOn)
             m.update("Trim") { TimelineEdits.move(b, to: target, original: original, in: &$0) }
-            m.seek(TimelineEdits.snapToFrame(target, m.project) / 1000)
+            m.seek(TimelineEdits.snapToFrame(target, m.project) / 1000, fast: true)
         }
     }
 
@@ -218,7 +230,7 @@ final class TimelineInteraction {
         let t = m.axis.time(atX: p.x) * 1000
         // Scrubbing lands exactly on cuts and markers when it passes close to them.
         let s = flags.contains(.option) ? t : snapped(t, excluding: [], on: true, points: 5, includePlayhead: false)
-        m.seek(s / 1000)
+        m.seek(s / 1000, fast: true)
     }
 
     /// Snaps a time (ms) to the playhead, markers, cuts, scene changes and zoom edges within a few points.

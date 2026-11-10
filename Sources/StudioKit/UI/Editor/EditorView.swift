@@ -28,7 +28,8 @@ struct EditorView: View {
             default: model.perform(c)
             }
         })
-        .background(WindowTitle(title: model.project.name, subtitle: recordingSummary(model.project, duration: model.duration)))
+        .background(WindowTitle(title: model.project.name, subtitle: recordingSummary(model.project, duration: model.duration),
+                                active: { [model, onBack] in onBack == nil || LibraryNavigation.shared.editor === model }))
         .toolbar { toolbar }
         .sheet(isPresented: $showExport) { ExportSheet(model: model) { showExport = false } }
         #if DEBUG
@@ -54,13 +55,17 @@ struct EditorView: View {
             .help("Each canvas has its own layout; both share the timeline")
             .accessibilityLabel("Canvas")
         }
+        ToolbarItem(placement: .automatic) { Spacer() }
         ToolbarItemGroup(placement: .automatic) {
             ExportProgressCapsule(model: model)
             IconButton(systemImage: "arrow.uturn.backward", help: model.undoTitle + " (⌘Z)") { model.undo() }
                 .disabled(!model.canUndo)
+                .accessibilityLabel(model.undoTitle)
             IconButton(systemImage: "arrow.uturn.forward", help: model.redoTitle + " (⇧⌘Z)") { model.redo() }
                 .disabled(!model.canRedo)
+                .accessibilityLabel(model.redoTitle)
             IconButton(systemImage: "keyboard", help: "Keyboard Shortcuts (⌘/)") { ShortcutsWindow.show() }
+                .accessibilityLabel("Keyboard Shortcuts")
             PillButton("Export", systemImage: "square.and.arrow.up", prominent: true, help: "Export… (⌘E)") { showExport = true }
                 .disabled(model.editsLocked)
         }
@@ -71,10 +76,12 @@ struct EditorView: View {
 struct WindowTitle: NSViewRepresentable {
     let title: String
     let subtitle: String
+    /// Checked when the update lands: during the library-to-editor transition both screens exist for a moment.
+    var active: () -> Bool = { true }
     func makeNSView(context: Context) -> NSView { NSView() }
     func updateNSView(_ v: NSView, context: Context) {
         DispatchQueue.main.async {
-            guard let w = v.window else { return }
+            guard let w = v.window, active() else { return }
             if w.title != title { w.title = title }
             if w.subtitle != subtitle { w.subtitle = subtitle }
         }

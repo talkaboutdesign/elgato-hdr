@@ -420,8 +420,9 @@ struct CommitTextField: View {
             Text(title).font(.system(size: 12)).foregroundStyle(.secondary)
             TextField(placeholder.isEmpty ? title : placeholder, text: $draft)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(title)
                 .focused($focused)
-                .onSubmit { if draft != text { commit(draft) } }
+                .onSubmit { if draft != text { commit(draft) }; focused = false }
                 .onChange(of: focused) { _, f in if !f && draft != text { commit(draft) } }
         }
         .onAppear { draft = text }
