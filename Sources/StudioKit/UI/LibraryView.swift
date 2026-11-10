@@ -420,6 +420,11 @@ enum ScrubFrames {
         return old
     }
 
+    private static func isCurrent(_ folder: String, _ key: NSString) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return currentKey[folder] == key
+    }
+
     static func load(_ doc: ProjectDoc, project p: Project) async -> [CGImage] {
         let ts = times(p), fp = fingerprint(p)
         let key = "\(doc.dir.path)|\(fp)|\(ts.map { Int($0) })" as NSString
@@ -446,6 +451,7 @@ enum ScrubFrames {
                 generator = g
             }
             guard let g = generator, let img = try? await g.image(at: CMTime(seconds: t / 1000, preferredTimescale: 600)).image else { continue }
+            guard isCurrent(doc.dir.path, key) else { return [] }
             images.append(img)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             if let dst = CGImageDestinationCreateWithURL(file as CFURL, UTType.jpeg.identifier as CFString, 1, nil) {
@@ -453,6 +459,7 @@ enum ScrubFrames {
                 CGImageDestinationFinalize(dst)
             }
         }
+        guard isCurrent(doc.dir.path, key) else { return [] }
         if images.count == ts.count { memory.setObject(images as NSArray, forKey: key) }
         return images
     }
