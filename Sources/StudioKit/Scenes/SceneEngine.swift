@@ -199,7 +199,11 @@ struct LiveSceneState {
         var source: SceneFrame
         let aliases = overlayAliases(canvas)
         if let snap = snapshot {
-            source = snap.frame(canvas, size: size, sources: sources)
+            var frozenSources = sources
+            for (id, alias) in aliases {
+                if let info = sources[.layer(alias)] { frozenSources[.layer(id)] = info }
+            }
+            source = snap.frame(canvas, size: size, sources: frozenSources)
             for i in source.layers.indices {
                 if case .layer(let id) = source.layers[i].key, let alias = aliases[id] { source.layers[i].key = .layer(alias) }
             }

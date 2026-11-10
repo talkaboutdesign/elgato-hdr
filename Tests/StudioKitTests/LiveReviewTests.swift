@@ -59,6 +59,12 @@ final class LiveReviewTests: XCTestCase {
         XCTAssertNotEqual(blended[0].key, blended[1].key)
         XCTAssertTrue(blended.allSatisfy { $0.opacity > 0 && $0.opacity < 1 })
         XCTAssertEqual(blended.map(\.opacity).reduce(0, +), 1, accuracy: 0.001)
+        var newest = changed; newest.source.text?.string = "Newest"
+        let interrupted = swap.switching(to: Scene(name: "D", wide: Composition(layers: [newest])), atNs: 100_000_001, transition: SceneTransition(), sources: both)
+        let retainedVersions = interrupted.overlayLayers(canvas: .wide, atNs: 100_000_002).filter { $0.source.text?.string != "Newest" }
+        let ready = Dictionary(uniqueKeysWithValues: retainedVersions.map { (SourceKey.layer($0.id), SourceInfo(size: CGSize(width: 100, height: 100))) })
+        let interruptedLayers = interrupted.layers(canvas: .wide, size: CGSize(width: 100, height: 100), sources: ready, atNs: 100_000_002)
+        XCTAssertEqual(interruptedLayers.count, 2, "Outgoing textures stay visible while the incoming raster is not ready")
     }
     func testCameraPresetIsOwnedByCamera() throws {
         let cam = Layer(source: .camera, frame: NRect(x: 0.2, y: 0.2, w: 0.4, h: 0.4), roundness: 0.5)
