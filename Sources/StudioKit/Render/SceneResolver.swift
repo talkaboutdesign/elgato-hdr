@@ -24,7 +24,10 @@ struct ResolvedLayer: Equatable {
 /// always used, so a template resolves to the same rectangles the old shader parameters held.
 enum SceneResolver {
     static func resolve(_ c: Composition, canvas: CGSize, sources: [SourceKey: SourceInfo]) -> [ResolvedLayer] {
-        c.layers.compactMap { l in
+        if let layout = c.legacyLayout, sources[.camera] == nil {
+            return resolve(.from(layout: layout, canvas: canvas, hasCamera: sources[.camera] != nil, mirror: false), canvas: canvas, sources: sources)
+        }
+        return c.layers.compactMap { l in
             guard l.visible, l.opacity > 0 else { return nil }
             var dst = l.frame.rect(in: canvas), src = CGRect(x: 0, y: 0, width: 1, height: 1), color: SIMD4<Float>?
             let key: SourceKey
