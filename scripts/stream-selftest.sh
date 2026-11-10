@@ -1,6 +1,7 @@
 #!/bin/bash
 # Verification tools only; the application never launches ffmpeg or reads a stream key from arguments.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "$0")/.."
 canvas="${1:-wide}"
 case "$canvas" in wide|vertical) ;; *) echo 'usage: stream-selftest.sh wide|vertical'; exit 2;; esac
@@ -8,14 +9,14 @@ ffmpeg=/opt/homebrew/bin/ffmpeg
 ffprobe=/opt/homebrew/bin/ffprobe
 out="${SELFTEST_DIR:-$(mktemp -d /tmp/ehdr-stream.XXXXXX)}"
 mkdir -p "$out"
-port="${SELFTEST_PORT:-1948}"
+port="${SELFTEST_PORT:-26353}"
 app_pid= listener_pid=
 cleanup() {
     if [[ -n "$app_pid" ]]; then kill "$app_pid" 2>/dev/null || true; fi
     if [[ -n "$listener_pid" ]]; then kill "$listener_pid" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
-if [[ "${SELFTEST_SKIP_BUILD:-0}" != 1 ]]; then ./build.sh > "$out/build.log" 2>&1; fi
+if [[ "${SELFTEST_SKIP_BUILD:-0}" != 1 ]]; then ./build.sh debug > "$out/build.log" 2>&1; fi
 "$ffmpeg" -hide_banner -loglevel warning -y -listen 1 -i rtmp://127.0.0.1:$port/live/test -t 20 -c copy "$out/selftest.flv" > "$out/listener.log" 2>&1 &
 listener_pid=$!
 sleep 1
@@ -66,12 +67,10 @@ actual=int(v['nb_read_frames'])/duration
 print(f"{canvas}: {v['codec_name']} {v['width']}x{v['height']} {fps:.3f} fps; {a['codec_name']} {a['sample_rate']} Hz {a['channels']} channels; duration={duration:.3f}s; decoded={actual:.2f} fps")
 assert v['codec_name']=='h264' and (v['width'],v['height'])==((1920,1080) if canvas=='wide' else (1080,1920))
 pts=[float(f['best_effort_timestamp_time']) for f in json.loads((p/'pts.json').read_text())['frames']]
-gaps=[b-a for a,b in zip(pts,pts[1:]) if a>=pts[0]+1]
-print(f"maximum video PTS gap after first second: {max(gaps)*1000:.3f} ms")
-assert max(gaps)<=1.5/60, 'FAIL: video stutter'
-drops=re.findall(r'dropped render=(\d+) encoder=(\d+)',(p/'app.log').read_text())
-assert drops and all(int(r)==0 and int(e)==0 for r,e in drops), 'FAIL: render/encoder drops'
-print('render drops=0 encoder drops=0')
+sys.path.insert(0, 'scripts')
+from stream_checks import check_timing, check_drops
+check_timing(pts, actual)
+check_drops((p/'app.log').read_text())
 assert abs(actual-60)<=0.5 and abs(fps-60)<2 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
 assert abs(duration-20)<1
 # The bottom strip also encodes a binary counter; identify the periodic flash from video alone.
