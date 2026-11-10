@@ -123,7 +123,7 @@ extension Composition {
         guard layers.count > 1 else { return }
         for i in stride(from: layers.count - 1, through: 1, by: -1) {
             let cam = layers[i], ring = layers[i - 1]
-            guard cam.source.type == "camera", cam.frameWidth == 0, ring.source.type == "color",
+            guard cam.source.type == "camera", cam.visible, cam.opacity == 1, cam.frameWidth == 0, ring.source.type == "color",
                   ring.name == "Camera Frame" || ring.name == "Camera Ring",
                   ring.visible, ring.opacity == 1, !ring.shadow, !ring.border, let color = ring.source.color else { continue }
             let r = cam.frame.rect(in: canvas), outer = ring.frame.rect(in: canvas)

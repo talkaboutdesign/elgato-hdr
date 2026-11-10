@@ -8,7 +8,10 @@ final class ProgramConversionTests: XCTestCase {
         let size = CGSize(width: 16, height: 16)
         let colors: [[Double]] = [[0,0,0,1], [1,1,1,1], [1,0,0,1], [0,1,0,1], [0,0,1,1], [0.2,0.7,0.4,1]]
         // Odd-width patches exercise chroma averaging across boundaries, not just uniform primary colours.
-        let layers = (0..<16).map { x in Layer.color(colors[x % colors.count], name: "", frame: NRect(x: Double(x)/16, y: 0, w: 1.0/16, h: 1)) }
+        let layers = (0..<256).map { index -> Layer in
+            let x = index % 16, y = index / 16
+            return Layer.color(colors[(x + 3 * y + y / 2) % colors.count], name: "", frame: NRect(x: Double(x)/16, y: Double(y)/16, w: 1.0/16, h: 1.0/16))
+        }
         let comp = Composition(layers: layers), core = MetalCore.shared
         let y = OverlayTestSupport.texture(.r16Unorm, 16, 16, Data(count: 512), 32)
         let c = OverlayTestSupport.texture(.rg16Unorm, 8, 8, Data(count: 256), 32)
@@ -73,12 +76,44 @@ extension ProgramConversionTests {
             output.gameFrame(y: y, c: c, size: size, colorMode: .sdr, camera: nil, hostNs: start + UInt64(n) * 17_000_000)
             XCTAssertEqual(gate.wait(timeout: .now() + 2), .success)
         }
-        XCTAssertEqual(identities.count, 66)
+        XCTAssertEqual(identities.count, 18)
         output.gameFrame(y: y, c: c, size: size, colorMode: .sdr, camera: nil, hostNs: start + 66 * 17_000_000)
         XCTAssertEqual(output.takeStats().capacity, 1)
         releases.removeLast()()
         output.gameFrame(y: y, c: c, size: size, colorMode: .sdr, camera: nil, hostNs: start + 67 * 17_000_000)
         XCTAssertEqual(gate.wait(timeout: .now() + 2), .success)
         output.stop(); releases.forEach { $0() }
+    }
+}
+
+extension ProgramConversionTests {
+    func testReleaseReaderCost() throws {
+        guard ProcessInfo.processInfo.environment["EHDR_MEASURE_READER"] == "1" else { throw XCTSkip("Opt-in release reader measurement") }
+        let core = MetalCore.shared
+        let y = OverlayTestSupport.texture(.r16Unorm, 2560, 1440, Data(count: 2560 * 1440 * 2), 2560 * 2)
+        let c = OverlayTestSupport.texture(.rg16Unorm, 1280, 720, Data(count: 1280 * 720 * 4), 1280 * 4)
+        var camera: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary, &camera), kCVReturnSuccess)
+        let scene = SceneCollection.defaults().active
+        let gate = DispatchSemaphore(value: 0)
+        let outputs = Canvas.allCases.map { canvas -> ProgramOutput in
+            let output = ProgramOutput(canvas: canvas, size: canvas.size(.hd), fps: 60)
+            output.picture = { size, sources, _ in LivePicture(frame: SceneFrame(background: SIMD4(0, 0, 0, 1), layers: SceneResolver.resolve(scene.composition(canvas), canvas: size, sources: sources))) }
+            output.onFrame = { _, _ in gate.signal() }; output.start(); return output
+        }
+        var elapsed = 0.0
+        for frame in 0..<600 {
+            let start = nowNs()
+            for output in outputs { output.gameFrame(y: y, c: c, size: CGSize(width: 2560, height: 1440), colorMode: .sdr, camera: camera, hostNs: start) }
+            let end = nowNs()
+            if frame >= 60 { elapsed += Double(end - start) / 1000 }
+            for _ in outputs { XCTAssertEqual(gate.wait(timeout: .now() + 2), .success) }
+            let duration = Double(nowNs() - start) / 1e9
+            Thread.sleep(forTimeInterval: max(0, 1.0 / 60 - duration))
+        }
+        for output in outputs { output.stop(); XCTAssertEqual(output.takeStats().dropped, 0) }
+        print(String(format: "RELEASE reader cost: two 1080p60 NV12 lanes + camera = %.1f µs/frame (540 samples)", elapsed / 540))
+        _ = core
     }
 }

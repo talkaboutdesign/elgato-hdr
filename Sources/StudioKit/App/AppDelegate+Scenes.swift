@@ -249,7 +249,7 @@ extension AppDelegate {
         let m = scenes
         let before = m.collection
         guard m.collection.edit(sceneID: sceneID, canvas: canvas, edit) else {
-            toast("Image not added", detail: "The destination scene was deleted.", style: .warning); return false
+            toast(undo == "Replace Image" ? "Image not replaced" : "Image not added", detail: "The destination scene was deleted.", style: .warning); return false
         }
         guard m.collection != before else { return false }
         if let name = undo, sceneRuntime.gestureStart == nil { registerSceneUndo(name, before: before) }
@@ -669,6 +669,8 @@ extension AppDelegate {
                 switch action {
                 case "next": self.nextScene()
                 case "prev": self.previousScene()
+                case "record-start": self.startRecording()
+                case "record-stop": self.stopRecording()
                 case "punch": self.togglePunchIn()
                 case "marker": self.addMarker()
                 case "canvas=wide": self.setCanvas(.wide)

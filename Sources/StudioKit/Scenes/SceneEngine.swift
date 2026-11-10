@@ -155,19 +155,29 @@ struct LiveSceneState {
         return next
     }
 
-    /// The image and text layers that can be in the picture at `t`: the scene's own and, while a transition runs, those
-    /// of the picture it starts from. Same-id content switches at the eased midpoint.
+    private func outgoingOverlays(_ canvas: Canvas) -> [Layer] {
+        (canvas == .wide ? snapshot?.wideOverlays : snapshot?.verticalOverlays) ?? from?.composition(canvas).layers.filter { $0.isOverlay } ?? []
+    }
+    // Give changed outgoing content its own texture key throughout the transition, including interruptions.
+    private func overlayAliases(_ canvas: Canvas) -> [UUID: UUID] {
+        let old = outgoingOverlays(canvas), target = to.composition(canvas).layers
+        var used = Set((old + target).map(\.id)), result: [UUID: UUID] = [:]
+        for layer in old where target.contains(where: { $0.id == layer.id && $0.source != layer.source }) {
+            var bytes = layer.id.uuid
+            repeat { bytes.15 &+= 1 } while used.contains(UUID(uuid: bytes))
+            let id = UUID(uuid: bytes); used.insert(id); result[layer.id] = id
+        }
+        return result
+    }
     func overlayLayers(canvas: Canvas, atNs t: UInt64) -> [Layer] {
         let target = to.composition(canvas).layers.filter { $0.isOverlay && $0.visible && $0.opacity > 0 }
-        let e = progress(atNs: t)
-        guard e < 1 else { return target }
-        let frozen = canvas == .wide ? snapshot?.wideOverlays : snapshot?.verticalOverlays
-        let old = (frozen ?? from?.composition(canvas).layers ?? []).filter { $0.isOverlay && $0.visible && $0.opacity > 0 }
-        // Same-id content switches at the eased midpoint. Hidden definitions must never displace a drawable
-        // outgoing source. A frozen interruption takes precedence over the previous scene's unfrozen definition.
-        let candidates = e < 0.5 ? old + target : target + old
+        guard progress(atNs: t) < 1 else { return target }
+        let aliases = overlayAliases(canvas)
+        let old = outgoingOverlays(canvas).filter { $0.visible && $0.opacity > 0 }.map { layer -> Layer in
+            var copy = layer; copy.id = aliases[layer.id] ?? layer.id; return copy
+        }
         var seen = Set<UUID>()
-        return candidates.filter { seen.insert($0.id).inserted }
+        return (old + target).filter { seen.insert($0.id).inserted }
     }
 
     /// The picture at host time `t` for one canvas. `size` is the canvas in pixels; `sources` the pixel sizes of the
@@ -186,10 +196,17 @@ struct LiveSceneState {
         let target = SceneFrame(background: comp.backgroundColor, layers: SceneResolver.resolve(comp, canvas: size, sources: sources))
         let e = progress(atNs: t)
         guard e < 1 else { return target }
-        let source: SceneFrame
-        if let snap = snapshot { source = snap.frame(canvas, size: size, sources: sources) }
+        var source: SceneFrame
+        let aliases = overlayAliases(canvas)
+        if let snap = snapshot {
+            source = snap.frame(canvas, size: size, sources: sources)
+            for i in source.layers.indices {
+                if case .layer(let id) = source.layers[i].key, let alias = aliases[id] { source.layers[i].key = .layer(alias) }
+            }
+        }
         else if let from = from {
-            let c = from.composition(canvas)
+            var c = from.composition(canvas)
+            for i in c.layers.indices { c.layers[i].id = aliases[c.layers[i].id] ?? c.layers[i].id }
             source = SceneFrame(background: c.backgroundColor, layers: SceneResolver.resolve(c, canvas: size, sources: sources))
         } else { return target }
         let bg = source.background + (target.background - source.background) * Float(e)
@@ -300,7 +317,9 @@ struct SceneBlend {
         l.dst = mix(a.dst, b.dst); l.src = mix(a.src, b.src)
         l.radius = mix(a.radius, b.radius); l.border = mix(a.border, b.border); l.shadow = mix(a.shadow, b.shadow)
         l.frameWidth = mix(a.frameWidth, b.frameWidth)
-        l.frameColor = a.frameColor + (b.frameColor - a.frameColor) * Float(e)
+        if a.frameWidth == 0 { l.frameColor = b.frameColor }
+        else if b.frameWidth == 0 { l.frameColor = a.frameColor }
+        else { l.frameColor = a.frameColor + (b.frameColor - a.frameColor) * Float(e) }
         l.opacity = a.opacity + (b.opacity - a.opacity) * e
         l.mirror = e < 0.5 ? a.mirror : b.mirror
         // A game growing from a rounded window to full screen keeps anti-aliased edges until it arrives; at progress 0

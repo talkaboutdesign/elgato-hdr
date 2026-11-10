@@ -55,29 +55,28 @@ extension AppDelegate {
     /// Imports `url` (or a file the user picks) into the asset folder and adds it to the scene being edited, centred
     /// at `point` (canvas pixels) or in the middle, at most 40% of the canvas and never larger than the image.
     func addImageLayer(from url: URL?, at point: CGPoint?) {
-        guard let url = url else {
-            chooseImage(prompt: "Add") { [weak self] in self?.addImageLayer(from: $0, at: point) }
-            return
-        }
-        let sceneID = scenes.collection.activeID, targetCanvas = scenes.canvas, canvas = scenes.canvasSize
-        importImage(url) { [weak self] name, native in
+        var displayName = url?.deletingPathExtension().lastPathComponent ?? "Image"
+        let completion = scenes.captureImageImport { [weak self] sceneID, targetCanvas, canvas, name, native in
             guard let self = self else { return }
             let k = min(1, canvas.width * 0.4 / max(native.width, 1), canvas.height * 0.4 / max(native.height, 1))
             let w = max(LayerResize.minSide, (native.width * k).rounded()), h = max(LayerResize.minSide, (native.height * k).rounded())
             let c = point ?? CGPoint(x: canvas.width / 2, y: canvas.height / 2)
             let r = CGRect(x: min(max(c.x - w / 2, 0), max(0, canvas.width - w)), y: min(max(c.y - h / 2, 0), max(0, canvas.height - h)), width: w, height: h)
-            let l = Layer(name: url.deletingPathExtension().lastPathComponent, source: LayerSource(type: "image", file: name), frame: NRect(r, in: canvas))
+            let l = Layer(name: displayName, source: LayerSource(type: "image", file: name), frame: NRect(r, in: canvas))
             guard self.editComposition(sceneID: sceneID, canvas: targetCanvas, undo: "Add Image", { $0.layers.append(l) }) else { return }
             if self.scenes.collection.activeID == sceneID && self.scenes.canvas == targetCanvas { self.selectLayer(l.id) }
             log("overlays: added image \(name) (\(Int(native.width))×\(Int(native.height))) at \(NSStringFromRect(r))")
         }
+        if let url { importImage(url, completion) }
+        else { chooseImage(prompt: "Add") { [weak self] chosen in
+            displayName = chosen.deletingPathExtension().lastPathComponent
+            self?.importImage(chosen, completion)
+        } }
     }
 
     /// A new file for an image layer: same place and width, height from the new image's aspect.
     func replaceImage(_ id: UUID) {
-        let sceneID = scenes.collection.activeID, targetCanvas = scenes.canvas, canvas = scenes.canvasSize
-        chooseImage(prompt: "Replace") { [weak self] url in
-            self?.importImage(url) { name, native in
+        let completion = scenes.captureImageImport { [weak self] sceneID, targetCanvas, canvas, name, native in
                 guard let self = self else { return }
                 self.editComposition(sceneID: sceneID, canvas: targetCanvas, undo: "Replace Image") { c in
                     guard let i = c.layers.firstIndex(where: { $0.id == id }) else { return }
@@ -85,8 +84,8 @@ extension AppDelegate {
                     r.size.height = (r.width * native.height / max(native.width, 1)).rounded()
                     c.layers[i].source.file = name; c.layers[i].frame = NRect(r, in: canvas)
                 }
-            }
         }
+        chooseImage(prompt: "Replace") { [weak self] in self?.importImage($0, completion) }
     }
 
     func addPreset(_ p: LayerPreset) {

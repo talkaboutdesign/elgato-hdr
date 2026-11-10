@@ -25,6 +25,12 @@ final class SceneModel {
     let thumbnails = SceneThumbnails()
     @ObservationIgnored var actions = SceneActions()
 
+    /// Capture before opening a panel or starting file I/O; completion may arrive after navigation.
+    func captureImageImport(_ completion: @escaping (UUID, Canvas, CGSize, String, CGSize) -> Void) -> (String, CGSize) -> Void {
+        let id = collection.activeID, target = canvas, size = canvasSize
+        return { name, native in completion(id, target, size, name, native) }
+    }
+
     var active: Scene { collection.active }
     /// The active scene's composition on the shown canvas.
     var composition: Composition { collection.active.composition(canvas) }

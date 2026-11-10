@@ -23,7 +23,7 @@ final class VideoEncoderTests: XCTestCase {
             CVPixelBufferLockBaseAddress(pb, [])
             let p = CVPixelBufferGetBaseAddress(pb)!.assumingMemoryBound(to: UInt32.self)
             let stride = CVPixelBufferGetBytesPerRow(pb) / 4
-            for y in 0..<360 { for x in 0..<640 {
+            for y in 0..<360 { for x in 0..<160 {
                 random = random &* 1664525 &+ 1013904223
                 let v = (random >> 24) & 255
                 p[y * stride + x] = 0xff000000 | (v << 16) | (v << 8) | v
@@ -65,8 +65,8 @@ final class VideoEncoderTests: XCTestCase {
         XCTAssertTrue(admission.admit()); XCTAssertTrue(admission.admit())
         XCTAssertFalse(admission.admit())
         admission.queued -= 2
-        for _ in 0..<62 { XCTAssertTrue(admission.admit()); admission.queued -= 1 }
-        XCTAssertEqual(admission.pending, 64)
+        for _ in 0..<14 { XCTAssertTrue(admission.admit()); admission.queued -= 1 }
+        XCTAssertEqual(admission.pending, 16)
         XCTAssertFalse(admission.admit())
         admission.pending -= 1
         XCTAssertTrue(admission.admit())

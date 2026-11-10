@@ -16,14 +16,14 @@ struct EncodeLatency: Equatable {
         guard count > 0 else { return 0 }
         let rank = max(1, Int(ceil(Double(count) * fraction)))
         var n = 0
-        for (i, v) in buckets.enumerated() { n += v; if n >= rank { return Double(i) / 10 } }
+        for (i, v) in buckets.enumerated() { n += v; if n >= rank { return i == 20000 ? maxMs : Double(i) / 10 } }
         return maxMs
     }
 }
 
 struct EncodeAdmission {
-    // Measured BGRA callback bursts reached 46 outstanding frames; retain headroom without unbounded memory.
-    static let inFlightLimit = 64
+    // Bound encoder latency and leased memory while absorbing measured NV12 callback bursts.
+    static let inFlightLimit = 16
     var queued = 0, pending = 0
     mutating func admit() -> Bool {
         guard queued < 2, pending < Self.inFlightLimit else { return false }
@@ -116,6 +116,7 @@ final class VideoEncoder {
     }
     // Test hook runs on the same serial queue as encode and recovery.
     func invalidateForTesting(fatal: Bool = false) { queue.sync { failRecoveryForTesting = fatal; if let session { VTCompressionSessionInvalidate(session) } } }
+    func enqueueForTesting(_ work: @escaping () -> Void) { queue.async(execute: work) }
     func drainForTesting() { queue.sync {} }
     private func failed(_ status: OSStatus) {
         lock.lock(); counters.dropped += 1; totalDropped += 1; lock.unlock()

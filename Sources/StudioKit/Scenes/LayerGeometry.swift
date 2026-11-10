@@ -128,13 +128,17 @@ enum LayerResize {
 enum LayerPicking {
     static let minOpacity = 0.01
     static func isPickable(_ l: Layer) -> Bool { l.visible && l.opacity >= minOpacity }
+    static func bounds(_ layer: Layer, canvas: CGSize) -> CGRect {
+        let pad = layer.source.type == "camera" ? layer.frameWidth * min(canvas.width, canvas.height) : 0
+        return layer.frame.rect(in: canvas).insetBy(dx: -pad, dy: -pad)
+    }
     /// The topmost pickable layer whose frame contains `p` (canvas pixels of `canvas`).
     static func hit(_ layers: [Layer], at p: CGPoint, canvas: CGSize) -> Layer? {
-        layers.last { isPickable($0) && $0.frame.rect(in: canvas).contains(p) }
+        layers.last { isPickable($0) && bounds($0, canvas: canvas).contains(p) }
     }
     /// Frames of the layers a moving layer snaps to.
     static func snapFrames(_ layers: [Layer], excluding id: UUID, canvas: CGSize) -> [CGRect] {
-        layers.filter { isPickable($0) && $0.id != id }.map { $0.frame.rect(in: canvas) }
+        layers.filter { isPickable($0) && $0.id != id }.map { bounds($0, canvas: canvas) }
     }
 }
 

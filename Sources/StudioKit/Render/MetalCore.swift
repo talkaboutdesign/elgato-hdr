@@ -77,6 +77,7 @@ struct LayerU {
     float4 shape;       // corner radius px, border px, shadow px, opacity
     float4 color;       // color layers: SDR BT.709 code values and alpha
     int4 fmt;           // kind (0 biplanar YCbCr, 1 premultiplied RGBA, 2 color), source transfer, output transfer, bits
+    float4 ringColor, ringShape;
     int4 flags;         // source uses BT.709 matrix, mirror, hard edge, -
 };
 
@@ -89,10 +90,6 @@ fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]],
     float2 h = u.dst.zw * 0.5, c = u.dst.xy + h;
     float r = min(u.shape.x, min(h.x, h.y)), border = u.shape.y, shadow = u.shape.z, opacity = u.shape.w;
     float d = sdRoundRect(p, c, h, r);
-    if (u.fmt.x == 3) {
-        float ring = clamp(0.5 - d + border, 0.0, 1.0) - clamp(0.5 - d, 0.0, 1.0);
-        return float4(convert(u.color.rgb, 2, out), ring * opacity * u.color.a);
-    }
     // Hard edge: the former shader's inclusive clip of the game to its rectangle, so no row is half covered.
     float2 e = (p - u.dst.xy) / u.dst.zw;
     float a = (u.flags.z != 0 ? (all(e >= 0.0) && all(e <= 1.0) ? 1.0 : 0.0) : clamp(0.5 - d, 0.0, 1.0)) * opacity;
@@ -116,6 +113,12 @@ fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]],
         }
         if (border > 0.0) cc = mix(convert(float3(1.0), 2, out), cc, clamp(-(d + border) + 0.5, 0.0, 1.0));
     }
+    // Camera and frame partition one coverage mask, avoiding source-over attenuation at their shared edge.
+    float ring = max(0.0, clamp(0.5 - d + u.ringShape.x, 0.0, 1.0) - clamp(0.5 - d, 0.0, 1.0));
+    float ra = ring * opacity * u.ringColor.a;
+    float combined = a + ra;
+    cc = combined > 0.0 ? (cc * a + convert(u.ringColor.rgb, 2, out) * ra) / combined : float3(0.0);
+    a = combined;
     float A = a + s - a * s;
     return A > 0.0 ? float4(cc * (a / A), A) : float4(0.0);
 }
@@ -163,6 +166,7 @@ struct LayerParams {
     var shape = SIMD4<Float>(0, 0, 0, 1)
     var color = SIMD4<Float>(0, 0, 0, 1)
     var fmt = SIMD4<Int32>(2, 2, 2, 8)
+    var ringColor = SIMD4<Float>(0, 0, 0, 0), ringShape = SIMD4<Float>(0, 0, 0, 0)
     var flags = SIMD4<Int32>(0, 0, 0, 0)
 }
 
@@ -343,14 +347,10 @@ final class MetalCore {
             case .none: u.fmt.x = 2; u.color = r.color ?? SIMD4(0, 0, 0, 0)
             }
             // Half a pixel of edge coverage, plus the shadow: it reaches `shadow` past the frame and 0.35·shadow lower.
-            let grow = r.shadow * 1.35 + 1
+            u.ringColor = r.frameColor; u.ringShape.x = Float(r.frameWidth)
+            let grow = max(r.shadow * 1.35, r.frameWidth) + 1
             draw(u, area: r.dst.insetBy(dx: -grow, dy: -grow), t0, t1)
-            if r.frameWidth > 0 {
-                enc.setRenderPipelineState(blended)
-                u.fmt.x = 3; u.shape.y = Float(r.frameWidth); u.color = r.frameColor
-                let margin = r.frameWidth + 1
-                draw(u, area: r.dst.insetBy(dx: -margin, dy: -margin), blank8, blank8c)
-            }
+
         }
     }
 

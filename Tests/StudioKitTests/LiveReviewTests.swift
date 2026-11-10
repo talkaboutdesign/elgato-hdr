@@ -1,14 +1,31 @@
 import XCTest
 import CoreGraphics
+import CoreVideo
 @testable import StudioKit
 
 final class LiveReviewTests: XCTestCase {
-    func testAdmissionAbsorbsMeasuredCallbackBurst() {
-        var a = EncodeAdmission()
-        for _ in 0..<64 { XCTAssertTrue(a.admit()); a.queued -= 1 }
-        XCTAssertFalse(a.admit())
-        a.pending = 0
-        XCTAssertTrue(a.admit()); XCTAssertTrue(a.admit()); XCTAssertFalse(a.admit())
+    func testAdmissionAbsorbsMeasuredCallbackBurst() throws {
+        var admission = EncodeAdmission()
+        // Nine submissions remain outstanding until the callback burst drains them together.
+        for _ in 0..<9 { XCTAssertTrue(admission.admit()); admission.queued -= 1 }
+        XCTAssertEqual(admission.pending, 9)
+        for _ in 0..<9 { admission.pending -= 1 }
+        XCTAssertEqual(admission.pending, 0)
+        for _ in 0..<16 { XCTAssertTrue(admission.admit()); admission.queued -= 1 }
+        XCTAssertFalse(admission.admit())
+
+        let encoder = try XCTUnwrap(VideoEncoder(settings: .init(width: 64, height: 64, fps: 60, bitrate: 500_000)))
+        var pb: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pb), kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pb), entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        encoder.enqueueForTesting { entered.signal(); _ = release.wait(timeout: .now() + 5) }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        let callbacks = expectation(description: "Every lease released once"); callbacks.expectedFulfillmentCount = 9
+        for n in 0..<9 { encoder.encode(buffer, hostNs: 1_000_000_000 + UInt64(n) * 17_000_000) { callbacks.fulfill() } }
+        XCTAssertEqual(encoder.takeStats().queueRejected, 7)
+        release.signal(); encoder.finish()
+        wait(for: [callbacks], timeout: 5)
     }
     func testOverlayVisibilityAndContentThroughTransition() {
         let l = Layer.text("Old", name: "Label", frame: .full)
@@ -33,7 +50,15 @@ final class LiveReviewTests: XCTestCase {
         let c = Scene(name: "C", wide: Composition(layers: [changed]))
         let swap = LiveSceneState(scene: a).switching(to: c, atNs: 1, transition: SceneTransition(), sources: sources)
         XCTAssertEqual(swap.overlayLayers(canvas: .wide, atNs: 1_000_001)[0].source.text?.string, "Old")
-        XCTAssertEqual(swap.overlayLayers(canvas: .wide, atNs: 300_000_001)[0].source.text?.string, "New")
+        let versions = swap.overlayLayers(canvas: .wide, atNs: 100_000_001)
+        XCTAssertEqual(Set(versions.compactMap { $0.source.text?.string }), ["Old", "New"])
+        XCTAssertEqual(Set(versions.map(\.id)).count, 2)
+        let both = Dictionary(uniqueKeysWithValues: versions.map { (SourceKey.layer($0.id), SourceInfo(size: CGSize(width: 100, height: 100))) })
+        let blended = swap.layers(canvas: .wide, size: CGSize(width: 100, height: 100), sources: both, atNs: 100_000_001)
+        XCTAssertEqual(blended.count, 2)
+        XCTAssertNotEqual(blended[0].key, blended[1].key)
+        XCTAssertTrue(blended.allSatisfy { $0.opacity > 0 && $0.opacity < 1 })
+        XCTAssertEqual(blended.map(\.opacity).reduce(0, +), 1, accuracy: 0.001)
     }
     func testCameraPresetIsOwnedByCamera() throws {
         let cam = Layer(source: .camera, frame: NRect(x: 0.2, y: 0.2, w: 0.4, h: 0.4), roundness: 0.5)
@@ -63,14 +88,17 @@ extension LiveReviewTests {
             let resolved = SceneResolver.resolve(Composition(layers: [l]), canvas: size, sources: sources)
             return OverlayTestSupport.render(canvas: size, transfer: 2, layers: DrawLayer.pair(resolved, [.camera: .rgba(white)]))
         }
-        let pixels = render(camera)
-        // Analytic circle golden: opaque white camera of radius 20, red outer ring out to radius 25.
-        for y in 0..<100 { for x in 0..<100 {
-            let d = hypot(Double(x) + 0.5 - 50, Double(y) + 0.5 - 50)
-            if abs(d - 20) < 1 || abs(d - 25) < 1 { continue }
-            let i = (y * 100 + x) * 4
-            XCTAssertEqual(pixels[i], d < 25 ? 1 : 0, accuracy: 0.002)
-            XCTAssertEqual(pixels[i+1], d < 20 ? 1 : 0, accuracy: 0.002)
+        for roundness in [0.0, 0.17, 0.5] { for opacity in [0.25, 1.0] {
+            camera.roundness = roundness; camera.opacity = opacity
+            let pixels = render(camera), radius = 40 * roundness
+            for y in 0..<100 { for x in 0..<100 {
+                let qx = abs(Double(x) + 0.5 - 50) - (20 - radius)
+                let qy = abs(Double(y) + 0.5 - 50) - (20 - radius)
+                let d = hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - radius
+                let i = (y * 100 + x) * 4
+                XCTAssertEqual(pixels[i], Float(min(1, max(0, 5.5 - d)) * opacity), accuracy: 0.002)
+                XCTAssertEqual(pixels[i+1], Float(min(1, max(0, 0.5 - d)) * opacity), accuracy: 0.002)
+            } }
         } }
         camera.visible = false
         XCTAssertTrue(render(camera).enumerated().allSatisfy { $0.offset % 4 == 3 || $0.element == 0 })
@@ -83,6 +111,14 @@ extension LiveReviewTests {
         let migrated = try JSONDecoder().decode(Scene.self, from: JSONEncoder().encode(scene))
         XCTAssertEqual(migrated.wide.layers.count, 1)
         XCTAssertEqual(migrated.wide.layers[0].frameWidth * canvas.height, pad, accuracy: 0.001)
+        for opacity in [0.0, 0.5, 1.0] {
+            var hidden = scene
+            hidden.wide.layers[1].visible = false
+            hidden.wide.layers[1].opacity = opacity
+            XCTAssertEqual(try JSONDecoder().decode(Scene.self, from: JSONEncoder().encode(hidden)).wide.layers.count, 2)
+        }
+        var translucent = scene; translucent.wide.layers[1].opacity = 0.5
+        XCTAssertEqual(try JSONDecoder().decode(Scene.self, from: JSONEncoder().encode(translucent)).wide.layers.count, 2)
         var changed = scene; changed.wide.layers[0].frame.x += 0.1
         XCTAssertEqual(try JSONDecoder().decode(Scene.self, from: JSONEncoder().encode(changed)).wide.layers.count, 2)
     }
@@ -102,19 +138,26 @@ extension LiveReviewTests {
 extension LiveReviewTests {
     func testImportCompletionTargetsCapturedSceneAndCanvas() {
         let a = Scene(name: "A"), b = Scene(name: "B")
-        var c = SceneCollection(scenes: [a, b], activeID: a.id)
-        let destination = c.activeID, canvas = Canvas.wide
-        // The user switches scene and canvas while the file is copied.
-        c.activeID = b.id
-        let image = Layer(source: LayerSource(type: "image", file: "imported.png"))
-        XCTAssertTrue(c.edit(sceneID: destination, canvas: canvas) { $0.layers.append(image) })
-        XCTAssertEqual(c.scenes[0].wide.layers, [image])
-        XCTAssertTrue(c.scenes[0].vertical.layers.isEmpty)
-        XCTAssertTrue(c.scenes[1].wide.layers.isEmpty)
-        c.scenes.removeFirst()
-        XCTAssertFalse(c.edit(sceneID: destination, canvas: canvas) { $0.layers.append(image) })
-        XCTAssertTrue(c.scenes[0].wide.layers.isEmpty)
+        let model = SceneModel()
+        model.collection = SceneCollection(scenes: [a, b], activeID: a.id)
+        model.canvas = .wide
+        var applied = false
+        let completion = model.captureImageImport { id, canvas, size, name, _ in
+            XCTAssertEqual(id, a.id); XCTAssertEqual(canvas, .wide); XCTAssertEqual(size, Canvas.wide.size(.hd))
+            applied = model.collection.edit(sceneID: id, canvas: canvas) { $0.layers.append(Layer(source: LayerSource(type: "image", file: name))) }
+        }
+        model.collection.activeID = b.id; model.canvas = .vertical
+        completion("imported.png", CGSize(width: 40, height: 20))
+        XCTAssertTrue(applied)
+        XCTAssertEqual(model.collection.scenes[0].wide.layers.first?.source.file, "imported.png")
+        XCTAssertTrue(model.collection.scenes[0].vertical.layers.isEmpty)
+        XCTAssertTrue(model.collection.scenes[1].wide.layers.isEmpty)
+        model.collection.scenes.removeFirst()
+        completion("deleted.png", CGSize(width: 40, height: 20))
+        XCTAssertFalse(applied)
+        XCTAssertTrue(model.collection.scenes[0].wide.layers.isEmpty)
     }
+
     func testLatencyPercentilesAndBoundedHistogram() {
         var h = EncodeLatency()
         for i in 1...100 { h.add(Double(i)) }
@@ -123,5 +166,22 @@ extension LiveReviewTests {
         XCTAssertEqual(h.percentile(0.99), 99)
         h.add(5000)
         XCTAssertEqual(h.maxMs, 5000)
+        XCTAssertEqual(h.percentile(1), 5000)
+    }
+}
+
+extension LiveReviewTests {
+    func testFrameBoundsAndMorphColour() throws {
+        let size = CGSize(width: 100, height: 100)
+        var camera = Layer(source: .camera, frame: NRect(x: 0.3, y: 0.3, w: 0.4, h: 0.4))
+        let sources: [SourceKey: SourceInfo] = [.camera: SourceInfo(size: size)]
+        let old = try XCTUnwrap(SceneResolver.resolve(Composition(layers: [camera]), canvas: size, sources: sources).first)
+        camera.frameWidth = 0.05; camera.frameColor = [1, 0, 0, 1]
+        XCTAssertEqual(LayerPicking.hit([camera], at: CGPoint(x: 27, y: 50), canvas: size)?.id, camera.id)
+        XCTAssertEqual(LayerPicking.snapFrames([camera], excluding: UUID(), canvas: size), [CGRect(x: 25, y: 25, width: 50, height: 50)])
+        let next = try XCTUnwrap(SceneResolver.resolve(Composition(layers: [camera]), canvas: size, sources: sources).first)
+        let mid = SceneBlend(canvas: CGRect(origin: .zero, size: size)).lerp(old, next, 0.5)
+        XCTAssertEqual(mid.frameWidth, 2.5)
+        XCTAssertEqual(mid.frameColor, SIMD4(1, 0, 0, 1))
     }
 }
