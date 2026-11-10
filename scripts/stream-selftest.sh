@@ -57,7 +57,8 @@ for line in (p/'flash.log').read_text().splitlines():
     if m:time=float(m[1])
     m=re.search(r'lavfi.signalstats.YAVG=([0-9.]+)',line)
     if m and time is not None:frames.append((time,float(m[1])))
-flashes=[t for i,(t,y) in enumerate(frames) if i>0 and y>220 and y-frames[i-1][1]>20]
+peak=max(y for _,y in frames)
+flashes=[t for i,(t,y) in enumerate(frames) if 0<i<len(frames)-1 and y>peak*0.98 and y-frames[i-1][1]>20 and y-frames[i+1][1]>20]
 beeps=[float(x) for x in re.findall(r'silence_end: ([0-9.]+)',(p/'beep.log').read_text())]
 assert flashes and beeps, 'FAIL: no flash/beep detected'
 flash=flashes[0]; beep=min(beeps,key=lambda t:abs(t-flash))
