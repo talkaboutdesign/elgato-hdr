@@ -43,7 +43,7 @@ extension AppDelegate {
             DispatchQueue.main.async {
                 guard let self = self, self.recorder === r else { return }
                 log("disk guard: \(self.diskGB(free)) free, stopping recording")
-                self.finishRecording { [weak self] msg in log(msg); self?.setTitle("recording stopped: disk almost full") }
+                self.finishRecording { msg in log(msg) }
                 self.showRecordingAlert("Recording stopped: the disk is almost full",
                     "Only \(self.diskGB(free)) is left on the recordings volume. Everything up to this point was saved. Free up space or choose another recordings folder before recording again.")
             }
@@ -64,10 +64,9 @@ extension AppDelegate {
     /// game.mov (HDR video + game audio), camera.mov (facecam) and mic.mov (voice), plus project.json.
     /// All three are fragmented movies, so a crash loses only the last couple of seconds.
     func startRecording() {
-        guard let s = session, s.w > 0 else { setTitle("not streaming, cannot record"); return }
+        guard let s = session, s.w > 0 else { toast("Nothing to record yet", detail: "Recording starts once the picture is live.", style: .warning); return }
         if let free = AppDelegate.recordingsFreeBytes(), free < AppDelegate.minFreeToStart {
             log("disk guard: \(diskGB(free)) free, not starting a recording")
-            setTitle("not enough disk space to record")
             showRecordingAlert("Not enough disk space to record",
                 "Only \(diskGB(free)) is free on the recordings volume; recording needs at least \(diskGB(AppDelegate.minFreeToStart)). Free up space or choose another recordings folder.")
             return
@@ -98,19 +97,32 @@ extension AppDelegate {
             let doc = ProjectDoc(dir: dir, project: proj); doc.save()
             recDoc = doc; AppDelegate.activeRecordingDir = dir
             recorder = r; s.recorder = r; recStart = Date()
-            recordItem.title = "Stop Recording"
+            state.recording = true; state.recordingElapsed = 0
+            state.recordingLayers = ["game"] + (camWriter != nil ? ["camera"] : []) + (micWriter != nil ? ["mic"] : [])
+            refreshChecks()
             var ticks = 0
-            recTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
-                self.setTitle(self.lastInfo)
+                self.state.recordingElapsed = Date().timeIntervalSince(self.recStart).rounded(.down)
                 ticks += 1
                 if ticks % 5 == 0 { self.checkDiskWhileRecording() }
             }
-            setTitle(lastInfo)
-        } catch { setTitle("record failed: \(error.localizedDescription)"); log("record failed: \(error)") }
+            RunLoop.main.add(t, forMode: .common)   // the timer keeps counting during window resizes and menu tracking
+            recTimer = t
+        } catch { toast("Recording failed", detail: error.localizedDescription, style: .error); log("record failed: \(error)") }
     }
 
-    func stopRecording() { finishRecording { [weak self] msg in log(msg); self?.setTitle(msg) } }
+    func stopRecording() {
+        finishRecording { [weak self] msg in
+            log(msg)
+            // "saved <name> [game + camera + mic]" -> "<name> · game, camera, mic"
+            if msg.hasPrefix("saved ") {
+                let detail = msg.dropFirst(6).replacingOccurrences(of: " [", with: " · ").replacingOccurrences(of: "]", with: "").replacingOccurrences(of: " + ", with: ", ")
+                self?.toast("Recording saved", detail: detail, style: .success)
+            }
+            else { self?.toast("Recording failed", detail: msg, style: .error) }
+        }
+    }
 
     /// Closes every layer, then completes project.json and its thumbnail.
     func finishRecording(_ done: @escaping (String) -> Void) {
@@ -118,7 +130,8 @@ extension AppDelegate {
         session?.recorder = nil; recorder = nil
         camera.attach(camera: nil, mic: nil)
         recTimer?.invalidate(); recTimer = nil
-        recordItem.title = "Start Recording"
+        state.recording = false; state.recordingElapsed = 0; state.recordingLayers = []
+        refreshChecks()
         let doc = recDoc, cw = camWriter, mw = micWriter
         recDoc = nil; camWriter = nil; micWriter = nil
         let group = DispatchGroup()

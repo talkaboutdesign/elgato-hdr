@@ -59,7 +59,7 @@ xcode-select --install       # if you don't already have the CLT
 swift build                  # compile StudioKit and the executable (Swift 5 mode)
 swift test                   # unit, compositor golden and export tests
 ./build.sh                   # release bundle: dist/Elgato HDR.app
-./build.sh debug             # debug bundle, includes --make-fixture
+./build.sh debug             # debug bundle, includes --make-fixture and --design-gallery
 open "dist/Elgato HDR.app"
 ```
 
@@ -68,11 +68,20 @@ open "dist/Elgato HDR.app"
 ## Using it
 
 1. Plug an HDR source into the Elgato 4K X and connect the card to your Mac.
-2. Launch **Elgato HDR**. The first launch shows one macOS **administrator prompt** — this is required (see [How it works](#how-it-works)). Enter your password and the live picture appears.
-3. Pick your source resolution from the **Input** menu, and the matching **Color** mode.
-4. Optional: press **⌘K** to show your camera, and pick a microphone in the **Camera** menu. Drag the camera where you want it.
-5. Press **⌘R** to start and stop recording. Each recording is saved as its own folder in `~/Movies/Elgato HDR/`.
+2. Launch **Elgato HDR**. The first time, a short sheet explains why the app needs your password, then macOS shows its **administrator prompt** — this is required (see [How it works](#how-it-works)). Enter your password and the live picture appears. No card at hand? Choose **Try the Demo Source** on that sheet.
+3. Pick your source resolution and colour mode in the sidebar's **Scene** tab (or the **Input** and **Color** menus).
+4. Optional: choose your camera in the **Scene** tab and your microphone in the **Audio** tab (or press **⌘K** and use the **Camera** menu). Drag the camera where you want it on the picture.
+5. Click **Record** in the toolbar, or press **⌘R**, to start and stop recording. Each recording is saved as its own folder in `~/Movies/Elgato HDR/`.
 6. Press **⌘O** to open the **Recordings** library. Double-click a recording to edit and export it.
+
+### The studio window
+
+- **Toolbar:** the **Record** button turns into a running timer while recording. **Go Live** and the 16:9 / 9:16 canvas switch are shown greyed out until streaming and scenes arrive.
+- **Picture:** the live game, letterboxed to any window size. The status pill in the bottom-left corner shows the signal and the delay to the screen (or *Connecting…*, *No signal*, *Demo source*); it fades away when you stop moving the mouse.
+- **Bottom bar:** the current layout, game-audio monitoring and a live microphone meter.
+- **Sidebar** (⌥⌘S): **Scene** holds the camera window (device, shape, aspect, size, position, mirror, border, shadow) and the picture settings; **Audio** holds game monitoring and the microphone with its level; **Stream** is where destinations will live.
+- **Focus mode** (⌘F): full screen with the sidebar and bottom bar out of the way, so the game fills the display. Move the pointer to the top edge for the toolbar; leaving full screen brings the panels back as they were.
+- Messages such as *Recording saved* appear briefly at the top of the picture instead of in the window title.
 
 ### Editing and exporting
 
@@ -104,12 +113,13 @@ Exports/       Rendered videos
 | Audio | Mute | ⌘M |
 | Camera | Show / Hide Camera | ⌘K |
 | Camera | Bigger / Smaller | ⌘= / ⌘- |
-| Camera | Camera, microphone, shape, position, mirror, border, shadow | — (also on right-click in the live view) |
-| Record | Start / Stop Recording | ⌘R |
+| Camera | Camera, microphone, shape, position, mirror, border, shadow | — (also on right-click in the live view, and in the sidebar) |
+| Record | Start / Stop Recording | ⌘R (also the toolbar's Record button) |
 | Record | Recordings Library | ⌘O |
 | Record | Show Recordings in Finder | — |
 | View | Show Live View | ⌘0 |
-| View | Toggle Full Screen | ⌘F |
+| View | Focus Mode (Full Screen) | ⌘F |
+| View | Hide / Show Sidebar | ⌥⌘S |
 | View | Smooth / Game / Lowest Latency | ⌘J / ⌘G / ⌘L |
 | View | Reconnect | ⇧⌘R |
 

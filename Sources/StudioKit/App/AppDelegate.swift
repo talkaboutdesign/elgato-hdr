@@ -8,38 +8,47 @@ import QuartzCore
 
 // MARK: - App
 
+/// Does the work: capture, camera, recording, menus. The studio window reads `state` and asks for things through
+/// `state.actions`, which call the same methods as the menus. Every property the UI shows is mirrored into `state`
+/// on the main thread (the didSets below).
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+    let state = StudioState()
+    var studio: StudioWindowController!
     var window: NSWindow!
     var view: MetalView!
     var renderer: Renderer!
     var shm: UnsafeMutableRawPointer?
     var demoSource: DemoSource?
+    var demoRequested = false          // "Try the Demo Source" on the first-launch sheet
     let demoCamera = CommandLine.arguments.contains("--demo-camera")
     var session: Session?
-    var modeIndex = min(max(UserDefaults.standard.integer(forKey: "mode"), 0), modes.count - 1)   // also accepts `-mode N` on the command line
-    var colorMode = ColorMode(rawValue: UserDefaults.standard.string(forKey: "color") ?? "pq") ?? .pq
+    var modeIndex = min(max(UserDefaults.standard.integer(forKey: "mode"), 0), modes.count - 1) { didSet { state.modeIndex = modeIndex } }   // also accepts `-mode N` on the command line
+    var colorMode = ColorMode(rawValue: UserDefaults.standard.string(forKey: "color") ?? "pq") ?? .pq { didSet { state.colorMode = colorMode } }
     var presentation = Presentation(rawValue: UserDefaults.standard.string(forKey: "presentation") ?? "")
-        ?? (UserDefaults.standard.bool(forKey: "lowLatency") ? .immediate : .smooth)
+        ?? (UserDefaults.standard.bool(forKey: "lowLatency") ? .immediate : .smooth) { didSet { state.presentation = presentation } }
     var modeItems: [NSMenuItem] = [], colorItems: [NSMenuItem] = []
     let audio = AudioPlayer()
-    var muteItem: NSMenuItem!, recordItem: NSMenuItem!
+    var muteItem: NSMenuItem!, recordItem: NSMenuItem!, sidebarItem: NSMenuItem!
     var presentationItems: [NSMenuItem] = []
     var recorder: Recorder?
     var recStart = Date()
     var recTimer: Timer?
+    var meterTimer: Timer?
     var measuredFps: Double = 30
     var lastInfo = ""
+    var focusRestoreSidebar = true     // sidebar state to restore when leaving focus mode
+    var galleryWindow: NSWindow?
 
     // Facecam + microphone layers
     let camera = CameraCapture()
     var cameraMenu = NSMenu(title: "Camera")
     var cameraID = UserDefaults.standard.string(forKey: "cameraID")
     var micID = UserDefaults.standard.string(forKey: "micID")
-    var cameraMirror = UserDefaults.standard.bool(forKey: "cameraMirror")
+    var cameraMirror = UserDefaults.standard.bool(forKey: "cameraMirror") { didSet { state.cameraMirror = cameraMirror } }
     var livePlacement: CameraPlacement = {
         if let d = UserDefaults.standard.data(forKey: "livePlacement"), let p = try? JSONDecoder().decode(CameraPlacement.self, from: d) { return p }
         return CameraPlacement()
-    }()
+    }() { didSet { state.placement = livePlacement } }
     var recDoc: ProjectDoc?
     var camWriter: LayerWriter?, micWriter: LayerWriter?
     static var activeRecordingDir: URL?
@@ -48,16 +57,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationDidFinishLaunching(_ n: Notification) {
         view = MetalView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
-        window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.contentView = view
-        window.contentAspectRatio = NSSize(width: 16, height: 9)
-        window.backgroundColor = .black
-        window.collectionBehavior = [.fullScreenPrimary]
-        window.isReleasedWhenClosed = false
+        syncStateFromSettings()
+        installActions()
+        studio = StudioWindowController(state: state, metalView: view)
+        window = studio.window
         window.delegate = self
-        window.center(); window.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        audio.muted = UserDefaults.standard.bool(forKey: "muted")
+        audio.muted = UserDefaults.standard.bool(forKey: "muted"); state.muted = audio.muted
         // Development: `--export <project folder> [hdr|sdr] [hd|uhd]` renders both canvases and quits (no capture).
         if let i = CommandLine.arguments.firstIndex(of: "--export"), i + 1 < CommandLine.arguments.count {
             let args = CommandLine.arguments
@@ -82,16 +89,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         view.onPlacement = { [weak self] p in self?.setPlacement(p) }
         view.contextMenu = { [weak self] in self?.makeCameraMenu(title: "Camera") }
+        camera.onState = { [weak self] in self?.syncDevices() }
         buildMenu()
-        setTitle("connecting…")
-        if CommandLine.arguments.contains("--no-capture") { setTitle("capture off (--no-capture)") } else { start() }
+        startMeterTimer()
+        observeDeviceChanges()
+        if CommandLine.arguments.contains("--no-capture") { setConnection(.noSignal("Capture is off (--no-capture)")) } else { start() }
         if demoCamera { camera.injectDemo(); applyOverlay() }
         if !demoCamera && cameraID != nil { camera.setCamera(uniqueID: cameraID) { [weak self] e in self?.deviceResult(e) } }
         if !demoCamera && micID != nil { camera.setMicrophone(uniqueID: micID) { [weak self] e in self?.deviceResult(e) } }
+        syncDevices()
         if CommandLine.arguments.contains("--fullscreen") { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.window.toggleFullScreen(nil) } }
         if CommandLine.arguments.contains("--library") { showLibrary() }
         #if DEBUG
+        if CommandLine.arguments.contains("--design-gallery") { galleryWindow = DesignGallery.open() }
+        if CommandLine.arguments.contains("--first-launch-sheet") {
+            // Shows the sheet for screenshots only: neither button can reach the administrator prompt from here.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.presentFirstLaunchSheet(preview: true) }
+        }
         DebugSnapshots.start()
+        startDebugChecks()
         #endif
         if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
@@ -102,16 +118,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     var headless = false
-    func setTitle(_ s: String) {
-        lastInfo = s
-        var t = "Elgato HDR  •  \(modes[modeIndex].name)  •  \(s)" + (audio.muted ? "  •  muted" : "")
-            + (camera.cameraOn ? "  •  cam" : "") + (camera.micOn ? "  •  mic" : "")
-        if recorder != nil {
-            let e = Int(Date().timeIntervalSince(recStart))
-            let layers = ["game"] + (camWriter != nil ? ["cam"] : []) + (micWriter != nil ? ["mic"] : [])
-            t = String(format: "● REC %02d:%02d [%@]  •  ", e / 60, e % 60, layers.joined(separator: "+")) + t
-        }
-        window.title = t + (demoSource != nil ? "  •  demo source" : "")
+
+    /// Statistics and connection state from the capture session; the window title stays the app name.
+    func setStatus(_ info: String) {
+        lastInfo = info
+        if info == "stream ended" { setConnection(.noSignal("The stream ended")); return }
+        if info.hasPrefix("helper too old") { setConnection(.noSignal("The capture helper is out of date: quit and reopen the app")); return }
+        guard let s = session, s.w > 0, let stats = StudioFormat.parseStats(info) else { return }
+        state.applyStats(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: stats.fps, nominal: nominalFps), latencyMs: stats.latencyMs, demo: demoSource != nil)
+    }
+
+    var nominalFps: Double { demoSource?.fps ?? modes[modeIndex].fps }
+
+    func setConnection(_ c: Connection) {
+        if state.connection != c { state.connection = c }
+        if case .connecting = c { state.signal = ""; state.shortSignal = ""; state.latencyMs = 0 }
     }
 
     func start() {
@@ -119,18 +140,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if demoSource != nil, session != nil { return }
         session?.stop(); session = nil
         let mode = modes[modeIndex]
-        setTitle("connecting…")
+        setConnection(.connecting)
+        let wantDemo = demoRequested
         DispatchQueue.global().async { [weak self] in
             let demo: DemoSource?
-            if let (w,h,f) = DemoSource.configuration(CommandLine.arguments) { demo = DemoSource(width: w, height: h, fps: f) } else { demo = nil }
+            if let (w,h,f) = DemoSource.configuration(CommandLine.arguments) { demo = DemoSource(width: w, height: h, fps: f) }
+            else if wantDemo { demo = DemoSource(width: 2560, height: 1440, fps: 60) }
+            else { demo = nil }
             var fd = demo.map { dup($0.readFD) } ?? connectHelper()
             if fd < 0 {
+                // Only the real card path gets here: a demo source always yields a descriptor.
+                precondition(demo == nil)
+                var proceed = false
+                DispatchQueue.main.sync { proceed = self?.confirmAdminPromptIfFirstLaunch() ?? false }
+                guard proceed else { return }   // the first-launch sheet restarts capture when answered
                 var spawned = false
                 DispatchQueue.main.sync { spawned = spawnHelperWithAdminPrompt() }
-                if !spawned { DispatchQueue.main.async { self?.setTitle("helper launch cancelled") }; return }
+                if !spawned { DispatchQueue.main.async { self?.setConnection(.noSignal("The helper was not started (password prompt cancelled)")) }; return }
                 for _ in 0..<50 { usleep(200_000); fd = connectHelper(); if fd >= 0 { break } }
             }
-            guard fd >= 0 else { DispatchQueue.main.async { self?.setTitle("helper not reachable") }; return }
+            guard fd >= 0 else { DispatchQueue.main.async { self?.setConnection(.noSignal("The capture helper is not reachable")) }; return }
             guard let self = self else { return }
             if let demo = demo {
                 self.demoSource?.stop()
@@ -138,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 DispatchQueue.main.sync { self.renderer?.displayLink?.invalidate(); self.renderer = nil }
             }
             if self.shm == nil { self.shm = mapSharedFrames() }
-            guard let shm = self.shm else { DispatchQueue.main.async { self.setTitle("shared memory unavailable (old helper?)") }; close(fd); return }
+            guard let shm = self.shm else { DispatchQueue.main.async { self.setConnection(.noSignal("Shared memory unavailable (old helper?)")) }; close(fd); return }
             DispatchQueue.main.sync {
                 if self.renderer == nil {
                     self.renderer = Renderer(layer: self.view.metalLayer, shm: shm, demoSource: demo)
@@ -148,7 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     self.applyOverlay()
                 }
             }
-            guard let renderer = self.renderer else { DispatchQueue.main.async { self.setTitle("Metal unavailable") }; close(fd); return }
+            guard let renderer = self.renderer else { DispatchQueue.main.async { self.setConnection(.noSignal("Metal is unavailable")) }; close(fd); return }
             let cmd = "START 7 \(mode.frame) \(mode.fps) SHM\n"
             if let demo = demo { demo.start() } else { _ = cmd.withCString { write(fd, $0, strlen($0)) } }
             renderer.resetPacing()
@@ -156,12 +185,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             s.audio = self.audio
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
                 if let r = info.range(of: #"([0-9.]+) fps"#, options: .regularExpression), let v = Double(info[r].dropLast(4)) { self?.measuredFps = v }
-                if let self = self, s.w > 0 {
-                    self.window.contentAspectRatio = NSSize(width: s.w, height: s.h)
+                if let self = self, s.w > 0, self.view.videoSize != CGSize(width: s.w, height: s.h) {
                     self.view.videoSize = CGSize(width: s.w, height: s.h)
                 }
-                self?.setTitle(info) } }
-            DispatchQueue.main.async { self.session = s; self.setTitle("starting…") }
+                self?.setStatus(info) } }
+            DispatchQueue.main.async { self.session = s }
             s.run()
         }
     }
@@ -171,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if recorder != nil { stopRecording() }
         session?.stop(); session = nil
         audio.stop()
+        setConnection(.noSignal("Capture stopped"))
     }
     @objc func showLiveView() {
         window.makeKeyAndOrderFront(nil)
