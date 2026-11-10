@@ -12,6 +12,16 @@ struct RenderPlan {
 
     var cameraRanges: [Segment]? = nil
 
+    static func joinedCameraRanges(_ ranges: [Segment]) -> [Segment] {
+        var out: [Segment] = []
+        for range in ranges.sorted(by: { $0.startMs < $1.startMs }) {
+            if let last = out.last, range.startMs <= last.endMs + 0.01 {
+                out[out.count - 1].endMs = max(last.endMs, range.endMs)
+            } else { out.append(range) }
+        }
+        return out
+    }
+
     private func selection(at t: Double) -> (Scene?, Scene?, SceneTransition, Double) {
         let s = map.source(fromTimeline: t)
         let spans = timeline.sceneSpans.filter { span in scenes.contains { $0.id == span.sceneID } }.sorted { $0.startMs < $1.startMs }
@@ -27,7 +37,7 @@ struct RenderPlan {
         guard let ranges = cameraRanges, sources[.camera] != nil else { return evaluatedLayers(atTimelineMs: t) }
         var absent = self; absent.sources.removeValue(forKey: .camera); absent.cameraRanges = nil
         let gameOnly = absent.evaluatedLayers(atTimelineMs: t)
-        guard let range = ranges.first(where: { t >= $0.startMs && t < $0.endMs }) else { return gameOnly }
+        guard let range = Self.joinedCameraRanges(ranges).first(where: { t >= $0.startMs && t < $0.endMs }) else { return gameOnly }
         let fadeIn = range.startMs > 0 ? min(1, (t - range.startMs) / 150) : 1
         let fadeOut = range.endMs < map.durationMs - 1 ? min(1, (range.endMs - t) / 150) : 1
         let weight = max(0, min(fadeIn, fadeOut))

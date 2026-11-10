@@ -27,8 +27,8 @@ final class EditorRecheckTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let dead = dir.appendingPathComponent(".export-2147483647-dead.mp4")
-        let live = dir.appendingPathComponent(".export-\(ProcessInfo.processInfo.processIdentifier)-live.mp4")
+        let dead = dir.appendingPathComponent(".export-2147483647-00000000-0000-0000-0000-000000000000.mp4")
+        let live = dir.appendingPathComponent(".export-\(ProcessInfo.processInfo.processIdentifier)-00000000-0000-0000-0000-000000000000.mp4")
         let published = dir.appendingPathComponent("published.mp4")
         for url in [dead, live, published] { try Data([1]).write(to: url) }
         Exporter.removeStalePartials(in: dir)
@@ -61,6 +61,26 @@ final class EditorRecheckTests: XCTestCase {
         let defaults = #"{"frameWidth":0,"frameColor":[0.42,0.49,1,1],"sceneTransition":{"style":"morph","durationMs":380}}"#
         XCTAssertEqual(EditorScriptTests.normalize(base), EditorScriptTests.normalize(defaults))
         XCTAssertNotEqual(EditorScriptTests.normalize(base), EditorScriptTests.normalize(#"{"frameWidth":0.1}"#))
+    }
+
+    func testHoverLoaderRestartsWithNewestProjectWhenOldLoadCompletes() async {
+        let first = Once<Bool>(), started = expectation(description: "first started"), restarted = expectation(description: "new generation")
+        let loader = await MainActor.run { ScrubFrameLoader() }
+        await MainActor.run {
+            var old = Project(name: "Old", createdAt: Date()); old.state = "complete"; old.durationMs = 1000
+            var latest = old; latest.durationMs = 2000
+            let doc = ProjectDoc(dir: URL(fileURLWithPath: "/tmp/hover-test"), project: latest)
+            loader.load = { _, project in
+                if project.durationMs == 1000 { started.fulfill(); _ = await first.wait() }
+                else { XCTAssertEqual(project.durationMs, 2000); restarted.fulfill() }
+                return []
+            }
+            loader.request(doc: doc, project: old)
+            DispatchQueue.main.async { loader.request(doc: doc, project: latest) }
+        }
+        await fulfillment(of: [started], timeout: 1)
+        first.resolve(true)
+        await fulfillment(of: [restarted], timeout: 1)
     }
 
     func testWatchdogExcludesEncoderWaitButEnforcesHardLimit() {

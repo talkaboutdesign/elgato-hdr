@@ -22,8 +22,8 @@ final class Exporter {
     let job: ExportJob
     let output: URL
     private let partialOutput: URL
-    /// No appended sample and no state change for this long fails the export as stalled.
     var useSoftwareH264 = false
+    /// Reader/compositor inactivity limit; encoder backpressure has its own longer limit.
     var stallTimeout: TimeInterval = 20
     var encoderWaitLimit: TimeInterval = 600
     var onEncoderWaiting: ((Bool) -> Void)?
@@ -62,8 +62,8 @@ final class Exporter {
         for url in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
             let name = url.lastPathComponent
             guard name.hasPrefix(".export-"), name.hasSuffix(".mp4") else { continue }
-            let part = name.dropFirst(8).split(separator: "-").first ?? ""
-            if let pid = Int32(part), pid > 0 {
+            let parts = name.dropFirst(8).split(separator: "-")
+            if parts.count == 6, let pid = Int32(parts[0]), pid > 0 {
                 // Another app instance may be exporting into this project. EPERM also means it is alive.
                 guard kill(pid, 0) != 0, errno == ESRCH else { continue }
             } else {
@@ -427,7 +427,7 @@ final class Activity {
 }
 
 /// Never hold a shared lock across append: the writer may wait for the other input to advance.
-/// AVFoundation cancellation stops an in-flight append; the flag prevents further work afterwards.
+/// Close admission and drain callbacks before AVFoundation cancellation touches their reader or writer.
 final class WriterGate {
     private let condition = NSCondition()
     private var closed = false, active = 0

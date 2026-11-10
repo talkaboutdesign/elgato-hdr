@@ -266,9 +266,8 @@ struct ProjectCard: View {
     @State private var thumb: NSImage?
     @State private var hover = false
     @State private var scrub: Int?
-    @State private var frames: [CGImage] = []
-    @State private var framesKey = ""
-    @State private var loadingFrames = false
+    @State private var frameLoader = ScrubFrameLoader()
+    private var frames: [CGImage] { frameLoader.frames }
 
     var body: some View {
         let p = project
@@ -351,6 +350,7 @@ struct ProjectCard: View {
         .animation(DS.Motion.snappy, value: hover)
         .animation(.easeOut(duration: 0.12), value: scrub)
         .onHover { hover = $0 }
+        .onChange(of: ScrubFrames.fingerprint(project)) { _, _ in if hover { loadFrames() } }
         .contentShape(Rectangle())
         .task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
         #if DEBUG
@@ -365,20 +365,35 @@ struct ProjectCard: View {
         .accessibilityHint("Double-click to open")
     }
 
-    private func loadFrames() {
-        // An edit made since the frames were loaded (the editor saved) makes them stale.
-        let key = ScrubFrames.fingerprint(project)
-        if framesKey != key { frames = []; framesKey = key }
-        guard frames.isEmpty, !loadingFrames, project.state == "complete" else { return }
-        loadingFrames = true
-        let doc = self.doc, p = project
-        Task {
-            let f = await ScrubFrames.load(doc, project: p)
-            await MainActor.run {
-                loadingFrames = false
-                if framesKey == key { frames = f }
-                else { loadFrames() }
+    private func loadFrames() { frameLoader.request(doc: doc, project: project) }
+
+}
+
+/// Keep the newest value snapshot while an asynchronous load is running; completion never restarts an old View.
+@Observable
+final class ScrubFrameLoader {
+    var frames: [CGImage] = []
+    private(set) var key = ""
+    private var pending: (ProjectDoc, Project)?
+    private var loading = false
+    var load: (ProjectDoc, Project) async -> [CGImage] = { await ScrubFrames.load($0, project: $1) }
+
+    func request(doc: ProjectDoc, project: Project) {
+        guard project.state == "complete" else { return }
+        let next = ScrubFrames.fingerprint(project)
+        if key != next { frames = []; key = next }
+        guard frames.isEmpty else { return }
+        pending = (doc, project)
+        guard !loading else { return }
+        loading = true
+        Task { @MainActor in
+            while let (doc, project) = pending {
+                pending = nil
+                let generation = ScrubFrames.fingerprint(project)
+                let result = await load(doc, project)
+                if generation == key { frames = result; pending = nil }
             }
+            loading = false
         }
     }
 }
