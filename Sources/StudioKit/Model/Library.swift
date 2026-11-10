@@ -7,14 +7,21 @@ import AVFoundation
 final class Library: ObservableObject {
     static let shared = Library()
     @Published var docs: [ProjectDoc] = []
-    var root: URL { AppDelegate.recordingsDir }
+    var root: URL { customRoot ?? AppDelegate.recordingsDir }
+    private let customRoot: URL?
+    private(set) var recoveryAttempted = Set<URL>()   // reload runs often; recover each folder at most once per launch
+
+    init(root: URL? = nil) { customRoot = root }
 
     func reload() {
         let fm = FileManager.default
         let dirs = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
         let found = dirs.compactMap { ProjectDoc.load($0) }.sorted { $0.project.createdAt > $1.project.createdAt }
-        for d in found where d.project.state == "recording" && !AppDelegate.isRecording(d.dir) {
-            d.finalize { [weak self] in self?.objectWillChange.send() }   // recover a recording interrupted by a crash
+        for d in found where d.project.state == "recording" && !AppDelegate.isRecording(d.dir) && !recoveryAttempted.contains(d.dir) {
+            recoveryAttempted.insert(d.dir)
+            log("recovering interrupted recording \(d.dir.lastPathComponent)")
+            // Reload from disk afterwards: another reload may have replaced `d` in `docs` while finalize ran.
+            d.finalize { [weak self] in self?.reload() }
         }
         docs = found
     }

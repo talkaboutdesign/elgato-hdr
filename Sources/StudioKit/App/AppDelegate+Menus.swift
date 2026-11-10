@@ -11,7 +11,7 @@ extension AppDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit Elgato HDR", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit \(AppInfo.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         // Standard Edit menu so text fields (rename, search) get copy/paste/undo.
@@ -51,6 +51,7 @@ extension AppDelegate {
         let camItem = NSMenuItem(); main.addItem(camItem)
         cameraMenu.delegate = self   // rebuilt on open so device lists stay current
         camItem.submenu = cameraMenu
+        addScenesMenu(to: main)
 
         let recItem = NSMenuItem(); main.addItem(recItem)
         let recMenu = NSMenu(title: "Record")
@@ -61,10 +62,16 @@ extension AppDelegate {
         recMenu.addItem(withTitle: "Show Recordings in Finder", action: #selector(showRecordings), keyEquivalent: "")
         recItem.submenu = recMenu
 
+        addStreamMenu(to: main)
+
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Show Live View", action: #selector(showLiveView), keyEquivalent: "0")
-        viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        viewMenu.addItem(withTitle: "Focus Mode (Full Screen)", action: #selector(toggleFocusMode), keyEquivalent: "f")
+        viewMenu.addItem(makeCleanGameItem())
+        sidebarItem = NSMenuItem(title: "Hide Sidebar", action: #selector(toggleSidebar), keyEquivalent: "s")
+        sidebarItem.keyEquivalentModifierMask = [.command, .option]
+        viewMenu.addItem(sidebarItem)
         viewMenu.addItem(.separator())
         for (name, p, key) in [("Smooth", Presentation.smooth, "j"), ("Game (low latency, no tearing)", .game, "g"), ("Lowest Latency (may tear)", .immediate, "l")] {
             let it = NSMenuItem(title: name, action: #selector(selectPresentation(_:)), keyEquivalent: key)
@@ -74,6 +81,7 @@ extension AppDelegate {
         let rc = NSMenuItem(title: "Reconnect", action: #selector(reconnect), keyEquivalent: "r"); rc.keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(rc)
         viewItem.submenu = viewMenu
+        viewMenu.delegate = self; recMenu.delegate = self   // refreshChecks on open (sidebar and record titles)
         NSApp.mainMenu = main
         populateCameraMenu(cameraMenu)
         refreshChecks()
@@ -81,9 +89,12 @@ extension AppDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) { if menu === cameraMenu { populateCameraMenu(menu) } }
 
+    func menuWillOpen(_ menu: NSMenu) { refreshChecks() }
+
     func makeCameraMenu(title: String) -> NSMenu { let m = NSMenu(title: title); populateCameraMenu(m); return m }
 
     /// Camera menu: devices, then the overlay window's look. Also used as the live view's right-click menu.
+    /// Check marks read StudioState, the same values the sidebar shows.
     func populateCameraMenu(_ m: NSMenu) {
         m.removeAllItems()
         func item(_ title: String, _ sel: Selector, _ key: String = "", on: Bool = false, obj: Any? = nil, enabled: Bool = true) -> NSMenuItem {
@@ -94,18 +105,20 @@ extension AppDelegate {
         _ = item(camera.cameraOn ? "Hide Camera" : "Show Camera", #selector(toggleCamera), "k")
         m.addItem(.separator())
         let camHeader = NSMenuItem(title: "Camera", action: nil, keyEquivalent: ""); camHeader.isEnabled = false; m.addItem(camHeader)
-        let cams = demoCamera ? [] : CameraCapture.cameras()
-        if cams.isEmpty { _ = item("No cameras found", #selector(noop), enabled: false) }
-        for d in cams { _ = item(d.localizedName, #selector(selectCamera(_:)), on: camera.cameraOn && d.uniqueID == cameraID, obj: d.uniqueID) }
+        syncDevices()
+        let cams = demoCamera ? [] : state.cameras
+        if cams.isEmpty { _ = item(demoCamera ? "Demo Camera" : "No cameras found", #selector(noop), on: demoCamera && state.cameraOn, enabled: false) }
+        for d in cams { _ = item(d.name, #selector(selectCamera(_:)), on: state.cameraID == d.id, obj: d.id) }
         m.addItem(.separator())
         let micHeader = NSMenuItem(title: "Microphone (recorded as its own layer)", action: nil, keyEquivalent: ""); micHeader.isEnabled = false; m.addItem(micHeader)
-        _ = item("None", #selector(selectMic(_:)), on: !camera.micOn, obj: "")
-        for d in (demoCamera ? [] : CameraCapture.microphones()) { _ = item(d.localizedName, #selector(selectMic(_:)), on: camera.micOn && d.uniqueID == micID, obj: d.uniqueID) }
+        _ = item("None", #selector(selectMic(_:)), on: !state.micOn, obj: "")
+        if demoCamera { _ = item("Demo Microphone", #selector(noop), on: state.micOn, enabled: false) }
+        for d in (demoCamera ? [] : state.microphones) { _ = item(d.name, #selector(selectMic(_:)), on: state.micID == d.id, obj: d.id) }
         m.addItem(.separator())
-        let p = livePlacement
-        _ = item("Circle", #selector(setShape(_:)), on: p.isCircle, obj: "circle")
-        _ = item("Rounded", #selector(setShape(_:)), on: !p.isCircle && p.roundness > 0, obj: "rounded")
-        _ = item("Square Corners", #selector(setShape(_:)), on: p.roundness == 0, obj: "square")
+        let p = state.placement, shape = CameraShape(p)
+        _ = item("Circle", #selector(setShape(_:)), on: shape == .circle, obj: "circle")
+        _ = item("Rounded", #selector(setShape(_:)), on: shape == .rounded, obj: "rounded")
+        _ = item("Square Corners", #selector(setShape(_:)), on: shape == .square, obj: "square")
         let aspectItem = NSMenuItem(title: "Window Shape", action: nil, keyEquivalent: ""); m.addItem(aspectItem)
         let am = NSMenu()
         for a in CameraAspect.allCases {
@@ -123,7 +136,7 @@ extension AppDelegate {
         _ = item("Bigger", #selector(biggerCamera), "=")
         _ = item("Smaller", #selector(smallerCamera), "-")
         m.addItem(.separator())
-        _ = item("Mirror", #selector(toggleMirror), on: cameraMirror)
+        _ = item("Mirror", #selector(toggleMirror), on: state.cameraMirror)
         _ = item("Border", #selector(toggleBorder), on: p.border)
         _ = item("Shadow", #selector(toggleShadow), on: p.shadow)
         m.addItem(.separator())
@@ -132,21 +145,33 @@ extension AppDelegate {
 
     @objc func noop() {}
 
+    /// Menu check marks come from StudioState, so they always match the studio window's controls.
     func refreshChecks() {
-        for it in modeItems { it.state = it.tag == modeIndex ? .on : .off }
-        for it in colorItems { it.state = (it.representedObject as? String) == colorMode.rawValue ? .on : .off }
-        muteItem?.state = audio.muted ? .on : .off
-        for it in presentationItems { it.state = (it.representedObject as? String) == presentation.rawValue ? .on : .off }
+        for it in modeItems { it.state = it.tag == state.modeIndex ? .on : .off }
+        for it in colorItems { it.state = (it.representedObject as? String) == state.colorMode.rawValue ? .on : .off }
+        muteItem?.state = state.muted ? .on : .off
+        for it in presentationItems { it.state = (it.representedObject as? String) == state.presentation.rawValue ? .on : .off }
+        recordItem?.title = state.recording ? "Stop Recording" : "Start Recording"
+        sidebarItem?.title = state.sidebarVisible ? "Hide Sidebar" : "Show Sidebar"
     }
 
-    @objc func selectMode(_ sender: NSMenuItem) { modeIndex = sender.tag; UserDefaults.standard.set(modeIndex, forKey: "mode"); refreshChecks(); start() }
-    @objc func selectColor(_ sender: NSMenuItem) {
-        colorMode = ColorMode(rawValue: sender.representedObject as! String)!; UserDefaults.standard.set(colorMode.rawValue, forKey: "color")
-        refreshChecks(); renderer?.colorMode = colorMode
+    @objc func selectMode(_ sender: NSMenuItem) { selectMode(index: sender.tag) }
+    func selectMode(index: Int) {
+        guard modes.indices.contains(index) else { return }
+        modeIndex = index; UserDefaults.standard.set(modeIndex, forKey: "mode"); refreshChecks(); start()
     }
-    @objc func toggleMute() { audio.muted.toggle(); UserDefaults.standard.set(audio.muted, forKey: "muted"); refreshChecks(); setTitle(lastInfo) }
-    @objc func selectPresentation(_ sender: NSMenuItem) {
-        presentation = Presentation(rawValue: sender.representedObject as! String)!; UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
+    @objc func selectColor(_ sender: NSMenuItem) { if let m = ColorMode(rawValue: sender.representedObject as? String ?? "") { selectColor(mode: m) } }
+    func selectColor(mode: ColorMode) {
+        colorMode = mode; UserDefaults.standard.set(colorMode.rawValue, forKey: "color")
+        refreshChecks(); renderer?.colorMode = colorMode
+        if let s = session, s.w > 0 { state.formatSignal(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: measuredFps, nominal: nominalFps)) }
+    }
+    @objc func toggleMute() {
+        audio.muted.toggle(); state.muted = audio.muted; UserDefaults.standard.set(audio.muted, forKey: "muted"); refreshChecks()
+    }
+    @objc func selectPresentation(_ sender: NSMenuItem) { if let p = Presentation(rawValue: sender.representedObject as? String ?? "") { selectPresentation(mode: p) } }
+    func selectPresentation(mode: Presentation) {
+        presentation = mode; UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
         refreshChecks(); renderer?.presentation = presentation
     }
     @objc func reconnect() { start() }

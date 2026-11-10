@@ -17,6 +17,9 @@ The whole thing is a few MB: a small native AppKit/SwiftUI app plus a C helper. 
 - **Captures audio too.** Pulls the card's USB audio (48 kHz stereo) alongside the video, plays it live with a mute toggle, and muxes it into the recording locked to the video clock.
 - **Smooth, in-sync playback.** Frames are paced to the display's refresh so motion is even, and recorded files are stamped on a fixed frame grid so they play back perfectly steady regardless of USB timing jitter.
 - **Facecam overlay, like a streamer.** Show any camera (built-in, Studio Display, iPhone Continuity Camera, USB webcam) in a window over the game. Drag it anywhere (it snaps to corners and edges), drag a corner or scroll to resize, and pick circle, rounded or square.
+- **Scenes, switched live.** A strip of scenes (Gameplay, Game Only, Camera Focus, Just Camera, and your own) with ⌃1–⌃9. Switching glides each layer to its new place (morph), fades or cuts; a live zoom punches in on the game. Arrange any layer directly on the picture, separately for 16:9 and 9:16.
+- **Overlays.** Image and text layers (logos, name tags, a live `{timer}` or the clock), ready-made screens for *Starting Soon*, *Be Right Back* and *Ending*, and presets for a name tag and a camera frame. They show in the window, in every stream and in the scene thumbnails; the editor preview and exports do not draw them yet.
+- **Go live, to several platforms at once.** Twitch, YouTube, Kick or any RTMP/RTMPS server, in 16:9 and 9:16 at the same time, each showing the scene you are on, with per-destination health.
 - **Layered recordings.** Game, camera and microphone are recorded as separate files that start at exactly the same instant, so nothing is baked in. Change the layout, framing, volumes and sync after the fact.
 - **One recording, every format.** The built-in editor lays out a widescreen **16:9** cut and a vertical **9:16** cut (for Shorts, Reels and TikTok) independently, and exports both in one go, as HDR10 HEVC or SDR H.264.
 - **All the card's HDR modes.** 4K30, 1440p60, ultrawide 2560×1080 60, 1080p 120/60/30, and 720p 120, every one of them 10-bit.
@@ -59,7 +62,7 @@ xcode-select --install       # if you don't already have the CLT
 swift build                  # compile StudioKit and the executable (Swift 5 mode)
 swift test                   # unit, compositor golden and export tests
 ./build.sh                   # release bundle: dist/Elgato HDR.app
-./build.sh debug             # debug bundle, includes --make-fixture
+./build.sh debug             # debug bundle, includes --make-fixture and --design-gallery
 open "dist/Elgato HDR.app"
 ```
 
@@ -68,11 +71,63 @@ open "dist/Elgato HDR.app"
 ## Using it
 
 1. Plug an HDR source into the Elgato 4K X and connect the card to your Mac.
-2. Launch **Elgato HDR**. The first launch shows one macOS **administrator prompt** — this is required (see [How it works](#how-it-works)). Enter your password and the live picture appears.
-3. Pick your source resolution from the **Input** menu, and the matching **Color** mode.
-4. Optional: press **⌘K** to show your camera, and pick a microphone in the **Camera** menu. Drag the camera where you want it.
-5. Press **⌘R** to start and stop recording. Each recording is saved as its own folder in `~/Movies/Elgato HDR/`.
+2. Launch **Elgato HDR**. The first time, a short sheet explains why the app needs your password, then macOS shows its **administrator prompt** — this is required (see [How it works](#how-it-works)). Enter your password and the live picture appears. No card at hand? Choose **Try the Demo Source** on that sheet.
+3. Pick your source resolution and colour mode in the sidebar's **Scene** tab, under **Picture** (or the **Input** and **Color** menus).
+4. Optional: choose your camera (select the camera layer in the **Scene** tab) and your microphone in the **Audio** tab, or press **⌘K** and use the **Camera** menu. Drag the camera where you want it on the picture.
+5. Click **Record** in the toolbar, or press **⌘R**, to start and stop recording. Each recording is saved as its own folder in `~/Movies/Elgato HDR/`.
 6. Press **⌘O** to open the **Recordings** library. Double-click a recording to edit and export it.
+
+### The studio window
+
+- **Toolbar:** the **Record** button turns into a running timer while recording. **Go Live** shows how many destinations are on; clicking it lists them with switches and a confirm button, so going live always takes two clicks. While live it reads **LIVE 12:34** and opens per-destination health with **End Stream**. The **16:9 / 9:16** switch picks which canvas the window shows and you edit; streams always get their own canvas, whichever is shown.
+- **Picture:** the active scene, letterboxed to any window size. Click a layer to select it, drag to move (it snaps to edges, centres and other layers; ⌥ turns snapping off), drag a handle to resize, scroll to scale, arrow keys to nudge, ⌫ to delete an image, text or colour layer (the game and camera are hidden instead). Double-click the game or camera to crop it, or a text layer to edit its words. Drop an image file on the picture to add it there. The status pill in the bottom-left corner shows the signal and the delay to the screen (or *Connecting…*, *No signal*, *Demo source*); it fades away when you stop moving the mouse.
+- **Bottom bar:** the scene strip with a live thumbnail of every scene (click to switch, drag to reorder, right-click to rename, duplicate or delete, **+** for the template gallery), game-audio monitoring and a live microphone meter.
+- **Sidebar** (⌥⌘S): **Scene** holds the active scene's layers (topmost first, with an eye to hide each and **+** to add one), an inspector for the selected layer, the transition and live zoom, and the picture settings; **Audio** holds game monitoring and the microphone with its level; **Stream** lists your destinations with their switches and, while live, each one's state, bitrate, dropped frames and uptime, plus the output settings (resolution, frame rate, bitrate with the total upload, mic delay).
+- **Focus mode** (⌘F): full screen with the sidebar and bottom bar out of the way, so the game fills the display. Move the pointer to the top edge for the toolbar; leaving full screen brings the panels back as they were.
+  With **View › Show Clean Game Picture in Focus Mode** (on by default) the full-screen picture is the whole game in its own aspect, without camera, overlays, crop or zoom: an ultrawide game is letterboxed instead of cropped to 16:9, so no HUD is lost. The stream, recordings and scene thumbnails still show the scene.
+- Messages such as *Recording saved* appear briefly at the top of the picture instead of in the window title.
+
+### Scenes and overlays
+
+Every scene has its own 16:9 and 9:16 layout: a stack of layers drawn bottom first. The **+** in the Scene tab's
+**Layers** list adds:
+
+- **Image…**: a PNG, JPEG, HEIC, TIFF or GIF (its first frame). Or drag the file onto the picture. The inspector
+  replaces the file and sets fill or fit, corners, opacity, border and shadow.
+- **Text**: type in the inspector and the picture follows as you type. Font, weight, alignment, colour, a rounded
+  plate behind it and a shadow. `{timer}` shows how long you have been live (or, when not live, recording; otherwise
+  0:00) and `{time}` the clock; both update by themselves.
+- **Color**: a solid backdrop.
+- **Game** and **Camera**, and the presets **Name Tag** (your name on a plate, bottom left) and **Camera Frame** (a
+  coloured ring around the camera).
+
+The **+** at the end of the scene strip adds a scene from a template: the layouts, or the screens **Starting Soon**
+(title and the clock), **Be Right Back** (with the live timer) and **Ending** (your camera in a ring). Templates are
+built from colour, text and camera layers, so everything in them can be edited. Switching to a scene that shares a
+layer with the current one (a duplicate, say) glides that layer to its new place.
+
+Scenes are saved in `~/Library/Application Support/Elgato HDR/scenes.json`; imported images are copied into
+`~/Library/Application Support/Elgato HDR/Assets/` under a name made from their contents, so moving or deleting the
+original does not break a scene.
+
+### Streaming
+
+Add Twitch, YouTube, Kick or any RTMP/RTMPS server in the sidebar's **Stream** tab (or **Stream → Add Destination…**):
+pick the service, paste the stream key (the URL is prefilled for Twitch and YouTube; Kick gives you a personal URL),
+choose 16:9 or 9:16, and use **Test Connection** to check URL and key without going live. Every destination on the
+same canvas shares one encode; each uploads its own copy, so three destinations at 6,000 kbps need about 18.5 Mbps
+of upload. While live you can switch single destinations off and on; one failing never stops the others.
+
+To stream: click **Go Live** (or ⇧⌘L), check the destinations, and confirm. Each stream shows the scene you are on in
+its own canvas: a widescreen destination the scene's 16:9 layout, a vertical one its 9:16 layout, with the same
+transitions, live zoom and overlays as the window, frame for frame. Switch scenes with the strip or ⌃1–⌃9 while live,
+start and stop recordings, or change the capture mode or reconnect the card: the stream keeps running (it shows the
+scene without the game until the picture is back). Focus mode's clean game picture is for your screen only; viewers
+always get the scene.
+
+Stream keys are stored in your login Keychain, never in files or logs. The app is ad-hoc signed until it is
+notarized (plan 90), so after installing a new build macOS may ask for your password the first time the app reads
+a saved key; choose **Always Allow**. If you deny it, enter the key again in the destination's sheet.
 
 ### Editing and exporting
 
@@ -89,8 +144,10 @@ A recording folder contains:
 ```
 game.mov       10-bit HEVC HDR video + game audio (the card's signal, untouched)
 camera.mov     H.264 facecam (only if the camera was on)
-mic.m4a        AAC microphone (only if a mic was selected)
-project.json   Layouts, trim, volumes and sync; every edit is non-destructive
+mic.mov        AAC microphone (only if a mic was selected; mic.m4a in older recordings)
+project.json   Layouts, trim, volumes and sync, plus the scenes as they were when recording started and the live
+               events (scene switches, zooms, markers) with their times; every edit is non-destructive
+Assets/        The images the scenes use, so the folder stays complete when it is moved (only if there are any)
 thumbnail.jpg  Library preview
 Exports/       Rendered videos
 ```
@@ -104,14 +161,25 @@ Exports/       Rendered videos
 | Audio | Mute | ⌘M |
 | Camera | Show / Hide Camera | ⌘K |
 | Camera | Bigger / Smaller | ⌘= / ⌘- |
-| Camera | Camera, microphone, shape, position, mirror, border, shadow | — (also on right-click in the live view) |
-| Record | Start / Stop Recording | ⌘R |
+| Camera | Camera, microphone, shape, position, mirror, border, shadow | — (also on right-click in the live view, and in the sidebar) |
+| Record | Start / Stop Recording | ⌘R (also the toolbar's Record button) |
 | Record | Recordings Library | ⌘O |
 | Record | Show Recordings in Finder | — |
+| Stream | Go Live… / Stream Health… | ⇧⌘L (also the toolbar's Go Live button) |
+| Stream | End Stream, Add Destination…, Destinations and Settings | — |
 | View | Show Live View | ⌘0 |
-| View | Toggle Full Screen | ⌘F |
+| View | Focus Mode (Full Screen) | ⌘F |
+| View | Hide / Show Sidebar | ⌥⌘S |
 | View | Smooth / Game / Lowest Latency | ⌘J / ⌘G / ⌘L |
 | View | Reconnect | ⇧⌘R |
+| View | Show Clean Game Picture in Focus Mode | — |
+| Scenes | Switch to a scene | ⌃1 – ⌃9 (also a click in the scene strip) |
+| Scenes | Next / Previous Scene | ⌃⇧→ / ⌃⇧← |
+| Scenes | Zoom In on Game / Zoom Out | ⌃Z, or hold ⌃⇧Space to zoom while held; arrow keys move the zoom |
+| Scenes | Add Marker (while recording) | ⌃M |
+
+macOS keeps ⌃Space (input sources) and ⌃← / ⌃→ (Mission Control) for itself, so the scene shortcuts add ⇧. While you
+type in a field, ⌃Z, the arrow keys and ⌫ go to the field, never to the picture.
 
 The **View** menu picks how frames reach the screen. None of these affect recordings.
 
@@ -158,6 +226,9 @@ Sources/ElgatoHDR/main.swift   Three-line executable entry point
 Sources/StudioKit/App/        App delegate extensions, demo source, debug fixture writer
 Sources/StudioKit/Capture/    Helper protocol, sessions, camera + microphone capture
 Sources/StudioKit/Render/     Shared Metal compositor and live renderer
+Sources/StudioKit/Scenes/     Scene collection, transitions and live zoom, templates, thumbnails
+Sources/StudioKit/Overlays/   Image assets, text rasterizer and the overlay texture cache
+Sources/StudioKit/Streaming/  Program outputs, H.264 encoder, stream session, destinations, RTMP
 Sources/StudioKit/Audio/      Audio playback
 Sources/StudioKit/Record/     Game and layer writers
 Sources/StudioKit/Model/      Project, layout math and library
@@ -206,6 +277,12 @@ Demo mode uses synthetic P010 game video, game audio, a 720p camera and mono mic
 camera/microphone access. Use both flags to bypass saved real-device selections. The moving picture flashes with
 a 50 ms 1 kHz beep each second. Recordings and exports use the normal code paths.
 Logs are in `~/Library/Logs/Elgato HDR.log` and stderr.
+
+Streaming without touching your own destinations or keys: `EHDR_STREAMING_FILE=<path>` uses another
+`streaming.json`, `EHDR_KEYCHAIN_SERVICE=<name>` another Keychain service, and `--go-live-for <seconds>` goes live to
+the enabled destinations and quits afterwards (with `EHDR_STREAM_KEY` as the key for all of them; used by
+`scripts/stream-selftest.sh`). Debug builds take `EHDR_STREAM_UI="tab@1,popover@4,sheet:twitch@8,close@12"` to open
+the stream UI for `EHDR_SNAPSHOT` screenshots.
 
 `RECORD_GOLDENS=1 swift test --filter CompositorGoldenTests` regenerates the twelve PQ/HLG/SDR layout goldens;
 review changes before committing. Metal tests skip without a Metal device; export tests skip without hardware HEVC.

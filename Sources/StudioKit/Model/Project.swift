@@ -120,6 +120,20 @@ struct LayerInfo: Codable, Equatable {
     }
 }
 
+/// Something the user did live while recording, so the editor can replay it. `tMs` is source time (host time minus
+/// the recording's start).
+struct SessionEvent: Codable, Equatable {
+    var tMs: Double; var type: String       // "scene" | "zoomIn" | "zoomOut" | "marker"
+    var sceneID: UUID?; var zoom: Double?; var focusX: Double?; var focusY: Double?
+}
+extension SessionEvent {
+    enum CodingKeys: String, CodingKey { case tMs, type, sceneID, zoom, focusX, focusY }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        self.init(tMs: c.v(.tMs, 0), type: c.v(.type, ""), sceneID: c.v(.sceneID, nil), zoom: c.v(.zoom, nil), focusX: c.v(.focusX, nil), focusY: c.v(.focusY, nil))
+    }
+}
+
 struct Project: Codable, Equatable {
     var version = 2
     var name: String
@@ -135,8 +149,8 @@ struct Project: Codable, Equatable {
     var trimStartMs = 0.0, trimEndMs = 0.0   // 0 end = full length
     var wide = CanvasLayout.wideDefault
     var vertical = CanvasLayout.verticalDefault
-    var scenes: [Scene] = []
-    var events: [SessionEvent] = []
+    var scenes: [Scene] = []                  // the scene collection when recording started
+    var events: [SessionEvent] = []           // live switches, zooms and markers, in source milliseconds
     var timeline = Timeline()
     var lastExport: [String: String] = [:]    // canvas raw value -> file name
 
@@ -157,6 +171,13 @@ struct Project: Codable, Equatable {
         wide = c.v(.wide, z.wide); vertical = c.v(.vertical, z.vertical); lastExport = c.v(.lastExport, [:])
         scenes = c.v(.scenes, []); events = c.v(.events, []); timeline = c.v(.timeline, Timeline())
         if version < 2 { migrateTimeline() }; version = 2
+    }
+
+    /// A recording logs live events (plan 22) but writes no timeline. Once its duration is known, an untouched timeline
+    /// is derived from them, exactly as an older project's is on migration.
+    mutating func seedTimelineFromEvents() {
+        guard timeline == Timeline(), !events.isEmpty else { return }
+        migrateTimeline()
     }
 
     mutating func migrateTimeline() {

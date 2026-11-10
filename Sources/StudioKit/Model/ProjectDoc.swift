@@ -29,19 +29,38 @@ final class ProjectDoc: Identifiable, Hashable {
     }
 
     /// Fills in duration and size from the game file and writes a thumbnail; used after recording and for recovery.
+    /// Layers that did not survive (missing file, no samples) are dropped; an unreadable game file marks the project
+    /// "damaged" so the library stops retrying it.
     func finalize(completion: @escaping () -> Void) {
         Task {
             let asset = AVURLAsset(url: url(project.game.file))
-            if let d = try? await asset.load(.duration), d.seconds.isFinite { project.durationMs = d.seconds * 1000 }
-            if let t = try? await asset.loadTracks(withMediaType: .video).first {
-                if let s = try? await t.load(.naturalSize) { project.width = Int(s.width); project.height = Int(s.height) }
-                if let f = try? await t.load(.nominalFrameRate), f > 0 { project.fps = Double(f) }
+            let duration = try? await asset.load(.duration)
+            let track = try? await asset.loadTracks(withMediaType: .video).first
+            guard let d = duration, d.seconds.isFinite, d.seconds > 0, let t = track else {
+                log("finalize: \(project.game.file) in \(dir.lastPathComponent) is unreadable, marking damaged")
+                project.state = "damaged"
+                save()
+                await MainActor.run { completion() }
+                return
             }
+            project.durationMs = d.seconds * 1000
+            project.seedTimelineFromEvents()
+            if let s = try? await t.load(.naturalSize) { project.width = Int(s.width); project.height = Int(s.height) }
+            if let f = try? await t.load(.nominalFrameRate), f > 0 { project.fps = Double(f) }
+            if let c = project.camera, await !layerReadable(c) { log("finalize: dropping unreadable camera layer \(c.file)"); project.camera = nil }
+            if let m = project.mic, await !layerReadable(m) { log("finalize: dropping unreadable mic layer \(m.file)"); project.mic = nil }
+            // Thumbnail first: the library reloads a card's image when its state changes, so it must exist by then.
+            await writeThumbnail()
             project.state = "complete"
             save()
-            await writeThumbnail()
             await MainActor.run { completion() }
         }
+    }
+
+    private func layerReadable(_ layer: LayerInfo) async -> Bool {
+        let u = url(layer.file)
+        guard FileManager.default.fileExists(atPath: u.path), let d = try? await AVURLAsset(url: u).load(.duration) else { return false }
+        return d.seconds.isFinite && d.seconds > 0
     }
 
     /// Card image for the library: a frame of the 16:9 composite, so it shows the facecam as laid out.

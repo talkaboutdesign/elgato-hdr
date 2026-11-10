@@ -231,7 +231,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     static func demoAudio(sample: Int, count: Int) -> CMSampleBuffer? {
         var samples = (0..<count).map { i -> Float in
             let p = (sample + i) % 48000
-            return p < 2400 ? Float(sin(Double(p) * 2 * .pi / 48) * 0.24) : 0
+            return p < 2400 ? Float(sin(Double(p) * 2 * .pi / 24) * 0.24) : 0
         }
         var block: CMBlockBuffer?
         CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: count*4, blockAllocator: nil,
