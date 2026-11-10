@@ -328,7 +328,11 @@ struct SceneSchematic: View {
             ctx.clip(to: Path(roundedRect: rect, cornerRadius: 5))
             let bg = composition.background
             ctx.fill(Path(rect), with: .color(Color(red: bg.count > 0 ? bg[0] : 0, green: bg.count > 1 ? bg[1] : 0, blue: bg.count > 2 ? bg[2] : 0)))
-            let layers = SceneResolver.resolve(composition, canvas: size, sources: [.game: SourceInfo(size: gameSize), .camera: SourceInfo(size: CGSize(width: 16, height: 9))])
+            // Overlays as their boxes (text) or proportions (images), so scenes that differ only in them look different.
+            var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: gameSize), .camera: SourceInfo(size: CGSize(width: 16, height: 9))]
+            let overlays = composition.layers.filter(\.isOverlay)
+            if !overlays.isEmpty { sources.merge(OverlayTextureCache.shared.sourceSizes(for: overlays, canvas: size, assets: model.assetSearchPaths)) { own, _ in own } }
+            let layers = SceneResolver.resolve(composition, canvas: size, sources: sources)
             for l in layers {
                 let path = Path(roundedRect: l.dst, cornerRadius: l.radius)
                 switch l.key {
@@ -350,7 +354,8 @@ struct SceneSchematic: View {
                     ctx.draw(person, in: CGRect(x: l.dst.midX - s / 2, y: l.dst.midY - s / 2 + s * 0.08, width: s, height: s))
                     if l.border > 0 { ctx.stroke(path, with: .color(.white), lineWidth: 1) }
                 default:
-                    ctx.fill(path, with: .color(.white.opacity(0.25)))
+                    if let c = l.color { ctx.fill(path, with: .color(Color(red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: Double(c.w * Float(l.opacity))))) }
+                    else { ctx.fill(path, with: .color(.white.opacity(0.55 * l.opacity))) }
                 }
             }
         }

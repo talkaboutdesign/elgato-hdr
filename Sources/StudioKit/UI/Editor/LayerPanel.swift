@@ -7,6 +7,7 @@ import SwiftUI
 /// The scene at the playhead: its name and canvas, what can be done with it, and its layers.
 struct EditorSceneLayers: View {
     let model: EditorModel
+    var showsNote = true
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Space.m) {
             HStack(alignment: .firstTextBaseline) {
@@ -25,9 +26,11 @@ struct EditorSceneLayers: View {
             }
             .padding(.horizontal, DS.Space.xs)
             LayerListSection(model: model)
-            Text("Edits change this recording's copy of the scene; your live scenes stay as they are until you save one.")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, DS.Space.xs)
+            if showsNote {
+                Text("Edits change this recording's copy of the scene; your live scenes stay as they are until you save one.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, DS.Space.xs)
+            }
         }
     }
 }
@@ -36,7 +39,7 @@ struct EditorSceneLayers: View {
 struct LayerSelectionInspector: View {
     let model: EditorModel
     var body: some View {
-        EditorSceneLayers(model: model)
+        EditorSceneLayers(model: model, showsNote: false)
         if let l = model.selectedEditedLayer {
             LayerInspector(model: model, layer: l, camera: l.source.type == "camera" ? cameraExtras : nil)
         } else {

@@ -175,7 +175,7 @@ struct LibraryView: View {
     var filtered: [ProjectDoc] {
         let q = search.trimmingCharacters(in: .whitespaces)
         return lib.docs.filter { d in
-            (filter == .all || !d.project.events.isEmpty) && (q.isEmpty || d.project.name.localizedCaseInsensitiveContains(q))
+            (filter == .all || d.project.hasLiveEvents) && (q.isEmpty || d.project.name.localizedCaseInsensitiveContains(q))
         }
     }
 
@@ -302,10 +302,10 @@ struct ProjectCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(alignment: .topLeading) {
                 HStack(spacing: 4) {
-                    if !p.events.isEmpty { Badge(text: "LIVE", tint: DS.Color.live) }
+                    if p.hasLiveEvents { Badge(text: "LIVE", tint: DS.Color.live) }
                     if p.color != .sdr { Badge(text: p.color == .pq ? "HDR" : "HLG") }
-                    if p.state == "recording" { Badge(text: "RECOVERING", tint: .orange) }
-                    if p.state == "damaged" { Badge(text: "DAMAGED", tint: .red) }
+                    if p.state == "recording" { Badge(text: "RECOVERING", tint: DS.Color.warn) }
+                    if p.state == "damaged" { Badge(text: "DAMAGED", tint: DS.Color.record) }
                     if !p.lastExport.isEmpty { Badge(text: "EXPORTED", tint: DS.Color.ok) }
                 }.padding(10)
             }

@@ -148,9 +148,7 @@ struct EditorToastOverlay: View {
 struct EditorToastView: View {
     let toast: EditorToast
     let dismiss: () -> Void
-    var tint: Color {
-        switch toast.style { case .info: .accentColor; case .success: DS.Color.ok; case .warning: DS.Color.warn; case .error: DS.Color.record }
-    }
+    var tint: Color { toast.style.tint }
     var body: some View {
         HStack(spacing: DS.Space.m) {
             if let f = toast.file {
@@ -158,7 +156,7 @@ struct EditorToastView: View {
                     .onDrag { NSItemProvider(contentsOf: f) ?? NSItemProvider() }
                     .help("Drag the file into a browser upload or another app")
             } else {
-                Image(systemName: Toast(text: "", style: toast.style).symbol).foregroundStyle(tint).font(.system(size: 15, weight: .semibold))
+                Image(systemName: toast.style.symbol).foregroundStyle(tint).font(.system(size: 13, weight: .semibold))
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(toast.text).font(.system(size: 13, weight: .semibold)).lineLimit(1)

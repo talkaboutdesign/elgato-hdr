@@ -300,6 +300,9 @@ struct Project: Codable, Equatable {
     }
 
     var color: ColorMode { ColorMode(rawValue: colorMode) ?? .pq }
+    /// Something happened live: a scene switch, a zoom or a marker. Every recording logs the scene it starts in at 0,
+    /// which alone does not count.
+    var hasLiveEvents: Bool { events.contains { $0.type != "scene" || $0.tMs > 0 } }
     func layout(_ c: Canvas) -> CanvasLayout { c == .wide ? wide : vertical }
     mutating func setLayout(_ c: Canvas, _ l: CanvasLayout) { if c == .wide { wide = l } else { vertical = l } }
     var trimmedRange: (Double, Double) { (trimStartMs, trimEndMs > trimStartMs ? trimEndMs : durationMs) }

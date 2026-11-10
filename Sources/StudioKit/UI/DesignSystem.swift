@@ -208,11 +208,40 @@ struct StatusPill: View {
     }
 }
 
+extension Toast.Style {
+    /// One colour per kind of message, wherever it appears (toasts, callouts, the export capsule).
+    var tint: SwiftUI.Color {
+        switch self { case .info: .accentColor; case .success: DS.Color.ok; case .warning: DS.Color.warn; case .error: DS.Color.record }
+    }
+    var symbol: String { Toast(text: "", style: self).symbol }
+}
+
+/// A message that belongs to a sheet or panel rather than floating over the picture: tinted, with an icon, a
+/// title and an optional detail.
+struct Callout: View {
+    let style: Toast.Style
+    let title: String
+    var detail: String? = nil
+    var systemImage: String? = nil
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: DS.Space.s) {
+            Image(systemName: systemImage ?? style.symbol).foregroundStyle(style.tint).font(.system(size: 13, weight: .semibold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 12, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                if let d = detail { Text(d).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, DS.Space.m).padding(.vertical, 10)
+        .background(style.tint.opacity(0.10), in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous).strokeBorder(style.tint.opacity(0.35)))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct ToastView: View {
     let toast: Toast
-    var tint: SwiftUI.Color {
-        switch toast.style { case .info: .accentColor; case .success: DS.Color.ok; case .warning: DS.Color.warn; case .error: DS.Color.record }
-    }
+    var tint: SwiftUI.Color { toast.style.tint }
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: DS.Space.s) {
             Image(systemName: toast.symbol).foregroundStyle(tint).font(.system(size: 13, weight: .semibold))

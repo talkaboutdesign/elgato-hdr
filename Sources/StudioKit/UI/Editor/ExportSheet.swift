@@ -20,6 +20,11 @@ struct ExportSheet: View {
             }
             .padding([.horizontal, .top], DS.Space.xl).padding(.bottom, DS.Space.l)
 
+            let notices = ExportNotices(model: model)
+            if notices.any {
+                notices.padding(.horizontal, DS.Space.xl).padding(.bottom, DS.Space.l)
+            }
+
             let columns = [GridItem(.flexible(), spacing: DS.Space.m), GridItem(.flexible(), spacing: DS.Space.m)]
             LazyVGrid(columns: columns, spacing: DS.Space.m) {
                 ForEach(ExportPreset.allCases) { preset in
@@ -69,6 +74,31 @@ struct ExportSheet: View {
         case .youtube1080: return "H.264, plays everywhere"
         case .shorts: return "Vertical canvas, H.264 at 60 fps"
         case .custom: return "Pick canvas, size, frame rate and colour"
+        }
+    }
+}
+
+/// What the user should know before exporting: the encoder is shared with a recording or stream in progress, and
+/// image layers whose file is gone are left out.
+struct ExportNotices: View {
+    let model: EditorModel
+    private var activity: (recording: Bool, live: Bool) { ExportQueue.liveActivity }
+    private var missing: [MissingAsset] { model.missingAssets }
+    var any: Bool { activity.recording || activity.live || !missing.isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Space.s) {
+            let a = activity
+            if a.recording || a.live {
+                Callout(style: .info, title: "Exports wait for the video encoder while you are live or recording",
+                        detail: "\(a.live && a.recording ? "Streaming and recording use" : a.live ? "The stream uses" : "The recording uses") the Mac's video encoder first, so exports run slower until \(a.live ? "you end the stream" : "the recording stops"). Nothing is lost.",
+                        systemImage: a.live ? "dot.radiowaves.left.and.right" : "record.circle")
+            }
+            if !missing.isEmpty {
+                Callout(style: .warning, title: missing.count == 1 ? "1 image is missing and will be left out" : "\(missing.count) images are missing and will be left out",
+                        detail: missing.prefix(4).map { "\($0.layer) in “\($0.scene)”" }.joined(separator: ", ") + (missing.count > 4 ? ", and \(missing.count - 4) more" : "")
+                            + ". Put the file back in the recording's Assets folder to include it.")
+            }
         }
     }
 }

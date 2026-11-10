@@ -439,7 +439,7 @@ extension AppDelegate {
         guard recorder != nil else { toast("Markers are saved while recording", detail: "Start a recording, then press ⌃M at a moment you want to find later."); return }
         logSessionEvent { $0.event("marker", atNs: t) }
         let ms = sceneRuntime.eventLog?.tMs(atNs: t) ?? 0
-        toast("Marker added", detail: "At \(StudioFormat.elapsed(ms / 1000)) in this recording.", style: .success)
+        toast("Marker added", detail: "At \(formatTime(ms / 1000)) in this recording. It shows on the editor's timeline.", style: .success)
     }
 
     // MARK: Keys
@@ -645,8 +645,8 @@ extension AppDelegate {
 
     /// `--scene-script "6:next,11:scene=Gameplay,14:punch"`: live actions at fixed seconds after launch, for checking
     /// what the stream and recordings show. Actions: `next`, `prev`, `scene=<name or 1-based index>`, `punch` (toggle
-    /// the live zoom), `marker`, `canvas=wide|vertical`. Each logs its host time, to match against the stream's
-    /// "stream time 0" line.
+    /// the live zoom), `marker`, `canvas=wide|vertical`, `transition=cut|fade|morph[/<ms>]` (the style later switches
+    /// use), `record-start`, `record-stop`. Each logs its host time, to match against the stream's "stream time 0" line.
     func scheduleSceneScript() {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--scene-script"), i + 1 < args.count else { return }
@@ -668,6 +668,13 @@ extension AppDelegate {
                 case "canvas=wide": self.setCanvas(.wide)
                 case "canvas=vertical": self.setCanvas(.vertical)
                 default:
+                    if action.hasPrefix("transition=") {
+                        let v = action.dropFirst(11).split(separator: "/")
+                        guard let style = v.first.flatMap({ SceneTransition.Style(rawValue: String($0)) }) else { log("scene-script: unknown transition \(action)"); return }
+                        var t = self.scenes.collection.transition; t.style = style
+                        if v.count > 1, let ms = Double(v[1]) { t.durationMs = ms }
+                        self.setTransition(t); return
+                    }
                     guard action.hasPrefix("scene=") else { log("scene-script: unknown action \(action)"); return }
                     let name = String(action.dropFirst(6))
                     let target = c.scenes.first { $0.name == name } ?? Int(name).flatMap { n in c.scenes.indices.contains(n - 1) ? c.scenes[n - 1] : nil }
