@@ -21,15 +21,22 @@ listener_pid=$!
 sleep 1
 # One local destination in a throwaway streaming.json: the user's destinations and Keychain stay untouched, and
 # EHDR_STREAM_KEY stands in for the key on the --go-live-for path only.
+# Scenes and overlay assets live in the output folder too, so the run starts from the default scenes and never writes
+# the user's scenes.json or Assets folder. SELFTEST_SCENES points at a prepared collection; SELFTEST_ARGS adds app
+# arguments (for example --scene-script).
+scenes="${SELFTEST_SCENES:-$out/scenes.json}"
+extra=()
+if [[ -n "${SELFTEST_ARGS:-}" ]]; then read -ra extra <<< "$SELFTEST_ARGS"; fi
 cat > "$out/streaming.json" <<JSON
 {"destinations":[{"id":"6D1A3F0E-5B7C-4C2A-9E61-0F3B8D2A7C41","service":"custom","name":"Self-test","url":"rtmp://127.0.0.1:$port/live","canvas":"$canvas","enabled":true}],
  "settings":{"resolution":1080,"fps":60,"videoKbps":6000,"audioKbps":160,"micDelayMs":0}}
 JSON
-EHDR_STREAM_KEY=test EHDR_STREAMING_FILE="$out/streaming.json" "dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" \
+EHDR_STREAM_KEY=test EHDR_STREAMING_FILE="$out/streaming.json" EHDR_SCENES_FILE="$scenes" \
+    EHDR_ASSETS_DIR="${SELFTEST_ASSETS:-$out/Assets}" "dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" \
     --demo-source "${SELFTEST_SOURCE:-2560x1440@60}" --demo-camera \
     -presentation "${SELFTEST_PRESENTATION:-game}" \
     -recordingsDir "$out/recordings" ${SELFTEST_RECORD:+--record "$SELFTEST_RECORD"} \
-    --go-live-for 25 > "$out/app.log" 2>&1 &
+    --go-live-for 25 ${extra[@]+"${extra[@]}"} > "$out/app.log" 2>&1 &
 app_pid=$!
 # Bound failures (failed encoder, connection, or launch) instead of leaving a listener hanging forever.
 for ((i=0;i<45;i++)); do

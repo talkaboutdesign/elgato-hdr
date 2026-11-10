@@ -185,7 +185,7 @@ extension AppDelegate {
             self?.streamController.goLive()
             if let i = args.firstIndex(of: "--stream-restart-after"), i + 1 < args.count,
                let delay = Double(args[i + 1]), delay > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.start() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in log("stream: restarting capture while live (--stream-restart-after)"); self?.start() }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
                 self?.endStream()

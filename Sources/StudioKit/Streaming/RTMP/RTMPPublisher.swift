@@ -111,7 +111,11 @@ final class RTMPPublisher {
             guard checkPressure() else { return }
             if pressure.dropping || (needsKeyframe && !keyframe) { counters.droppedFrames += 1; return }
             if needsKeyframe { needsKeyframe = false }
-            if baseNs == nil { baseNs = dtsNs; firstVideoPTS = ptsNs }
+            if baseNs == nil {
+                baseNs = dtsNs; firstVideoPTS = ptsNs
+                // Timestamp 0 of what this destination receives, so a received file can be matched against the log.
+                log("RTMP " + safe(endpoint.host) + ":\(endpoint.port): stream time 0 is host \(dtsNs) ns")
+            }
             guard dtsNs >= baseNs! else { counters.droppedFrames += 1; return }
             media(type: 9, payload: FLVTags.video(avcc, ptsNs: ptsNs, dtsNs: dtsNs, keyframe: keyframe, baseNs: baseNs!), time: timestamp(dtsNs))
         }

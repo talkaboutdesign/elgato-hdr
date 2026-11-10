@@ -24,7 +24,14 @@ final class OverlayTextureCache {
     /// A failed decode (missing or broken file) is retried after this long, e.g. once a project's assets are copied.
     var retryAfter: TimeInterval = 2
 
+    /// Who draws a texture. Each keeps its own last texture per layer to show while a replacement is made, so the
+    /// window never borrows the thumbnails' tiny one (or the stream's) for a frame when `{timer}` ticks.
+    enum Consumer: Int { case any, window, wideOutput, verticalOutput, thumbnails
+        static func output(_ c: Canvas) -> Consumer { c == .wide ? .wideOutput : .verticalOutput }
+    }
+
     private enum State { case pending, ready(MTLTexture), failed }
+    private struct LatestKey: Hashable { var id: UUID; var consumer: Consumer }
     private enum Key: Hashable { case image(URL, maxPixel: Int), text(TextSpec, String, Int, Int) }
     private struct ImageRef: Hashable { var name: String; var paths: [URL] }
     private struct Entry<T> { var state: T; var settled = 0.0; var used = 0.0 }
@@ -35,7 +42,7 @@ final class OverlayTextureCache {
     private var images: [ImageRef: Entry<Info>] = [:]
     /// The texture last returned for a layer: shown while its replacement (new `{timer}` second, new size) is made,
     /// so a changing layer never blinks.
-    private var latest: [UUID: Entry<MTLTexture>] = [:]
+    private var latest: [LatestKey: Entry<MTLTexture>] = [:]
     private var lastPurge = 0.0
     private(set) var rasterCount = 0         // decodes and rasterizations so far, for tests
 
@@ -46,13 +53,14 @@ final class OverlayTextureCache {
     /// Textures and source sizes for every visible image and text layer of `c` drawn on a canvas of `canvas` pixels.
     /// `assets`: asset folders in lookup order (`AssetStore.searchPaths(project:)`). With `wait` the call blocks until
     /// everything is decoded; never pass it on the reader or display thread.
-    func overlays(for c: Composition, canvas: CGSize, assets: [URL], tokens: OverlayTokens = OverlayTokens(), wait: Bool = false) -> OverlayFrame {
+    func overlays(for c: Composition, canvas: CGSize, assets: [URL], tokens: OverlayTokens = OverlayTokens(), wait: Bool = false,
+                  consumer: Consumer = .any) -> OverlayFrame {
         var out = OverlayFrame()
         for l in c.layers where l.visible && l.opacity > 0 {
             let key = SourceKey.layer(l.id)
             switch l.source.type {
             case "text":
-                guard let t = texture(for: l, pixelSize: l.frame.rect(in: canvas).size, assets: assets, tokens: tokens, wait: wait) else { continue }
+                guard let t = texture(for: l, pixelSize: l.frame.rect(in: canvas).size, assets: assets, tokens: tokens, wait: wait, consumer: consumer) else { continue }
                 out.sources[key] = SourceInfo(size: CGSize(width: t.width, height: t.height))
                 out.textures[key] = .rgba(t)
             case "image":
@@ -61,7 +69,7 @@ final class OverlayTextureCache {
                       r.src.width > 0, r.src.height > 0 else { continue }
                 // Output pixels the whole image would span, so a zoomed crop is decoded sharp enough.
                 let span = CGSize(width: r.dst.width / r.src.width, height: r.dst.height / r.src.height)
-                guard let t = texture(for: l, pixelSize: span, assets: assets, tokens: tokens, wait: wait) else { continue }
+                guard let t = texture(for: l, pixelSize: span, assets: assets, tokens: tokens, wait: wait, consumer: consumer) else { continue }
                 out.sources[key] = SourceInfo(size: native)
                 out.textures[key] = .rgba(t)
             default: continue
@@ -75,7 +83,9 @@ final class OverlayTextureCache {
     /// A premultiplied BGRA sRGB texture for an image or text layer drawn at `pixelSize`, or nil while it is being made
     /// (or when the file is missing). Text is rasterized at exactly that size; images are decoded to the next power of
     /// two at or above its long side, at most 4096 px and never above their own size.
-    func texture(for layer: Layer, pixelSize: CGSize, assets: [URL], tokens: OverlayTokens = OverlayTokens(), wait: Bool = false) -> MTLTexture? {
+    func texture(for layer: Layer, pixelSize: CGSize, assets: [URL], tokens: OverlayTokens = OverlayTokens(), wait: Bool = false,
+                 consumer: Consumer = .any) -> MTLTexture? {
+        let mine = LatestKey(id: layer.id, consumer: consumer)
         let key: Key
         switch layer.source.type {
         case "text":
@@ -84,7 +94,7 @@ final class OverlayTextureCache {
             if max(w, h) > 4096 { let k = 4096.0 / Double(max(w, h)); w = max(1, Int(Double(w) * k)); h = max(1, Int(Double(h) * k)) }
             key = .text(spec, tokens.replace(spec.string), w, h)
         case "image":
-            guard let file = layer.source.file, case let .ready(url, native)? = imageInfo(file, assets, wait: wait) else { return fallback(layer.id) }
+            guard let file = layer.source.file, case let .ready(url, native)? = imageInfo(file, assets, wait: wait) else { return fallback(mine) }
             let need = max(pixelSize.width / max(native.width, 1), pixelSize.height / max(native.height, 1)) * max(native.width, native.height)
             var bucket = 64
             while CGFloat(bucket) < need && bucket < 4096 { bucket *= 2 }
@@ -92,10 +102,25 @@ final class OverlayTextureCache {
         default: return nil
         }
         if let t = lookup(key, wait: wait) {
-            lock.lock(); latest[layer.id] = Entry(state: t, used: now()); lock.unlock()
+            lock.lock(); latest[mine] = Entry(state: t, used: now()); lock.unlock()
             return t
         }
-        return fallback(layer.id)
+        return fallback(mine)
+    }
+
+    /// Source sizes of image and text layers for laying them out without drawing (a frozen transition picture):
+    /// an image's own size once known, a text layer's box on `canvas`. Never waits; unknown images are left out.
+    func sourceSizes(for layers: [Layer], canvas: CGSize, assets: [URL]) -> [SourceKey: SourceInfo] {
+        var out: [SourceKey: SourceInfo] = [:]
+        for l in layers where l.visible && l.opacity > 0 {
+            switch l.source.type {
+            case "text": out[.layer(l.id)] = SourceInfo(size: l.frame.rect(in: canvas).size)
+            case "image":
+                if let file = l.source.file, case let .ready(_, native)? = imageInfo(file, assets, wait: false) { out[.layer(l.id)] = SourceInfo(size: native) }
+            default: break
+            }
+        }
+        return out
     }
 
     /// Blocks until everything queued so far is done. Not on `queue` itself.
@@ -105,10 +130,10 @@ final class OverlayTextureCache {
 
     private func now() -> Double { ProcessInfo.processInfo.systemUptime }
 
-    private func fallback(_ id: UUID) -> MTLTexture? {
+    private func fallback(_ key: LatestKey) -> MTLTexture? {
         lock.lock(); defer { lock.unlock() }
-        guard let e = latest[id] else { return nil }
-        latest[id]?.used = now()
+        guard let e = latest[key] else { return nil }
+        latest[key]?.used = now()
         return e.state
     }
 

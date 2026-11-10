@@ -81,7 +81,8 @@ extension AppDelegate {
             proj.state = "recording"
             proj.width = s.w; proj.height = s.h; proj.fps = fps; proj.colorMode = colorMode.rawValue
             proj.cameraMirror = cameraMirror
-            proj.wide.camera = livePlacement
+            beginSceneLog(&proj, startNs: startNs)
+            bundleOverlayAssets(proj.scenes, into: dir)
             if camera.cameraOn, let pb = camera.latest {
                 do {
                     camWriter = try LayerWriter(cameraURL: dir.appendingPathComponent("camera.mov"), width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb), startNs: startNs)
@@ -123,6 +124,7 @@ extension AppDelegate {
     /// Closes every layer, then completes project.json and its thumbnail.
     func finishRecording(_ done: @escaping (RecordingOutcome) -> Void) {
         guard let r = recorder else { return }
+        endSceneLog()
         session?.recorder = nil; recorder = nil
         camera.attach(camera: nil, mic: nil)
         recTimer?.invalidate(); recTimer = nil
