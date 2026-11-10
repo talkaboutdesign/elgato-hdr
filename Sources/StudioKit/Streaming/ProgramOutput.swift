@@ -25,6 +25,23 @@ struct FramePhase {
     }
 }
 
+// Reader-owned cache; no lock is held across CoreVideo texture-view creation.
+struct ProgramCameraPlanes {
+    typealias Views = (MTLTexture, MTLTexture, [CVMetalTexture], Int32)
+    init() {}
+    private var cachedCamera: CVPixelBuffer?
+    private var cachedCameraPlanes: (MTLTexture, MTLTexture, [CVMetalTexture], Int32)?
+    // A 30 Hz camera is reused by successive 60 Hz game frames. Retain its wrappers instead of recreating
+    // CoreVideo/Metal views on the capture reader; completion handlers still retain their own in-flight views.
+    mutating func planes(for camera: CVPixelBuffer?) -> (MTLTexture, MTLTexture, [CVMetalTexture], Int32)? {
+        guard let camera else { cachedCamera = nil; cachedCameraPlanes = nil; return nil }
+        if cachedCamera !== camera {
+            cachedCamera = camera; cachedCameraPlanes = MetalCore.shared.planes(camera)
+        }
+        return cachedCameraPlanes
+    }
+}
+
 final class ProgramOutput {
     let canvas: Canvas, size: CGSize, fps: Double
     /// The picture at a host time for this output's size, given the sources that have frames. The stream session
@@ -40,10 +57,13 @@ final class ProgramOutput {
         let target: MTLTexture
         let chroma: MTLTexture?
         let refs: [CVMetalTexture]
+        let renderPass: MTLRenderPassDescriptor
     }
     private var slots: [Slot] = [], freeSlots: [Int] = []
     private var intermediate: MTLTexture?
     private var conversion: MTLComputePipelineState?
+    private var cameraViews = ProgramCameraPlanes()
+    private let layerPipelines: MetalCore.LayerPipelines
     private let nv12: Bool
     struct Stats { var frames = 0, dropped = 0; var renderMs = 0.0; var rateSkipped = 0, contention = 0, capacity = 0, stale = 0, gpu = 0, inactive = 0 }
     private let lock = NSLock(), statsLock = NSLock()
@@ -59,13 +79,12 @@ final class ProgramOutput {
         self.nv12 = nv12
         precondition(size.width > 0 && size.height > 0 && fps.isFinite && fps > 0)
         self.canvas = canvas; self.size = size; self.fps = fps
+        let core = MetalCore.shared
+        layerPipelines = (core.pipeline("layerFrag", .bgra8Unorm, blend: true), core.pipeline("layerFrag", .bgra8Unorm))
         let attrs: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: nv12 ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange : kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: Int(size.width), kCVPixelBufferHeightKey as String: Int(size.height),
             kCVPixelBufferIOSurfacePropertiesKey as String: [:], kCVPixelBufferMetalCompatibilityKey as String: true]
         CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pool)
-        _ = MetalCore.shared.pipeline("layerFrag", .bgra8Unorm)
-        _ = MetalCore.shared.pipeline("layerFrag", .bgra8Unorm, blend: true)
-        let core = MetalCore.shared
         if nv12 {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: Int(size.width), height: Int(size.height), mipmapped: false)
             d.usage = [.renderTarget, .shaderRead]; d.storageMode = .private
@@ -88,7 +107,7 @@ final class ProgramOutput {
                     CVBufferSetAttachment(pb, kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Center, .shouldPropagate)
                     CVBufferSetAttachment(pb, kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Center, .shouldPropagate)
                 }
-                slots.append(Slot(buffer: pb, target: y.0, chroma: c?.0, refs: [y.1] + (c.map { [$0.1] } ?? [])))
+                slots.append(Slot(buffer: pb, target: y.0, chroma: c?.0, refs: [y.1] + (c.map { [$0.1] } ?? []), renderPass: core.layerRenderPass(target: intermediate ?? y.0)))
             }
         }
         freeSlots = Array(slots.indices)
@@ -108,12 +127,12 @@ final class ProgramOutput {
         self.timer = timer; timer.resume()
     }
     func stop() { lock.lock(); statsLock.lock(); active = false; generation += 1; let dropped = totalDropped; statsLock.unlock(); timer?.cancel(); timer = nil; lock.unlock(); log("program \(canvas.rawValue) summary: dropped render=\(dropped) encoder=0") }
-    func gameFrame(y: MTLTexture, c: MTLTexture, size: CGSize, colorMode: ColorMode, camera: CVPixelBuffer?, hostNs: UInt64, isCurrent: @escaping () -> Bool = { true }) {
+    func gameFrame(y: MTLTexture, c: MTLTexture, size: CGSize, colorMode: ColorMode, camera: CVPixelBuffer?, cameraPlanes: ProgramCameraPlanes.Views? = nil, hostNs: UInt64, isCurrent: @escaping () -> Bool = { true }) {
         // The fallback timer cannot hold up the capture reader. Its pass is short and never waits for GPU completion.
         guard lock.try() else { statsLock.lock(); counters.contention += 1; counters.dropped += 1; totalDropped += 1; statsLock.unlock(); return }; defer { lock.unlock() }
         guard active else { return }
         lastGameNs = nowNs()
-        render(game: (y, c, size, colorMode), camera: camera, hostNs: hostNs, isCurrent: isCurrent)
+        render(game: (y, c, size, colorMode), camera: camera, preparedCamera: cameraPlanes, hostNs: hostNs, isCurrent: isCurrent)
     }
     private func noSignal() {
         lock.lock(); defer { lock.unlock() }
@@ -121,7 +140,7 @@ final class ProgramOutput {
         guard active, ns >= lastGameNs, ns - lastGameNs >= 150_000_000 else { return }
         render(game: nil, camera: camera(), hostNs: ns)
     }
-    private func render(game: (MTLTexture, MTLTexture, CGSize, ColorMode)?, camera: CVPixelBuffer?, hostNs: UInt64, isCurrent: @escaping () -> Bool = { true }) {
+    private func render(game: (MTLTexture, MTLTexture, CGSize, ColorMode)?, camera: CVPixelBuffer?, preparedCamera: ProgramCameraPlanes.Views? = nil, hostNs: UInt64, isCurrent: @escaping () -> Bool = { true }) {
         guard phase.accept(hostNs, fps: fps) else { statsLock.lock(); counters.rateSkipped += 1; statsLock.unlock(); return }
         statsLock.lock()
         guard inFlight < 2, let index = freeSlots.popLast() else { counters.capacity += 1; counters.dropped += 1; totalDropped += 1; statsLock.unlock(); return }
@@ -135,7 +154,8 @@ final class ProgramOutput {
             sources[.game] = SourceInfo(size: size)
             textures[.game] = .biplanar(y: y, c: c, bits: 10, transfer: mode.transfer, bt709: mode == .sdr)
         }
-        if let camera, let planes = core.planes(camera) {
+        let cameraPlanes = preparedCamera ?? cameraViews.planes(for: camera)
+        if let camera, let planes = cameraPlanes {
             keep += planes.2
             sources[.camera] = SourceInfo(size: CGSize(width: CVPixelBufferGetWidth(camera), height: CVPixelBufferGetHeight(camera)))
             textures[.camera] = .biplanar(y: planes.0, c: planes.1, bits: planes.3, transfer: 2, bt709: true)
@@ -144,7 +164,7 @@ final class ProgramOutput {
         let pic = picture(size, sources, hostNs), token = generation
         textures.merge(pic.textures) { own, _ in own }
         core.encodeLayers(cb, target: target, canvas: size, background: pic.frame.background, outTransfer: 2,
-                          layers: DrawLayer.pair(pic.frame.layers, textures))
+                          layers: DrawLayer.pair(pic.frame.layers, textures), renderPass: slot.renderPass, layerPipelines: layerPipelines)
         if let chroma = slot.chroma {
             guard let conversion, let enc = cb.makeComputeCommandEncoder() else {
                 release(index); statsLock.lock(); counters.dropped += 1; totalDropped += 1; counters.gpu += 1; statsLock.unlock(); return

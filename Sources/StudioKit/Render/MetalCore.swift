@@ -289,22 +289,29 @@ final class MetalCore {
         return (tex, ref)
     }
 
-    /// Draws the background, then each layer bottom first, into `target` in one render pass, in the output encoding
-    /// `outTransfer`. `viewport` places the canvas inside the target (the live view letterboxes it). Every layer is a
-    /// full-viewport quad scissored to its frame plus shadow, so small layers on large canvases stay cheap.
-    func encodeLayers(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil,
-                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, layers: [DrawLayer]) {
+    typealias LayerPipelines = (blended: MTLRenderPipelineState, opaque: MTLRenderPipelineState)
+    // Program targets and pipeline formats do not change while live; prepare this state off the reader.
+    func layerRenderPass(target: MTLTexture) -> MTLRenderPassDescriptor {
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = target
         rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         // Alpha 1: blending keeps it there, and the HDR export's intermediate must stay opaque.
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        return rp
+    }
+
+    /// Draws the background, then each layer bottom first, into `target` in one render pass, in the output encoding
+    /// `outTransfer`. `viewport` places the canvas inside the target (the live view letterboxes it). Every layer is a
+    /// full-viewport quad scissored to its frame plus shadow, so small layers on large canvases stay cheap.
+    func encodeLayers(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil,
+                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, layers: [DrawLayer], renderPass: MTLRenderPassDescriptor? = nil, layerPipelines: LayerPipelines? = nil) {
+        let rp = renderPass ?? layerRenderPass(target: target)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
         defer { enc.endEncoding() }
         guard canvas.width > 0, canvas.height > 0 else { return }
         let vp = viewport ?? MTLViewport(originX: 0, originY: 0, width: Double(target.width), height: Double(target.height), znear: 0, zfar: 1)
         enc.setViewport(vp)
-        let blended = pipeline("layerFrag", target.pixelFormat, blend: true)
+        let blended = layerPipelines?.blended ?? pipeline("layerFrag", target.pixelFormat, blend: true)
         enc.setRenderPipelineState(blended)
         let sx = vp.width / canvas.width, sy = vp.height / canvas.height
         func draw(_ u: LayerParams, area: CGRect, _ t0: MTLTexture, _ t1: MTLTexture) {
@@ -332,7 +339,7 @@ final class MetalCore {
             bg.dst = SIMD4(full); bg.color = background; bg.fmt.x = 2
             draw(bg, area: full, blank8, blank8c)
         }
-        let opaque = cover.map { _ in pipeline("layerFrag", target.pixelFormat) }
+        let opaque = cover.map { _ in layerPipelines?.opaque ?? pipeline("layerFrag", target.pixelFormat) }
         for (i, l) in layers.enumerated() where i >= cover ?? 0 {
             if let o = opaque { enc.setRenderPipelineState(i == cover ? o : blended) }
             let r = l.resolved

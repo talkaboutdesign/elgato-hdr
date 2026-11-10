@@ -117,3 +117,23 @@ extension ProgramConversionTests {
         _ = core
     }
 }
+
+extension ProgramConversionTests {
+    func testCameraPlanesReuseViewsAndFollowNewFrames() throws {
+        func buffer() throws -> CVPixelBuffer {
+            var pb: CVPixelBuffer?
+            XCTAssertEqual(CVPixelBufferCreate(nil, 64, 36, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary, &pb), kCVReturnSuccess)
+            return try XCTUnwrap(pb)
+        }
+        var cache = ProgramCameraPlanes()
+        let first = try buffer(), second = try buffer()
+        let a = try XCTUnwrap(cache.planes(for: first)), reused = try XCTUnwrap(cache.planes(for: first))
+        XCTAssertTrue(a.0 === reused.0); XCTAssertTrue(a.1 === reused.1)
+        let b = try XCTUnwrap(cache.planes(for: second))
+        XCTAssertFalse(a.0 === b.0); XCTAssertFalse(a.1 === b.1)
+        XCTAssertNil(cache.planes(for: nil))
+        XCTAssertNotNil(cache.planes(for: first))
+        XCTAssertEqual(a.0.width, 64, "In-flight views remain usable after the cache advances")
+    }
+}
