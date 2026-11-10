@@ -158,7 +158,7 @@ final class MetalView: NSView {
     private func updateReadout() {
         guard case .resize(let id, _, _)? = drag, let l = layer(id) else { readout.isHidden = true; return }
         let r = rect(l)
-        readout.string = "\(Int(r.width.rounded())) × \(Int(r.height.rounded()))"
+        readout.string = "\(PixelField.format(r.width)) × \(PixelField.format(r.height))"
         let v = viewRect(r), w: CGFloat = 86, h: CGFloat = 18
         readout.frame = CGRect(x: (v.midX - w / 2).rounded(), y: max(videoRect.minY + 4, v.minY - h - 8).rounded(), width: w, height: h)
         readout.contentsScale = window?.backingScaleFactor ?? 2

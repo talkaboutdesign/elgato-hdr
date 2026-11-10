@@ -125,7 +125,10 @@ struct LiveSceneState {
 
     init(scene: Scene) { to = scene }
 
-    var durationNs: UInt64 { transition.style == .cut ? 0 : UInt64(max(0, transition.durationMs) * 1e6) }
+    var durationNs: UInt64 {
+        let ms = transition.durationMs
+        return transition.style == .cut || !ms.isFinite ? 0 : UInt64(min(max(0, ms), 60_000) * 1e6)
+    }
     func isTransitioning(atNs t: UInt64) -> Bool { (from != nil || snapshot != nil) && t &- startNs < durationNs && t >= startNs }
     /// Eased progress at `t`: 0 before the switch, 1 once it is over.
     func progress(atNs t: UInt64) -> Double {

@@ -110,6 +110,32 @@ enum LayerResize {
     }
 }
 
+/// The inspector's pixel fields. Text that is not a finite number is rejected and values are clamped to the
+/// field's range, so nothing typed (`nan`, `inf`, `1e300`) reaches a frame or an `Int` conversion that traps.
+enum PixelField: CaseIterable {
+    case x, y, width, height
+
+    /// Positions may leave the canvas by up to its size; sizes run from the resize minimum to four canvases.
+    func range(canvas c: CGSize) -> ClosedRange<CGFloat> {
+        switch self {
+        case .x: -c.width...c.width
+        case .y: -c.height...c.height
+        case .width: LayerResize.minSide...max(LayerResize.minSide, 4 * c.width)
+        case .height: LayerResize.minSide...max(LayerResize.minSide, 4 * c.height)
+        }
+    }
+    func parse(_ text: String, canvas: CGSize) -> CGFloat? {
+        guard let v = Double(text.trimmingCharacters(in: .whitespaces)), v.isFinite else { return nil }
+        let r = range(canvas: canvas)
+        return min(max(CGFloat(v), r.lowerBound), r.upperBound)
+    }
+    /// Whole pixels; anything non-finite or absurd shows as a dash rather than trapping.
+    static func format(_ v: CGFloat) -> String {
+        guard v.isFinite, abs(v) < 1e9 else { return "–" }
+        return String(Int(v.rounded()))
+    }
+}
+
 extension Composition {
     /// The same layout on another canvas. Full-canvas layers stay full; a layer spanning one axis keeps spanning it;
     /// other layers keep their normalized centre and their shape in pixels, scaled with the shorter canvas side, and

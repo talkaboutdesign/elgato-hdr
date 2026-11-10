@@ -184,12 +184,12 @@ private struct LayerInspector: View {
         InspectorSection(title: layer.displayName, trailing: layer.isGameOrCamera ? AnyView(CropButton(model: model, id: id)) : nil) {
             Grid(horizontalSpacing: DS.Space.s, verticalSpacing: DS.Space.s) {
                 GridRow {
-                    NumberField(label: "X", value: r.minX) { v in set { $0.origin.x = v } }
-                    NumberField(label: "Y", value: r.minY) { v in set { $0.origin.y = v } }
+                    NumberField(label: "X", field: .x, canvas: size, value: r.minX) { v in set { $0.origin.x = v } }
+                    NumberField(label: "Y", field: .y, canvas: size, value: r.minY) { v in set { $0.origin.y = v } }
                 }
                 GridRow {
-                    NumberField(label: "W", value: r.width) { v in set { $0.size.width = max(LayerResize.minSide, v) } }
-                    NumberField(label: "H", value: r.height) { v in set { $0.size.height = max(LayerResize.minSide, v) } }
+                    NumberField(label: "W", field: .width, canvas: size, value: r.width) { v in set { $0.size.width = v } }
+                    NumberField(label: "H", field: .height, canvas: size, value: r.height) { v in set { $0.size.height = v } }
                 }
             }
             InspectorRow(label: "Position") { LayerPositionGrid(model: model, layer: layer) }
@@ -352,6 +352,8 @@ private struct ColorRow: View {
 /// Compact numeric field in canvas pixels; commits on Return or when focus leaves.
 private struct NumberField: View {
     let label: String
+    let field: PixelField
+    let canvas: CGSize
     let value: CGFloat
     let commit: (CGFloat) -> Void
     @State private var text = ""
@@ -376,11 +378,12 @@ private struct NumberField: View {
         .accessibilityLabel(label)
     }
 
-    static func format(_ v: CGFloat) -> String { String(Int(v.rounded())) }
+    static func format(_ v: CGFloat) -> String { PixelField.format(v) }
+    /// Rejected text reverts to the current value; out-of-range numbers are clamped before they are committed.
     private func apply() {
-        guard let v = Double(text.trimmingCharacters(in: .whitespaces)) else { text = Self.format(value); return }
-        if abs(CGFloat(v) - value) >= 0.5 { commit(CGFloat(v)) }
-        text = Self.format(CGFloat(v))
+        guard let v = field.parse(text, canvas: canvas) else { text = Self.format(value); return }
+        if !value.isFinite || abs(v - value) >= 0.5 { commit(v) }
+        text = Self.format(v)
     }
 }
 

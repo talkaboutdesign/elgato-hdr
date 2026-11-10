@@ -50,7 +50,7 @@ extension AppDelegate {
         #endif
         trackChanges({ [weak self] in self?.state.focusMode ?? false }) { [weak self] focus in self?.view.editingEnabled = !focus }
         sceneDidChange(save: false)
-        log("scenes: \(m.collection.scenes.count) scenes, active \(m.active.name), canvas \(m.canvas.label), transition \(m.collection.transition.style.rawValue) \(Int(m.collection.transition.durationMs)) ms")
+        log("scenes: \(m.collection.scenes.count) scenes, active \(m.active.name), canvas \(m.canvas.label), transition \(m.collection.transition.style.rawValue) \(String(format: "%.0f", m.collection.transition.durationMs)) ms")
     }
 
     func installSceneActions() {
@@ -133,7 +133,7 @@ extension AppDelegate {
         m.cropLayerID = nil
         m.transition = TransitionMark(id: id, start: Date(), duration: tr.style == .cut ? 0 : tr.durationMs / 1000)
         logSessionEvent { $0.event("scene", atNs: t, sceneID: id) }
-        log("scenes: switched to \(scene.name) (\(tr.style.rawValue), \(Int(tr.durationMs)) ms)")
+        log("scenes: switched to \(scene.name) (\(tr.style.rawValue), \(String(format: "%.0f", tr.durationMs)) ms)")
         sceneDidChange()
     }
 

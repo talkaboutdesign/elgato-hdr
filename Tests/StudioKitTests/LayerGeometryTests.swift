@@ -101,4 +101,35 @@ final class LayerGeometryTests: XCTestCase {
         log.didSave(atNs: start + 6_000_000_000)
         XCTAssertEqual(log.saveDelay(atNs: start + 7_000_000_000), 4_000_000_000)
     }
+
+    /// The inspector's X, Y, W and H fields: `nan`, `inf` and huge numbers used to pass `Double(...)` and trap in
+    /// `Int(v.rounded())`. They are now rejected or clamped, and formatting never traps.
+    func testPixelFieldsRejectNonFiniteAndClamp() {
+        let c = CGSize(width: 1920, height: 1080)
+        for f in PixelField.allCases {
+            for bad in ["nan", "NaN", "inf", "-inf", "infinity", "", "abc", "1e400"] { XCTAssertNil(f.parse(bad, canvas: c), "\(f) \(bad)") }
+            let r = f.range(canvas: c)
+            XCTAssertEqual(f.parse("1e300", canvas: c), r.upperBound)
+            XCTAssertEqual(f.parse("-1e300", canvas: c), r.lowerBound)
+            XCTAssertEqual(f.parse(" 120 ", canvas: c), 120)
+        }
+        XCTAssertEqual(PixelField.width.parse("3", canvas: c), LayerResize.minSide)
+        XCTAssertEqual(PixelField.x.parse("-5000", canvas: c), -1920)
+        for v: CGFloat in [.nan, .infinity, -.infinity, 1e300, -1e300] { XCTAssertEqual(PixelField.format(v), "–") }
+        XCTAssertEqual(PixelField.format(119.6), "120"); XCTAssertEqual(PixelField.format(-0.4), "0")
+        // Every clamped value formats and lands on a finite frame.
+        for f in PixelField.allCases {
+            let v = f.parse("1e300", canvas: c)!
+            XCTAssertNotEqual(PixelField.format(v), "–")
+            XCTAssertTrue(NRect(CGRect(x: v, y: v, width: v, height: v), in: c).rect(in: c).width.isFinite)
+        }
+    }
+
+    /// A transition duration that is not finite never reaches the `UInt64` conversion of the engine.
+    func testTransitionDurationIsAlwaysFinite() throws {
+        var st = LiveSceneState(scene: SceneCollection.defaults().scenes[0])
+        for ms in [Double.nan, .infinity, -.infinity, -5, 1e300] { st.transition = SceneTransition(style: .morph, durationMs: ms); _ = st.durationNs }
+        let t = try JSONDecoder().decode(SceneTransition.self, from: Data(#"{"style":"fade","durationMs":1e300}"#.utf8))
+        XCTAssertEqual(t.durationMs, 10_000)
+    }
 }

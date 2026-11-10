@@ -17,7 +17,8 @@ extension SceneTransition {
     enum CodingKeys: String, CodingKey { case style, durationMs }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self), z = SceneTransition()
-        self.init(style: c.v(.style, z.style), durationMs: min(max(c.v(.durationMs, z.durationMs), 0), 10_000))
+        let ms = c.v(.durationMs, z.durationMs)
+        self.init(style: c.v(.style, z.style), durationMs: ms.isFinite ? min(max(ms, 0), 10_000) : z.durationMs)
     }
 }
 
