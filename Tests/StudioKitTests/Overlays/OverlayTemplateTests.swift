@@ -52,15 +52,11 @@ final class OverlayTemplateTests: XCTestCase {
         let cam = comp.layers[ci]
         let id = try LayerPreset.cameraFrame.apply(to: &comp, canvas: size).get()
         let ri = try XCTUnwrap(comp.layers.firstIndex { $0.id == id })
-        XCTAssertEqual(ri, ci, "inserted right below the camera")
-        XCTAssertEqual(comp.layers[ri + 1].id, cam.id)
-        let ring = comp.layers[ri], r = ring.frame.rect(in: size), c = cam.frame.rect(in: size)
-        let pad = r.minX - c.minX
-        XCTAssertEqual(pad, -(size.height * 0.009).rounded(), accuracy: 0.01)
-        XCTAssertEqual(r.maxY - c.maxY, -pad, accuracy: 0.01)
-        // The same ring width at the corners: the outer radius is the camera's plus the padding.
-        let inner = cam.roundness * min(c.width, c.height), outer = ring.roundness * min(r.width, r.height)
-        XCTAssertEqual(outer - inner, -pad, accuracy: 0.01)
+        XCTAssertEqual(ri, ci)
+        XCTAssertEqual(id, cam.id)
+        XCTAssertEqual(comp.layers[ri].frame, cam.frame)
+        XCTAssertEqual(comp.layers[ri].frameWidth * size.height, (size.height * 0.009).rounded(), accuracy: 0.01)
+        XCTAssertEqual(comp.layers[ri].frameColor, ScreenStyle.blue)
         var none = SceneTemplate.gameOnly.scene().wide
         XCTAssertThrowsError(try LayerPreset.cameraFrame.apply(to: &none, canvas: size).get())
     }

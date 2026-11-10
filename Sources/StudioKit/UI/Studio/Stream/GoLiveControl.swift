@@ -164,7 +164,7 @@ struct GoLivePopover: View {
                 VStack(alignment: .leading, spacing: DS.Space.m) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(verbatim: "\(s.settings.resolution)p\(s.settings.fps) · \(StreamFormat.kbps(s.settings.videoKbps))")
-                        Text(verbatim: s.uploadSummary)
+                        Text(verbatim: s.goLiveSummary)
                     }
                     .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
                     Button { s.showGoLivePopover = false; s.actions.goLive() } label: {
@@ -259,6 +259,12 @@ struct HealthPopover: View {
             if !s.canvases.isEmpty {
                 Divider().opacity(0.5)
                 VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Canvas.allCases, id: \.self) { canvas in
+                        if let fps = s.reducedRates[canvas] {
+                            Text("\(canvas == .vertical ? "Vertical" : "Horizontal") · reduced frame rate (\(Int(fps)) fps)")
+                                .font(.system(size: 11)).foregroundStyle(.orange)
+                        }
+                    }
                     ForEach(s.canvases, id: \.canvas) { c in
                         Text(StreamFormat.canvasLine(c)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
                     }

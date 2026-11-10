@@ -290,6 +290,15 @@ private struct LayerInspector: View {
             if layer.source.type == "text" { TextControls(model: model, layer: layer) }
             if layer.source.type == "image" { ImageControls(model: model, layer: layer) }
             if layer.source.type != "text" { slider("Corners", \.roundness, 0...0.5, 0) }
+            if isCamera {
+                ToggleRow(label: "Frame", isOn: layer.frameWidth > 0, help: "Outer camera frame") { on in
+                    model.actions.editLayer(id) { $0.frameWidth = on ? 0.009 : 0 }
+                }
+                if layer.frameWidth > 0 {
+                    ColorWellRow(label: "Frame color", value: layer.frameColor) { value in model.actions.editLayer(id) { $0.frameColor = value } }
+                    slider("Frame width", \.frameWidth, 0.001...0.05, 0.009)
+                }
+            }
             slider("Opacity", \.opacity, 0...1, 1)
             if layer.source.type != "text" {
                 // Text has its own shadow (around the letters) and plate; a frame border or box shadow would not fit it.

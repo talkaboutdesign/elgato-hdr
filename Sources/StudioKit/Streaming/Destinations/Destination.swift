@@ -43,16 +43,18 @@ struct StreamSettings: Codable, Equatable {
     var fps = 60                    // 60 or 30
     var videoKbps = 6000
     var audioKbps = 160
+    var overloadPolicy: EncoderOverloadPolicy = .verticalFirst
     var micDelayMs: Double = 0
 
     static let bitrateRange = 2500...9000
 
     init() {}
-    enum CodingKeys: String, CodingKey { case resolution, fps, videoKbps, audioKbps, micDelayMs }
+    enum CodingKeys: String, CodingKey { case resolution, fps, videoKbps, audioKbps, micDelayMs, overloadPolicy }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self), d = StreamSettings()
         resolution = c.v(.resolution, d.resolution); fps = c.v(.fps, d.fps)
         videoKbps = c.v(.videoKbps, d.videoKbps); audioKbps = c.v(.audioKbps, d.audioKbps)
+        overloadPolicy = c.v(.overloadPolicy, d.overloadPolicy)
         micDelayMs = c.v(.micDelayMs, d.micDelayMs)
         self = sanitized
     }

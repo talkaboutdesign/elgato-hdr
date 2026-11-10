@@ -33,6 +33,13 @@ struct SceneCollection: Codable, Equatable {
     func index(of id: UUID) -> Int? { scenes.firstIndex { $0.id == id } }
     subscript(id: UUID) -> Scene? { scenes.first { $0.id == id } }
 
+    /// Applies an asynchronous edit to its captured destination, regardless of the currently active scene.
+    @discardableResult mutating func edit(sceneID: UUID, canvas: Canvas, _ change: (inout Composition) -> Void) -> Bool {
+        guard let i = index(of: sceneID) else { return false }
+        if canvas == .wide { change(&scenes[i].wide) } else { change(&scenes[i].vertical) }
+        return true
+    }
+
     mutating func normalize() {
         if scenes.isEmpty { self = SceneCollection.defaults() }
         if index(of: activeID) == nil { activeID = scenes[0].id }
@@ -145,7 +152,9 @@ final class SceneStore {
 
     /// The data folder keeps its name if the app's display name changes, so scenes survive a rename.
     static var defaultURL: URL {
+        #if DEBUG
         if let f = ProcessInfo.processInfo.environment["EHDR_SCENES_FILE"], !f.isEmpty { return URL(fileURLWithPath: f) }
+        #endif
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Elgato HDR").appendingPathComponent("scenes.json")
     }

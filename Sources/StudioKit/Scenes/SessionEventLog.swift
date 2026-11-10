@@ -13,9 +13,9 @@ struct SessionEventLog {
     /// Source time of host time `ns`; the recording's first frame is 0.
     func tMs(atNs ns: UInt64) -> Double { ns > startNs ? Double(ns - startNs) / 1e6 : 0 }
 
-    func event(_ type: String, atNs ns: UInt64, sceneID: UUID? = nil, zoom: Double? = nil, focus: CGPoint? = nil) -> SessionEvent {
+    func event(_ type: String, atNs ns: UInt64, sceneID: UUID? = nil, zoom: Double? = nil, focus: CGPoint? = nil, transition: SceneTransition? = nil) -> SessionEvent {
         SessionEvent(tMs: (tMs(atNs: ns) * 10).rounded() / 10, type: type, sceneID: sceneID, zoom: zoom,
-                     focusX: focus.map { Double($0.x) }, focusY: focus.map { Double($0.y) })
+                     focusX: focus.map { Double($0.x) }, focusY: focus.map { Double($0.y) }, transitionStyle: transition?.style, transitionDurationMs: transition?.durationMs)
     }
 
     /// Nanoseconds until the next save is allowed (0: save now).

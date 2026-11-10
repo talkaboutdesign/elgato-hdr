@@ -278,6 +278,10 @@ camera/microphone access. Use both flags to bypass saved real-device selections.
 a 50 ms 1 kHz beep each second. Recordings and exports use the normal code paths.
 Logs are in `~/Library/Logs/Elgato HDR.log` and stderr.
 
+### Development streaming controls
+
+The following controls require `./build.sh debug`. The user-facing `--record <seconds>` flag also works in release.
+
 Streaming without touching your own destinations or keys: `EHDR_STREAMING_FILE=<path>` uses another
 `streaming.json`, `EHDR_KEYCHAIN_SERVICE=<name>` another Keychain service, and `--go-live-for <seconds>` goes live to
 the enabled destinations and quits afterwards (with `EHDR_STREAM_KEY` as the key for all of them; used by

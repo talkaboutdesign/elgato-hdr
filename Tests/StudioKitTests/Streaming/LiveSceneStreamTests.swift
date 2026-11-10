@@ -50,7 +50,7 @@ final class LiveSceneStreamTests: XCTestCase {
         let renderer = try XCTUnwrap(Renderer(layer: CAMetalLayer(), shm: demo.memory, demoSource: demo))
         let a = solid("A", wide: [1, 0, 0, 1], vertical: [0, 1, 0, 1]), b = solid("B", wide: [0, 0, 1, 1], vertical: [0, 0, 1, 1])
         let size = CGSize(width: 36, height: 64)
-        let output = ProgramOutput(canvas: .vertical, size: size, fps: 60)
+        let output = ProgramOutput(canvas: .vertical, size: size, fps: 60, nv12: false)
         output.picture = { [weak renderer] s, sources, ns in renderer?.livePicture(canvas: .vertical, size: s, sources: sources, atNs: ns) ?? LivePicture() }
         let lock = NSLock(), gate = DispatchSemaphore(value: 0)
         var pixels: [UInt64: [UInt8]] = [:]

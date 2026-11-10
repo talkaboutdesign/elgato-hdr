@@ -18,6 +18,8 @@ struct ResolvedLayer: Equatable {
     /// Clip to `dst` with no edge anti-aliasing. The former fixed shader drew the game that way, so a letterboxed
     /// game whose edge falls on a half pixel keeps whole edge rows instead of blending them with the background.
     var hardEdge = false
+    var frameWidth: CGFloat = 0
+    var frameColor = SIMD4<Float>(0.42, 0.49, 1, 1)
 }
 
 /// Turns a composition into drawable layers for one canvas size. Pure; the rules are the ones the fixed layouts have
@@ -54,6 +56,8 @@ enum SceneResolver {
                                   border: l.border ? max(2, dst.width * 0.018) : 0,
                                   shadow: l.shadow ? max(6, dst.width * 0.08) : 0,
                                   opacity: min(1, l.opacity), mirror: l.mirror, color: color)
+            r.frameWidth = l.frameWidth.isFinite ? min(0.1, max(0, l.frameWidth)) * min(canvas.width, canvas.height) : 0
+            r.frameColor = rgba(l.frameColor) ?? SIMD4(0, 0, 0, 0)
             // Only the plain game: a square-cornered facecam without border or shadow was always anti-aliased.
             r.hardEdge = key == .game && r.radius == 0 && r.border == 0 && r.shadow == 0
             return r

@@ -29,6 +29,7 @@ final class Renderer: NSObject {
     private var _overlay = LiveOverlay()
     var overlay: LiveOverlay { get { lock.lock(); defer { lock.unlock() }; return _overlay } set { lock.lock(); _overlay = newValue; lock.unlock() } }
     private var _programOutputs: [ProgramOutput] = []
+    private var programCameraViews = ProgramCameraPlanes()
     var programOutputs: [ProgramOutput] {
         get { lock.lock(); defer { lock.unlock() }; return _programOutputs }
         set { lock.lock(); _programOutputs = newValue; lock.unlock() }
@@ -165,7 +166,8 @@ final class Renderer: NSObject {
         let outputs = programOutputs
         if !outputs.isEmpty {
             let begin = nowNs(), camera = overlay.camera?.latest
-            for output in outputs { output.gameFrame(y: sy, c: sc, size: CGSize(width: w, height: h), colorMode: colorMode, camera: camera, hostNs: arrivalNs, isCurrent: isCurrent) }
+            let cameraPlanes = programCameraViews.planes(for: camera)
+            for output in outputs { output.gameFrame(y: sy, c: sc, size: CGSize(width: w, height: h), colorMode: colorMode, camera: camera, cameraPlanes: cameraPlanes, hostNs: arrivalNs, isCurrent: isCurrent) }
             let spent = nowNs() - begin
             lock.lock(); outputCost.add(spent); lock.unlock()
         }

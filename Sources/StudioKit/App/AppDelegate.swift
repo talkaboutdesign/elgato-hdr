@@ -80,13 +80,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         audio.muted = UserDefaults.standard.bool(forKey: "muted"); state.muted = audio.muted
+        #if DEBUG
         // Development: `--export <project folder> [hdr|sdr] [hd|uhd]` renders both canvases and quits (no capture).
         if let i = CommandLine.arguments.firstIndex(of: "--export"), i + 1 < CommandLine.arguments.count {
             let args = CommandLine.arguments
             runHeadlessExport(dir: URL(fileURLWithPath: args[i + 1]), range: args.contains("sdr") ? .sdr : .hdr, res: args.contains("uhd") ? .uhd : .hd)
             return
         }
-        #if DEBUG
         if let i = CommandLine.arguments.firstIndex(of: "--make-fixture"), i+1 < CommandLine.arguments.count {
             let arg = CommandLine.arguments[i+1]
             let dir = arg.hasPrefix("/") ? URL(fileURLWithPath: arg) : Self.recordingsDir.appendingPathComponent(arg)
@@ -122,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         DebugSnapshots.start()
         startDebugChecks()
         #endif
-        if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]) {
+        if let i = CommandLine.arguments.firstIndex(of: "--record"), i + 1 < CommandLine.arguments.count, let secs = Double(CommandLine.arguments[i + 1]), secs.isFinite, secs > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 self?.startRecording()
                 DispatchQueue.main.asyncAfter(deadline: .now() + secs) { self?.stopRecording() }
@@ -138,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if info == "stream ended" { setConnection(.noSignal("The stream ended")); return }
         if info.hasPrefix("helper too old") { setConnection(.noSignal("The capture helper is out of date: quit and reopen the app")); return }
         guard let s = session, s.w > 0, let stats = StudioFormat.parseStats(info) else { return }
+        state.streaming.sourcePixelsPerSecond = Double(s.w) * Double(s.h) * nominalFps
         state.applyStats(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: stats.fps, nominal: nominalFps), latencyMs: stats.latencyMs, demo: demoSource != nil)
     }
 

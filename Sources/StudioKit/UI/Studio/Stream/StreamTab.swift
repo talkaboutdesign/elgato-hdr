@@ -186,6 +186,11 @@ struct StreamSettingsSection: View {
                 ]).frame(width: 140)
             }
             .disabled(live)
+            Picker("When the encoder is overloaded", selection: Binding(get: { streaming.settings.overloadPolicy }, set: { value in
+                var settings = streaming.settings; settings.overloadPolicy = value; streaming.actions.updateSettings(settings)
+            })) {
+                ForEach(EncoderOverloadPolicy.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
             InspectorRow(label: "Frame rate") {
                 SegmentedSwitch(selection: binding(\.fps), options: [
                     .init(value: 60, label: "60 fps", help: "Smoothest motion; needs more bitrate"),
