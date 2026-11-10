@@ -14,6 +14,8 @@ final class Session {
     let shm: UnsafeMutableRawPointer
     var w = 0, h = 0, frames = 0
     var lastReport = Date()
+    /// Synchronous reader-thread tap; copy the bytes before returning. Set before run().
+    var onGameAudio: ((UnsafeRawPointer, Int, UInt64) -> Void)?
     var onInfo: ((String) -> Void)?
     var stopped = false
     var audio: AudioPlayer?
@@ -86,7 +88,10 @@ final class Session {
                 guard audioScratch.withUnsafeMutableBytes({ readFully(fd, $0.baseAddress!, size) }) else { return finish() }
                 if a == 48000, b == 2, u32(12) == 16 {
                     if let rec = recorder { rec.appendAudio(Data(audioScratch[0..<size]), ns: tNs) }
-                    audioScratch.withUnsafeBytes { audio?.push($0.baseAddress!, size) }
+                    audioScratch.withUnsafeBytes {
+                        audio?.push($0.baseAddress!, size)
+                        onGameAudio?($0.baseAddress!, size, tNs)
+                    }
                 }
             case 0x53: // "UVCS" frame in shared memory slot seq % 3
                 guard size == a * b * 3, size <= shmSlotBytes else { log("unexpected frame size"); return finish() }
