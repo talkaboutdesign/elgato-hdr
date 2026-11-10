@@ -6,6 +6,7 @@ final class SceneRuntime {
     let store = SceneStore()
     var live = LiveSceneState(scene: SceneTemplate.gameOnly.scene())
     let menu = NSMenu(title: "Scenes")
+    var menuStructure = ""
     var keyMonitor: Any?
     var spaceHeld = false
     let thumbnailer = SceneThumbnailer()
@@ -382,6 +383,7 @@ extension AppDelegate {
         rt.live.punchIn = p
         m.punchedIn = on
         pushScene()
+        populateScenesMenu()
         let focus = gameCropCentre()
         logSessionEvent { on ? $0.event("zoomIn", atNs: t, zoom: p.amount, focus: focus) : $0.event("zoomOut", atNs: t) }
         log(on ? String(format: "scenes: punch-in %.1f×", p.amount) : "scenes: punch-in released")
@@ -459,39 +461,50 @@ extension AppDelegate {
         populateScenesMenu()
     }
 
-    /// Rebuilt on every change rather than on open, so ⌃1…⌃9 always match the strip.
+    /// Kept current on every change rather than on open, so ⌃1…⌃9 always match the strip. Items are rebuilt only
+    /// when scenes are added, removed, renamed or reordered; otherwise check marks and titles change in place.
     func populateScenesMenu() {
-        let m = sceneRuntime.menu
-        m.removeAllItems()
-        func add(_ title: String, _ sel: Selector?, _ key: String = "", _ mods: NSEvent.ModifierFlags = [.control], on: Bool = false, obj: Any? = nil) -> NSMenuItem {
-            let it = NSMenuItem(title: title, action: sel, keyEquivalent: key)
-            it.keyEquivalentModifierMask = mods; it.target = sel == nil ? nil : self
-            it.state = on ? .on : .off; it.representedObject = obj
-            m.addItem(it); return it
+        let m = sceneRuntime.menu, c = scenes.collection
+        let structure = c.scenes.map { "\($0.id)\t\($0.name)" }.joined(separator: "\n")
+        if structure != sceneRuntime.menuStructure || m.numberOfItems == 0 {
+            sceneRuntime.menuStructure = structure
+            m.removeAllItems()
+            func add(_ title: String, _ sel: Selector?, _ key: String = "", tag: Int = 0, obj: Any? = nil) -> NSMenuItem {
+                let it = NSMenuItem(title: title, action: sel, keyEquivalent: key)
+                it.keyEquivalentModifierMask = [.control]; it.target = sel == nil ? nil : self
+                it.tag = tag; it.representedObject = obj
+                m.addItem(it); return it
+            }
+            for (i, s) in c.scenes.enumerated() { _ = add(s.name, #selector(switchSceneFromMenu(_:)), i < 9 ? "\(i + 1)" : "", obj: s.id) }
+            m.addItem(.separator())
+            _ = add("Next Scene", #selector(nextScene), String(UnicodeScalar(NSRightArrowFunctionKey)!))
+            _ = add("Previous Scene", #selector(previousScene), String(UnicodeScalar(NSLeftArrowFunctionKey)!))
+            m.addItem(.separator())
+            let tm = NSMenu(title: "Transition")
+            for st in SceneTransition.Style.allCases {
+                let it = NSMenuItem(title: st.label, action: #selector(setTransitionStyle(_:)), keyEquivalent: "")
+                it.target = self; it.representedObject = st.rawValue
+                tm.addItem(it)
+            }
+            add("Transition", nil).submenu = tm
+            m.addItem(.separator())
+            _ = add("Zoom In on Game", #selector(togglePunchIn), "z", tag: 1)
+            add("Hold ⌃Space to zoom while held", nil).isEnabled = false
+            _ = add("Add Marker", #selector(addMarker), "m")
+            m.addItem(.separator())
+            _ = add("16:9 Canvas", #selector(showWideCanvas), tag: 2)
+            _ = add("9:16 Canvas", #selector(showVerticalCanvas), tag: 3)
         }
-        let c = scenes.collection
-        for (i, s) in c.scenes.enumerated() {
-            _ = add(s.name, #selector(switchSceneFromMenu(_:)), i < 9 ? "\(i + 1)" : "", on: s.id == c.activeID, obj: s.id)
+        for it in m.items {
+            if let id = it.representedObject as? UUID { it.state = id == c.activeID ? .on : .off }
+            switch it.tag {
+            case 1: it.title = scenes.punchedIn ? "Zoom Out" : "Zoom In on Game"; it.state = scenes.punchedIn ? .on : .off
+            case 2: it.state = scenes.canvas == .wide ? .on : .off
+            case 3: it.state = scenes.canvas == .vertical ? .on : .off
+            default: break
+            }
+            for t in it.submenu?.items ?? [] { t.state = (t.representedObject as? String) == c.transition.style.rawValue ? .on : .off }
         }
-        m.addItem(.separator())
-        _ = add("Next Scene", #selector(nextScene), String(UnicodeScalar(NSRightArrowFunctionKey)!))
-        _ = add("Previous Scene", #selector(previousScene), String(UnicodeScalar(NSLeftArrowFunctionKey)!))
-        m.addItem(.separator())
-        let tItem = add("Transition", nil)
-        let tm = NSMenu(title: "Transition")
-        for s in SceneTransition.Style.allCases {
-            let it = NSMenuItem(title: s.label, action: #selector(setTransitionStyle(_:)), keyEquivalent: "")
-            it.target = self; it.representedObject = s.rawValue; it.state = c.transition.style == s ? .on : .off
-            tm.addItem(it)
-        }
-        tItem.submenu = tm
-        m.addItem(.separator())
-        _ = add(scenes.punchedIn ? "Zoom Out" : "Zoom In on Game", #selector(togglePunchIn), "z", on: scenes.punchedIn)
-        let hint = add("Hold ⌃Space to zoom while held", nil); hint.isEnabled = false
-        _ = add("Add Marker", #selector(addMarker), "m")
-        m.addItem(.separator())
-        _ = add("16:9 Canvas", #selector(showWideCanvas), on: scenes.canvas == .wide)
-        _ = add("9:16 Canvas", #selector(showVerticalCanvas), on: scenes.canvas == .vertical)
     }
 
     /// Right-click on the picture: the layer under the pointer, or the scene list.
