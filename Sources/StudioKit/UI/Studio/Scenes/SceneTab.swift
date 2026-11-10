@@ -214,6 +214,8 @@ private struct LayerInspector: View {
                     .frame(width: 132)
                 }
                 slider("Zoom", \.zoom, 1...4, 1, format: { String(format: "%.2f×", $0) })
+                Text(LayerHandle.cropHint)
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if layer.source.type == "color" { ColorRow(model: model, layer: layer) }
             slider("Corners", \.roundness, 0...0.5, 0)

@@ -132,4 +132,29 @@ final class LayerGeometryTests: XCTestCase {
         let t = try JSONDecoder().decode(SceneTransition.self, from: Data(#"{"style":"fade","durationMs":1e300}"#.utf8))
         XCTAssertEqual(t.durationMs, 10_000)
     }
+
+    /// A full-canvas layer at opacity 0 above the game does not swallow clicks or snapping meant for the game.
+    func testTransparentLayersAreNotPicked() {
+        let c = CGSize(width: 1920, height: 1080)
+        let game = Layer(source: .game, frame: .full)
+        var cam = Layer(source: .camera, frame: NRect(x: 0.7, y: 0.6, w: 0.25, h: 0.3))
+        var veil = Layer(name: "Veil", source: LayerSource(type: "color", color: [0, 0, 0, 1]), frame: .full); veil.opacity = 0
+        let centre = CGPoint(x: 960, y: 540)
+        XCTAssertEqual(LayerPicking.hit([game, cam, veil], at: centre, canvas: c)?.id, game.id)
+        XCTAssertEqual(LayerPicking.hit([game, veil, cam], at: CGPoint(x: 1600, y: 800), canvas: c)?.id, cam.id)
+        XCTAssertEqual(LayerPicking.snapFrames([game, cam, veil], excluding: cam.id, canvas: c), [game.frame.rect(in: c)])
+        veil.opacity = 0.005; XCTAssertEqual(LayerPicking.hit([game, veil], at: centre, canvas: c)?.id, game.id)
+        veil.opacity = 0.2; XCTAssertEqual(LayerPicking.hit([game, veil], at: centre, canvas: c)?.id, veil.id, "faint but visible still picks")
+        cam.visible = false; XCTAssertEqual(LayerPicking.hit([game, cam], at: CGPoint(x: 1600, y: 800), canvas: c)?.id, game.id)
+    }
+
+    /// The handles say that ⌥ on an edge crops the game or camera instead of resizing it proportionally.
+    func testHandleHelpMentionsOptionCrop() {
+        for h in LayerHandle.allCases where !h.isCorner {
+            XCTAssertTrue(h.help(gameOrCamera: true).contains("⌥-drag to crop"), "\(h)")
+            XCTAssertFalse(h.help(gameOrCamera: false).contains("crop"), "\(h)")
+        }
+        XCTAssertTrue(LayerHandle.topLeft.help(gameOrCamera: true).contains("⇧"))
+        XCTAssertTrue(LayerHandle.cropHint.hasPrefix("⌥-drag an edge to crop"))
+    }
 }

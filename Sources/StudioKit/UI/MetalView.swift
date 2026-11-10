@@ -97,8 +97,8 @@ final class MetalView: NSView {
     private var layers: [Layer] { scenes?.composition.layers ?? [] }
     private func layer(_ id: UUID?) -> Layer? { id.flatMap { id in layers.first { $0.id == id } } }
     private func rect(_ l: Layer) -> CGRect { l.frame.rect(in: ref) }
-    /// Topmost visible layer under `p`.
-    private func hit(_ p: CGPoint) -> Layer? { layers.last { $0.visible && rect($0).contains(p) } }
+    /// Topmost visible, non-transparent layer under `p`.
+    private func hit(_ p: CGPoint) -> Layer? { LayerPicking.hit(layers, at: p, canvas: ref) }
     private func handle(at p: CGPoint) -> LayerHandle? {
         guard let l = layer(scenes?.selectedLayerID), l.visible, scenes?.cropLayerID == nil else { return nil }
         let r = rect(l), slop = 7 / pointsPerPixel
@@ -173,7 +173,10 @@ final class MetalView: NSView {
         guard editingEnabled, scenes != nil else { return }
         let p = canvasPoint(e), h = hit(p)
         if h?.id != hoverID { hoverID = h?.id; refreshOverlay() }
-        if let hd = handle(at: p) { cursor(for: hd).set() }
+        let hd = handle(at: p)
+        let tip = hd.map { $0.help(gameOrCamera: scenes?.selectedLayer?.isGameOrCamera ?? false) }
+        if toolTip != tip { toolTip = tip }
+        if let hd = hd { cursor(for: hd).set() }
         else if let h = h, h.id == scenes?.selectedLayerID || scenes?.cropLayerID == h.id { NSCursor.openHand.set() }
         else { NSCursor.arrow.set() }
     }
@@ -216,7 +219,7 @@ final class MetalView: NSView {
         let p = canvasPoint(e), canvas = CGRect(origin: .zero, size: ref)
         let snap = !e.modifierFlags.contains(.option)
         func snapper(excluding id: UUID) -> LayerSnapper? {
-            snap ? LayerSnapper(canvas: ref, others: layers.filter { $0.visible && $0.id != id }.map(rect), threshold: 6 / pointsPerPixel) : nil
+            snap ? LayerSnapper(canvas: ref, others: LayerPicking.snapFrames(layers, excluding: id, canvas: ref), threshold: 6 / pointsPerPixel) : nil
         }
         switch d {
         case .move(let id, let start, let grab):

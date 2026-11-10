@@ -70,6 +70,18 @@ enum LayerHandle: Int, CaseIterable {
         }
     }
     func point(in r: CGRect) -> CGPoint { CGPoint(x: r.midX + dir.x * r.width / 2, y: r.midY + dir.y * r.height / 2) }
+
+    /// Tooltip for the handle under the pointer. The game and camera keep their aspect on every handle, which hides
+    /// that ⌥ on an edge crops instead.
+    func help(gameOrCamera: Bool) -> String {
+        switch (isCorner, gameOrCamera) {
+        case (true, _): return "Drag to resize, keeping the shape. ⇧-drag to change the shape; ⌥ turns snapping off."
+        case (false, true): return "Drag to resize proportionally. ⌥-drag to crop this edge instead (also turns snapping off)."
+        case (false, false): return "Drag to move this edge. ⌥ turns snapping off."
+        }
+    }
+    /// The inspector line for the game and camera.
+    static let cropHint = "⌥-drag an edge to crop instead of resizing proportionally. Double-click to pan and zoom inside the frame."
 }
 
 enum LayerResize {
@@ -107,6 +119,22 @@ enum LayerResize {
             if let b = sy, abs((d.y < 0 ? out.minY : out.maxY) - b.target.value) < 0.5 { guides.append(s.guide(b.target, .horizontal, for: out)) }
         }
         return (out, guides)
+    }
+}
+
+/// Which layers the pointer can reach on the picture. A layer that is hidden, or so transparent that nothing of it
+/// shows, is skipped for clicks, hover and snapping, so it does not swallow clicks meant for the layer beneath; it
+/// stays selectable in the sidebar's layer list.
+enum LayerPicking {
+    static let minOpacity = 0.01
+    static func isPickable(_ l: Layer) -> Bool { l.visible && l.opacity >= minOpacity }
+    /// The topmost pickable layer whose frame contains `p` (canvas pixels of `canvas`).
+    static func hit(_ layers: [Layer], at p: CGPoint, canvas: CGSize) -> Layer? {
+        layers.last { isPickable($0) && $0.frame.rect(in: canvas).contains(p) }
+    }
+    /// Frames of the layers a moving layer snaps to.
+    static func snapFrames(_ layers: [Layer], excluding id: UUID, canvas: CGSize) -> [CGRect] {
+        layers.filter { isPickable($0) && $0.id != id }.map { $0.frame.rect(in: canvas) }
     }
 }
 
