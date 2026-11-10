@@ -36,7 +36,8 @@ final class ProjectDoc: Identifiable, Hashable {
         Exporter.removeStalePartials(in: doc.exportsDir)
         let raw = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
         if (raw?["scenes"] as? [Any])?.isEmpty != false || (raw?["version"] as? Int ?? 1) < 2 ||
-            (p.eventsImported && raw?["eventsImported"] as? Bool != true) || (p.eventTransitions && raw?["eventTransitions"] as? Bool != true) { doc.save() }
+            (p.eventsImported && raw?["eventsImported"] as? Bool != true) || (p.eventTransitions && raw?["eventTransitions"] as? Bool != true) ||
+            (p.liveZooms && raw?["liveZooms"] as? Bool != true) { doc.save() }
         return doc
     }
 
@@ -108,16 +109,16 @@ final class ProjectDoc: Identifiable, Hashable {
 
     private static let staleLock = NSLock()
     private static var staleRefreshes: Set<String> = []
+    private static func claimStaleRefresh(_ key: String) -> Bool {
+        staleLock.lock(); defer { staleLock.unlock() }
+        return staleRefreshes.insert(key).inserted
+    }
     /// Remakes the thumbnail of a finished project whose `thumbnail.jpg` predates the current `renderVersion`, off the
     /// main thread. At most once per project folder per launch, so a project whose composite cannot be built is not
     /// retried on every redraw. True when a new thumbnail was written.
     func refreshStaleThumbnail() async -> Bool {
         guard project.state == "complete", !thumbnailIsCurrent else { return false }
-        let key = dir.standardizedFileURL.path
-        Self.staleLock.lock()
-        let first = Self.staleRefreshes.insert(key).inserted
-        Self.staleLock.unlock()
-        guard first else { return false }
+        guard Self.claimStaleRefresh(dir.standardizedFileURL.path) else { return false }
         let snapshot = ProjectDoc(dir: dir, project: project)
         let made = await Task.detached(priority: .utility) { await snapshot.writeThumbnail() }.value
         if made { log("library: remade the thumbnail of \(dir.lastPathComponent) for render version \(Self.renderVersion)") }

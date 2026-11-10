@@ -38,7 +38,8 @@ struct PreviewStage: View {
 struct StageOverlay: View {
     let model: EditorModel
     var body: some View {
-        if case .zoom(let id) = model.selection {
+        // A live-style zoom centres as live did; it has no focus point to drag.
+        if case .zoom(let id) = model.selection, model.zoomBlock(id)?.live != true {
             FocusTargetOverlay(model: model, id: id)
         } else {
             EditorLayerStage(model: model)

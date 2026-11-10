@@ -21,10 +21,8 @@ extension RenderPlan {
     /// The image and text layers that can be in the picture at `t`, as the live engine lists them mid-transition
     /// (outgoing layers whose content changes get their own id, so their texture stays theirs).
     func overlayLayers(atTimelineMs t: Double) -> [Layer] {
-        let (from, to, transition, progress) = selection(at: t)
-        guard let to = to else { return [] }
-        return Self.transitionState(from: from, to: to, transition: transition)
-            .overlayLayers(canvas: canvas, atNs: Self.transitionNs(progress, transition))
+        guard let (state, ns) = liveState(atSourceMs: map.source(fromTimeline: t)) else { return [] }
+        return state.overlayLayers(canvas: canvas, atNs: ns)
     }
 
     /// Token values at `t`: `{timer}` counts the edited timeline, `{time}` is the recording's clock at that moment.

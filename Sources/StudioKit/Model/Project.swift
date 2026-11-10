@@ -158,6 +158,9 @@ struct Project: Codable, Equatable {
     /// Scene spans made from events carry each switch's own transition. False on projects imported before switches
     /// recorded their transition: `importEvents` then upgrades spans the user has not edited, once.
     var eventTransitions = false
+    /// Zoom blocks made from punch-ins are live-style (`ZoomBlock.live`). False on projects imported before that:
+    /// `importEvents` marks blocks the user has not edited, once.
+    var liveZooms = false
     /// Wall-clock time of the recording's first frame, for `{time}` in edits and exports; nil before it was stored
     /// (`createdAt`, a fraction of a second later, stands in; a duplicate keeps this but gets a new `createdAt`).
     var recordedAt: Date? = nil
@@ -168,7 +171,7 @@ struct Project: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case version, name, createdAt, state, durationMs, width, height, fps, colorMode, game, camera, mic, cameraMirror
         case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline, eventsImported, sceneTransition
-        case eventTransitions, recordedAt
+        case eventTransitions, recordedAt, liveZooms
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -183,6 +186,7 @@ struct Project: Codable, Equatable {
         sceneTransition = c.v(.sceneTransition, SceneTransition())
         scenes = c.v(.scenes, []); events = c.v(.events, []); timeline = c.v(.timeline, Timeline())
         eventsImported = c.v(.eventsImported, false); eventTransitions = c.v(.eventTransitions, false)
+        liveZooms = c.v(.liveZooms, false)
         recordedAt = c.v(.recordedAt, nil)
         if scenes.isEmpty { scenes = [defaultScene] }
         if version < 2 { migrateTimeline() }
@@ -205,22 +209,43 @@ struct Project: Codable, Equatable {
     /// but only while their spans are exactly what that import made (see `upgradeEventTransitions`).
     mutating func importEvents() {
         guard state != "recording", !events.isEmpty else { return }
-        guard !eventsImported else { upgradeEventTransitions(); return }
-        eventsImported = true; eventTransitions = true
+        guard !eventsImported else { upgradeEventTransitions(); upgradeLiveZooms(); return }
+        eventsImported = true; eventTransitions = true; liveZooms = true
         let sorted = events.sorted { $0.tMs < $1.tMs }
         if timeline.sceneSpans.isEmpty { timeline.sceneSpans = spansFromEvents(recordedTransitions: true) }
-        if timeline.zooms.isEmpty {
-            var start: SessionEvent?
-            for e in sorted {
-                if e.type == "zoomIn" { if start == nil { start = e } }
-                if e.type == "zoomOut", let a = start {
-                    if e.tMs > a.tMs { timeline.zooms.append(ZoomBlock(startMs: a.tMs, endMs: e.tMs, scale: a.zoom ?? 1.8, focusX: a.focusX ?? 0.5, focusY: a.focusY ?? 0.5)) }
-                    start = nil
-                }
-            }
-            if let a = start, durationMs > a.tMs { timeline.zooms.append(ZoomBlock(startMs: a.tMs, endMs: durationMs, scale: a.zoom ?? 1.8, focusX: a.focusX ?? 0.5, focusY: a.focusY ?? 0.5)) }
-        }
+        if timeline.zooms.isEmpty { timeline.zooms = zoomsFromEvents(live: true) }
         if timeline.markers.isEmpty { timeline.markers = sorted.filter { $0.type == "marker" }.map { Marker(tMs: $0.tMs) } }
+    }
+
+    /// One block per punch-in, from the press to the release (or the end of the recording). `live`: replayed with the
+    /// live spring; without it, exactly what the import wrote before blocks had a style.
+    func zoomsFromEvents(live: Bool) -> [ZoomBlock] {
+        var out: [ZoomBlock] = [], start: SessionEvent?
+        func block(_ a: SessionEvent, _ end: Double) -> ZoomBlock {
+            ZoomBlock(startMs: a.tMs, endMs: end, scale: a.zoom ?? 1.8, focusX: a.focusX ?? 0.5, focusY: a.focusY ?? 0.5, live: live)
+        }
+        for e in events.sorted(by: { $0.tMs < $1.tMs }) {
+            if e.type == "zoomIn" { if start == nil { start = e } }
+            if e.type == "zoomOut", let a = start {
+                if e.tMs > a.tMs { out.append(block(a, e.tMs)) }
+                start = nil
+            }
+        }
+        if let a = start, durationMs > a.tMs { out.append(block(a, durationMs)) }
+        return out
+    }
+
+    /// Projects imported before zoom blocks had a style: their blocks become live-style, once, only while they are
+    /// exactly what that import made (same count, times, scale, focus and ease).
+    mutating func upgradeLiveZooms() {
+        guard eventsImported, !liveZooms, state != "recording" else { return }
+        liveZooms = true
+        let old = zoomsFromEvents(live: false)
+        let current = timeline.zooms.enumerated().sorted { ($0.element.startMs, $0.offset) < ($1.element.startMs, $1.offset) }
+        guard !old.isEmpty, current.count == old.count, zip(current, old).allSatisfy({ c, o in
+            var same = c.element; same.id = o.id; return same == o
+        }) else { return }
+        for c in current { timeline.zooms[c.offset].live = true }
     }
 
     /// The transition a recorded switch used: its own fields, else the recording's default.
@@ -292,6 +317,7 @@ struct Project: Codable, Equatable {
         try c.encode(events, forKey: .events)
         try c.encode(eventsImported, forKey: .eventsImported)
         try c.encode(eventTransitions, forKey: .eventTransitions)
+        try c.encode(liveZooms, forKey: .liveZooms)
         try c.encodeIfPresent(recordedAt, forKey: .recordedAt)
         try c.encode(timeline, forKey: .timeline)
         let bounds = timeline.segments.sorted { $0.startMs < $1.startMs }

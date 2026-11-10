@@ -85,6 +85,8 @@ final class EditorScriptTests: XCTestCase {
             guard var object = value as? [String: Any] else { return value }
             if object["frameWidth"] as? Double == 0 { object.removeValue(forKey: "frameWidth") }
             if object["frameColor"] as? [Double] == [0.42, 0.49, 1, 1] { object.removeValue(forKey: "frameColor") }
+            if object["live"] as? Bool == false { object.removeValue(forKey: "live") }
+            if object["liveZooms"] as? Bool == false { object.removeValue(forKey: "liveZooms") }
             if let transition = object["sceneTransition"] as? [String: Any],
                transition["style"] as? String == "morph", transition["durationMs"] as? Double == 380 {
                 object.removeValue(forKey: "sceneTransition")

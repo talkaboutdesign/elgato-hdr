@@ -372,14 +372,25 @@ struct ZoomInspector: View {
             InspectorSection(title: "Zoom") {
                 LabeledSlider(label: "Scale", value: Binding(get: { z.scale }, set: { v in model.updateZoom(id, "Zoom Scale") { $0.scale = (v * 20).rounded() / 20 } }),
                               range: 1.1...4, defaultValue: 1.8, format: { String(format: "%.2f×", $0) }, onEditingChanged: editing)
-                LabeledSlider(label: "Ease in and out", value: Binding(get: { z.easeMs / 1000 }, set: { v in model.updateZoom(id, "Zoom Ease") { $0.easeMs = (v * 1000 / 10).rounded() * 10 } }),
-                              range: 0...1.5, defaultValue: 0.45, format: { String(format: "%.2f s", $0) }, onEditingChanged: editing)
-                InspectorRow(label: "Focus") {
-                    Text(String(format: "%.0f%%, %.0f%%", z.focusX * 100, z.focusY * 100)).monospacedDigit().foregroundStyle(.secondary)
-                    Button("Center") { model.updateZoom(id, "Zoom Focus") { $0.focusX = 0.5; $0.focusY = 0.5 } }.controlSize(.small)
+                if z.live {
+                    InspectorRow(label: "Timing") {
+                        Label("Live timing", systemImage: "dot.radiowaves.left.and.right").foregroundStyle(.secondary)
+                            .accessibilityLabel("Live timing")
+                    }
+                    Text("Zooms in from the press and starts back at the release with the live spring, centred as it was live.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    PillButton("Use Editor Timing", systemImage: "slider.horizontal.3",
+                               help: "Ease in and out inside the block, with a focus point you choose") { model.useEditorTiming(id) }
+                } else {
+                    LabeledSlider(label: "Ease in and out", value: Binding(get: { z.easeMs / 1000 }, set: { v in model.updateZoom(id, "Zoom Ease") { $0.easeMs = (v * 1000 / 10).rounded() * 10 } }),
+                                  range: 0...1.5, defaultValue: 0.45, format: { String(format: "%.2f s", $0) }, onEditingChanged: editing)
+                    InspectorRow(label: "Focus") {
+                        Text(String(format: "%.0f%%, %.0f%%", z.focusX * 100, z.focusY * 100)).monospacedDigit().foregroundStyle(.secondary)
+                        Button("Center") { model.updateZoom(id, "Zoom Focus") { $0.focusX = 0.5; $0.focusY = 0.5 } }.controlSize(.small)
+                    }
+                    Text("Drag the target in the preview to choose the point the zoom closes in on.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                Text("Drag the target in the preview to choose the point the zoom closes in on.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: 12))
             InspectorSection(title: "Timing") {
