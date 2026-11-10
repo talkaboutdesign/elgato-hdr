@@ -73,7 +73,7 @@ enum CompositionBuilder {
             return end > start ? (start, end) : nil
         }
         guard !kept.isEmpty, map.durationMs > 0 else { throw err("No kept video remains") }
-        try await insert(gv, into: sv, offsetMs: 0, kept: kept)
+        try await insert(gv, into: sv, offsetMs: 0, kept: kept, holdFirstFrame: frame)
         var mixParams: [AVMutableAudioMixInputParameters] = []
         if let ga = try await game.loadTracks(withMediaType: .audio).first, let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
             try await insert(ga, into: t, offsetMs: 0, kept: kept)
@@ -148,17 +148,32 @@ enum CompositionBuilder {
     static func time(_ ms: Double) -> CMTime { CMTime(seconds: ms / 1000, preferredTimescale: 60000) }
 
     /// Each kept range (ticks) takes what the layer has of it, shifted by the layer's offset; the gaps stay empty and
-    /// the next range starts exactly where this one ended.
-    private static func insert(_ src: AVAssetTrack, into t: AVMutableCompositionTrack, offsetMs: Double, kept: [(start: Int64, end: Int64)]) async throws {
+    /// the next range starts exactly where this one ended. `holdFirstFrame` (one source frame, in ticks): the game's
+    /// first frame lands a little after 0 (about 0.13 s into a recording), so a kept range that starts before it shows
+    /// that frame, held, until then; no game picture at 0:00 otherwise. Only the composition changes, never the file.
+    private static func insert(_ src: AVAssetTrack, into t: AVMutableCompositionTrack, offsetMs: Double, kept: [(start: Int64, end: Int64)],
+                               holdFirstFrame frame: Int64? = nil) async throws {
         let available = try await src.load(.timeRange)
         let first = CMTimeConvertScale(available.start, timescale: ticks, method: .roundAwayFromZero).value
         let last = CMTimeConvertScale(available.end, timescale: ticks, method: .roundTowardZero).value
         let offset = Int64((offsetMs * Double(ticks) / 1000).rounded())
         func tick(_ v: Int64) -> CMTime { CMTime(value: v, timescale: ticks) }
+        // Where the first sample is shown: the track can begin with an empty edit rather than at that sample.
+        var media = first
+        if frame != nil, let m = try await src.load(.segments).first(where: { !$0.isEmpty }) {
+            media = max(first, CMTimeConvertScale(m.timeMapping.target.start, timescale: ticks, method: .roundAwayFromZero).value)
+        }
         var at: Int64 = 0
         for r in kept {
             let want = r.start - offset
-            let start = max(want, first), end = min(r.end - offset, last)
+            var start = max(want, first)
+            let end = min(r.end - offset, last)
+            if let frame, start < media, end > media {
+                let still = min(frame, end - media), pos = at + start - want
+                try t.insertTimeRange(CMTimeRange(start: tick(media), duration: tick(still)), of: src, at: tick(pos))
+                t.scaleTimeRange(CMTimeRange(start: tick(pos), duration: tick(still)), toDuration: tick(media - start))
+                start = media
+            }
             if end > start { try t.insertTimeRange(CMTimeRange(start: tick(start), end: tick(end)), of: src, at: tick(at + start - want)) }
             at += r.end - r.start
         }
