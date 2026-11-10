@@ -4,7 +4,7 @@ import CoreMedia
 import CoreVideo
 @testable import StudioKit
 
-// Game baselines recorded through AVFoundation from PR head 5243611 plus prerequisite hard-edge fix (9886099) (SDR, 128x72 / 72x128).
+// Full-HD game baselines: pre-engine 092984d plus the prerequisite hard-edge fix, through AVFoundation.
 final class MigrationAVTests: XCTestCase {
     func testMigratedProjectFirstFrames() async throws {
         try TimelineExportTests().requireHardware()
@@ -16,25 +16,23 @@ final class MigrationAVTests: XCTestCase {
             let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures"))
             doc.project = try decoder.decode(Project.self, from: Data(contentsOf: url))
             for canvas in Canvas.allCases {
-                let size = canvas == .wide ? CGSize(width: 128, height: 72) : CGSize(width: 72, height: 128)
+                let size = canvas.size(.hd)
                 let built = try await CompositionBuilder.build(doc, canvas: canvas, resolution: .hd, range: .sdr)
                 let video = CompositionBuilder.videoComposition(doc.project, canvas: canvas, size: size, built: built)
                 let raw = try RawCompositionFrames.frame(built.asset, video: video, ms: 0, hdr: false)
                 let codes = RawCompositionFrames.codes(raw)
                 let key = "migration-\(name)-\(canvas.rawValue)"
-                if let output = ProcessInfo.processInfo.environment["MIGRATION_BASELINE"] {
-                    try JSONEncoder().encode(codes).write(to: URL(fileURLWithPath: output).appendingPathComponent(key+".json"))
-                    continue
-                }
-                let golden = try XCTUnwrap(Bundle.module.url(forResource: key, withExtension: "json", subdirectory: "Fixtures/golden"))
-                let expected = try JSONDecoder().decode([Double].self, from: Data(contentsOf: golden))
+                let golden = try XCTUnwrap(Bundle.module.url(forResource: key, withExtension: "lzfse", subdirectory: "Fixtures/golden"))
+                let compressed = try Data(contentsOf: golden)
+                let expected = [UInt8](try (compressed as NSData).decompressed(using: .lzfse))
+                XCTAssertEqual(codes.count, expected.count)
                 let instruction = try XCTUnwrap(video.instructions.first as? CompositionInstruction)
                 let camera = instruction.plan.layers(atTimelineMs: 0).first { $0.key == .camera }
                 var gameError = 0.0
                 for y in 0..<Int(size.height) { for x in 0..<Int(size.width) {
                     if camera?.dst.insetBy(dx: -3, dy: -3).contains(CGPoint(x: x, y: y)) == true { continue }
                     let i = (y*Int(size.width)+x)*4
-                    for c in 0..<3 { gameError = max(gameError, abs(codes[i+c]-expected[i+c])) }
+                    for c in 0..<3 { gameError = max(gameError, abs(codes[i+c]-Double(expected[i+c]))) }
                 } }
                 XCTAssertLessThanOrEqual(gameError, 2, key+" stored game baseline")
                 if let camera = camera {
@@ -43,7 +41,8 @@ final class MigrationAVTests: XCTestCase {
                     var checked = 0, error = 0.0
                     for y in 0..<Int(size.height) { for x in 0..<Int(size.width) {
                         let point = CGPoint(x: Double(x)+0.5, y: Double(y)+0.5)
-                        guard camera.dst.insetBy(dx: 4, dy: 4).contains(point) else { continue }
+                        let margin = max(4, camera.radius + camera.border + 2)
+                        guard camera.dst.insetBy(dx: margin, dy: margin).contains(point) else { continue }
                         let u = (point.x-camera.dst.minX)/camera.dst.width
                         let v = (point.y-camera.dst.minY)/camera.dst.height
                         let sx = (camera.src.minX+u*camera.src.width)*Double(sw)-0.5
