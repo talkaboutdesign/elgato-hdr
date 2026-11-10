@@ -15,6 +15,8 @@ struct OverlaySource {
     /// Exports, thumbnails and hover frames wait until every texture exists, so no frame lacks an overlay. The
     /// preview never waits: a layer whose texture is still being made shows a frame or two late.
     var wait = true
+    /// Where the textures are made and kept; tests pass a cold one.
+    var cache: OverlayTextureCache = .shared
 }
 
 extension RenderPlan {
@@ -33,8 +35,9 @@ extension RenderPlan {
     }
 
     /// Textures and source sizes of the overlays drawn at `t`, to merge with the game and camera.
-    func overlays(atTimelineMs t: Double, cache: OverlayTextureCache = .shared) -> OverlayFrame {
+    func overlays(atTimelineMs t: Double, cache: OverlayTextureCache? = nil) -> OverlayFrame {
         guard let o = overlay else { return OverlayFrame() }
+        let cache = cache ?? o.cache
         let layers = overlayLayers(atTimelineMs: t)
         guard !layers.isEmpty else { return OverlayFrame() }
         return cache.overlays(for: Composition(layers: layers), canvas: canvasSize, assets: o.assets, tokens: tokens(atTimelineMs: t),
@@ -51,8 +54,9 @@ extension RenderPlan {
     /// Decodes and rasterizes every overlay the plan can draw before the first frame is asked for (an export calls
     /// this before its reader starts). Text with `{timer}` or `{time}` changes as it plays; its later values are made
     /// as they come up, with the frame waiting for them.
-    func prewarmOverlays(cache: OverlayTextureCache = .shared) {
+    func prewarmOverlays(cache: OverlayTextureCache? = nil) {
         guard let o = overlay else { return }
+        let cache = cache ?? o.cache
         let layers = shownScenes.flatMap { $0.composition(canvas).layers }.filter(\.isOverlay)
         guard !layers.isEmpty else { return }
         _ = cache.overlays(for: Composition(layers: layers), canvas: canvasSize, assets: o.assets, tokens: tokens(atTimelineMs: 0),

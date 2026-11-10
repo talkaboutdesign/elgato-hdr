@@ -116,7 +116,7 @@ enum CompositionBuilder {
     /// frames wait for overlay textures; the editor preview passes `waitForOverlays: false` and is told through
     /// `onOverlaysPending` (on the compositor's queue) when a frame went out before an overlay was ready.
     static func videoComposition(_ p: Project, canvas: Canvas, size: CGSize, built: BuiltComposition, waitForOverlays: Bool = true,
-                                 onOverlaysPending: (() -> Void)? = nil) -> AVMutableVideoComposition {
+                                 overlayCache: OverlayTextureCache = .shared, onOverlaysPending: (() -> Void)? = nil) -> AVMutableVideoComposition {
         let out = built.outTransfer
         let vc = AVMutableVideoComposition()
         vc.customVideoCompositorClass = out == 2 ? SDRLayerCompositor.self : HDRLayerCompositor.self
@@ -132,7 +132,7 @@ enum CompositionBuilder {
                               canvas: canvas, canvasSize: size, sources: sources, mirrorCamera: p.cameraMirror,
                               cuts: editMap(p, sourceDurationMs: built.sourceDurationMs, frameMs: built.sourceFrameMs))
         plan.overlay = OverlaySource(assets: built.assets.isEmpty ? AssetStore.searchPaths(project: nil) : built.assets,
-                                     recordedAt: p.recordedAt ?? p.createdAt, wait: waitForOverlays)
+                                     recordedAt: p.recordedAt ?? p.createdAt, wait: waitForOverlays, cache: overlayCache)
         if let track = built.asset.track(withTrackID: built.cameraTrack) {
             plan.cameraRanges = track.segments.filter { !$0.isEmpty }.map {
                 Segment(startMs: $0.timeMapping.target.start.seconds * 1000, endMs: $0.timeMapping.target.end.seconds * 1000)

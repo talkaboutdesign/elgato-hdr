@@ -98,8 +98,12 @@ final class EditorModel {
     var editsLocked: Bool { exportQueue?.isRunning ?? false }
     var frameDuration: Double { 1 / max(1, project.fps) }
 
-    init(doc: ProjectDoc) {
+    /// Where the preview's overlay textures come from (the app's one cache; tests pass a cold one).
+    @ObservationIgnored let overlayCache: OverlayTextureCache
+
+    init(doc: ProjectDoc, overlayCache: OverlayTextureCache = .shared) {
         self.doc = doc
+        self.overlayCache = overlayCache
         project = doc.project
         range = doc.project.color == .sdr ? .sdr : .hdr
         filmstrip = FilmstripCache(doc: doc)
@@ -350,11 +354,12 @@ final class EditorModel {
     /// The preview never waits for an overlay texture (playback must not stall on a 4K image decode). A frame that
     /// went out without one asks for a redraw once the cache has caught up, so a paused preview does not keep it.
     private func previewComposition(_ b: BuiltComposition, canvas: Canvas) -> AVMutableVideoComposition {
-        let flag = overlayRedraw
-        return CompositionBuilder.videoComposition(project, canvas: canvas, size: canvas.size(.hd), built: b, waitForOverlays: false) { [weak self] in
+        let flag = overlayRedraw, cache = overlayCache
+        return CompositionBuilder.videoComposition(project, canvas: canvas, size: canvas.size(.hd), built: b, waitForOverlays: false,
+                                                   overlayCache: cache) { [weak self] in
             guard flag.set() else { return }
             DispatchQueue.global(qos: .userInitiated).async {
-                OverlayTextureCache.shared.drain()
+                cache.drain()
                 DispatchQueue.main.async { self?.redrawForOverlays() }
             }
         }
