@@ -114,28 +114,31 @@ final class RTMPReviewTests: XCTestCase {
         let p = publisher(server); defer { p.stop() }
         let ready = expectation(description: "ready"), requested = expectation(description: "recovery IDR")
         let audio = expectation(description: "audio through congestion"), resumed = expectation(description: "resumed IDR")
-        p.onState = { if $0 == .publishing { ready.fulfill() } }
+        let release = DispatchSemaphore(value: 0)
+        var requests = 0
+        p.onState = { if $0 == .publishing {
+            ready.fulfill()
+            // Queue the complete burst before send completions can race the producer on fast CI loopback.
+            _ = release.wait(timeout: .now() + 5)
+        } }
+        p.onNeedKeyframe = {
+            requests += 1
+            if requests == 2 { requested.fulfill() }
+        }
         p.start(); wait(for: [ready], timeout: 3)
         server.pauseLatest()
-        p.onNeedKeyframe = { requested.fulfill() }
-        let large = Data(repeating: 0x55, count: 800_000)
-        for i in 0..<100 {
-            p.sendVideo(large, ptsNs: UInt64(i) * 33_000_000, dtsNs: UInt64(i) * 33_000_000, keyframe: true)
-            if p.stats.pendingMs > 1500 { break }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
-        XCTAssertGreaterThan(p.stats.pendingMs, 1500)
-        let before = p.stats.droppedFrames
-        for i in 100..<121 {
-            p.sendVideo(Data([1]), ptsNs: UInt64(i) * 33_000_000, dtsNs: UInt64(i) * 33_000_000, keyframe: true)
-        }
-        p.sendAudio(Data([0x42]), ptsNs: 5_000_000_000)
-        XCTAssertEqual(p.stats.droppedFrames - before, 21)
         server.onMessage = { _, m in
             if m.type == 8, m.payload == Data([0xaf, 1, 0x42]) { audio.fulfill() }
             if m.type == 9, m.payload == Data([0x17, 1, 0, 0, 0, 0x43]) { resumed.fulfill() }
         }
+        p.sendVideo(Data(repeating: 0x55, count: 800_000), ptsNs: 0, dtsNs: 0, keyframe: true)
+        for i in 100..<121 {
+            p.sendVideo(Data([1]), ptsNs: UInt64(i) * 33_000_000, dtsNs: UInt64(i) * 33_000_000, keyframe: true)
+        }
+        p.sendAudio(Data([0x42]), ptsNs: 5_000_000_000)
+        release.signal()
         server.resumeLatest(); wait(for: [requested, audio], timeout: 8)
+        XCTAssertEqual(p.stats.droppedFrames, 21)
         let dropped = p.stats.droppedFrames
         p.sendVideo(Data([2]), ptsNs: 6_000_000_000, dtsNs: 6_000_000_000, keyframe: false)
         XCTAssertEqual(p.stats.droppedFrames, dropped + 1)

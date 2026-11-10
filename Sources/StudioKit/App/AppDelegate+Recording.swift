@@ -43,7 +43,7 @@ extension AppDelegate {
             DispatchQueue.main.async {
                 guard let self = self, self.recorder === r else { return }
                 log("disk guard: \(self.diskGB(free)) free, stopping recording")
-                self.finishRecording { msg in log(msg) }
+                self.finishRecording { log($0.logLine) }
                 self.showRecordingAlert("Recording stopped: the disk is almost full",
                     "Only \(self.diskGB(free)) is left on the recordings volume. Everything up to this point was saved. Free up space or choose another recordings folder before recording again.")
             }
@@ -81,7 +81,8 @@ extension AppDelegate {
             proj.state = "recording"
             proj.width = s.w; proj.height = s.h; proj.fps = fps; proj.colorMode = colorMode.rawValue
             proj.cameraMirror = cameraMirror
-            proj.wide.camera = livePlacement
+            beginSceneLog(&proj, startNs: startNs)
+            bundleOverlayAssets(proj.scenes, into: dir)
             if camera.cameraOn, let pb = camera.latest {
                 do {
                     camWriter = try LayerWriter(cameraURL: dir.appendingPathComponent("camera.mov"), width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb), startNs: startNs)
@@ -114,20 +115,17 @@ extension AppDelegate {
     }
 
     func stopRecording() {
-        finishRecording { [weak self] msg in
-            log(msg)
-            // "saved <name> [game + camera + mic]" -> "<name> · game, camera, mic"
-            if msg.hasPrefix("saved ") {
-                let detail = msg.dropFirst(6).replacingOccurrences(of: " [", with: " · ").replacingOccurrences(of: "]", with: "").replacingOccurrences(of: " + ", with: ", ")
-                self?.toast("Recording saved", detail: detail, style: .success)
-            }
-            else { self?.toast("Recording failed", detail: msg, style: .error) }
+        finishRecording { [weak self] outcome in
+            log(outcome.logLine)
+            let t = outcome.toast
+            self?.toast(t.text, detail: t.detail, style: t.style)
         }
     }
 
     /// Closes every layer, then completes project.json and its thumbnail.
-    func finishRecording(_ done: @escaping (String) -> Void) {
+    func finishRecording(_ done: @escaping (RecordingOutcome) -> Void) {
         guard let r = recorder else { return }
+        endSceneLog()
         session?.recorder = nil; recorder = nil
         camera.attach(camera: nil, mic: nil)
         recTimer?.invalidate(); recTimer = nil
@@ -142,14 +140,16 @@ extension AppDelegate {
         if let cw = cw { group.enter(); cw.finish { ok in camOK = ok; group.leave() } }
         if let mw = mw { group.enter(); mw.finish { ok in micOK = ok; group.leave() } }
         group.notify(queue: .main) {
-            AppDelegate.activeRecordingDir = nil
-            guard let doc = doc else { done(msg); return }
+            log(msg)
+            let gameError = RecordingOutcome.writerError(r.writer, message: msg)
+            guard let doc = doc else { done(.failed(reason: gameError ?? msg)); return }
             if !camOK { doc.project.camera = nil }
             if !micOK { doc.project.mic = nil }
-            let layers = ["game"] + (doc.project.camera != nil ? ["camera"] : []) + (doc.project.mic != nil ? ["mic"] : [])
             doc.finalize {
+                // Only this folder: another recording may have started while this one was finishing.
+                AppDelegate.recordingFinalized(doc.dir)
                 Library.shared.reload()
-                done("saved \(doc.project.name) [\(layers.joined(separator: " + "))]")
+                done(RecordingOutcome(project: doc.project, gameError: gameError))
             }
         }
     }

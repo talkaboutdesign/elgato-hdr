@@ -13,6 +13,7 @@ import QuartzCore
 /// on the main thread (the didSets below).
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let state = StudioState()
+    let sceneRuntime = SceneRuntime()
     var studio: StudioWindowController!
     var window: NSWindow!
     var view: MetalView!
@@ -21,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var demoSource: DemoSource?
     var demoRequested = false          // "Try the Demo Source" on the first-launch sheet
     let demoCamera = CommandLine.arguments.contains("--demo-camera")
+    let streamMixer = AudioMixer()
+    lazy var streamController = makeStreamController()
+    var streamItem: NSMenuItem?
     var session: Session?
     var modeIndex = min(max(UserDefaults.standard.integer(forKey: "mode"), 0), modes.count - 1) { didSet { state.modeIndex = modeIndex } }   // also accepts `-mode N` on the command line
     var colorMode = ColorMode(rawValue: UserDefaults.standard.string(forKey: "color") ?? "pq") ?? .pq { didSet { state.colorMode = colorMode } }
@@ -34,9 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var recStart = Date()
     var recTimer: Timer?
     var meterTimer: Timer?
+    var deviceObservers: [NSObjectProtocol] = []
     var measuredFps: Double = 30
     var lastInfo = ""
-    var focusRestoreSidebar = true     // sidebar state to restore when leaving focus mode
+    var panels = PanelLayout()         // sidebar across focus mode
     var galleryWindow: NSWindow?
 
     // Facecam + microphone layers
@@ -51,8 +56,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }() { didSet { state.placement = livePlacement } }
     var recDoc: ProjectDoc?
     var camWriter: LayerWriter?, micWriter: LayerWriter?
-    static var activeRecordingDir: URL?
-    static func isRecording(_ dir: URL) -> Bool { activeRecordingDir == dir }
+    /// Folder of the recording in progress. Setting it registers the folder in `recordingDirs`, where it stays until
+    /// `recordingFinalized`: a new recording can start while the previous one's writers are still finishing.
+    static var activeRecordingDir: URL? { didSet { if let d = activeRecordingDir { recordingDirs.insert(recordingKey(d)) } } }
+    /// Folders recording or still finalizing, which library recovery must leave alone. Keyed by path: folder URLs
+    /// listed from disk carry a trailing slash, the one `newProjectDir` returns does not. Main thread only.
+    static var recordingDirs = Set<String>()
+    static func recordingKey(_ dir: URL) -> String { dir.standardizedFileURL.path }
+    static func isRecording(_ dir: URL) -> Bool { recordingDirs.contains(recordingKey(dir)) }
+    static func recordingFinalized(_ dir: URL) {
+        recordingDirs.remove(recordingKey(dir))
+        if let d = activeRecordingDir, recordingKey(d) == recordingKey(dir) { activeRecordingDir = nil }
+    }
     var libraryWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -83,23 +98,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             return
         }
         #endif
-        view.placement = { [weak self] in
-            guard let self = self, self.camera.cameraOn else { return nil }
-            return self.livePlacement
-        }
-        view.onPlacement = { [weak self] p in self?.setPlacement(p) }
-        view.contextMenu = { [weak self] in self?.makeCameraMenu(title: "Camera") }
+        setUpScenes()
         camera.onState = { [weak self] in self?.syncDevices() }
         buildMenu()
         startMeterTimer()
         observeDeviceChanges()
         if CommandLine.arguments.contains("--no-capture") { setConnection(.noSignal("Capture is off (--no-capture)")) } else { start() }
+        let micInput = streamMixer.addInput("mic")
+        camera.onMicAudio = { buffer, ns in micInput.push(buffer, endHostNs: ns) }
         if demoCamera { camera.injectDemo(); applyOverlay() }
         if !demoCamera && cameraID != nil { camera.setCamera(uniqueID: cameraID) { [weak self] e in self?.deviceResult(e) } }
         if !demoCamera && micID != nil { camera.setMicrophone(uniqueID: micID) { [weak self] e in self?.deviceResult(e) } }
         syncDevices()
         if CommandLine.arguments.contains("--fullscreen") { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.window.toggleFullScreen(nil) } }
         if CommandLine.arguments.contains("--library") { showLibrary() }
+        scheduleStreaming()
         #if DEBUG
         if CommandLine.arguments.contains("--design-gallery") { galleryWindow = DesignGallery.open() }
         if CommandLine.arguments.contains("--first-launch-sheet") {
@@ -137,7 +150,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func start() {
         if recorder != nil { stopRecording() }
-        if demoSource != nil, session != nil { return }
         session?.stop(); session = nil
         let mode = modes[modeIndex]
         setConnection(.connecting)
@@ -175,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     self.view.updateDrawableSize()
                     self.renderer?.attachDisplayLink(view: self.view)
                     self.applyOverlay()
+                    if let renderer = self.renderer { self.streamController.replaceRenderer(renderer) }
                 }
             }
             guard let renderer = self.renderer else { DispatchQueue.main.async { self.setConnection(.noSignal("Metal is unavailable")) }; close(fd); return }
@@ -183,10 +196,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             renderer.resetPacing()
             let s = Session(fd: fd, renderer: renderer, shm: shm)
             s.audio = self.audio
+            let gameInput = self.streamMixer.addInput("game")
+            s.onGameAudio = { bytes, count, ns in gameInput.pushInt16Stereo(bytes, byteCount: count, endHostNs: ns) }
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
                 if let r = info.range(of: #"([0-9.]+) fps"#, options: .regularExpression), let v = Double(info[r].dropLast(4)) { self?.measuredFps = v }
-                if let self = self, s.w > 0, self.view.videoSize != CGSize(width: s.w, height: s.h) {
-                    self.view.videoSize = CGSize(width: s.w, height: s.h)
+                if let self = self, s.w > 0, self.view.gameSize != CGSize(width: s.w, height: s.h) {
+                    self.view.gameSize = CGSize(width: s.w, height: s.h)
                 }
                 self?.setStatus(info) } }
             DispatchQueue.main.async { self.session = s }
@@ -197,6 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func windowWillClose(_ n: Notification) {
         guard (n.object as? NSWindow) === window else { return }
         if recorder != nil { stopRecording() }
+        endStream()
         session?.stop(); session = nil
         audio.stop()
         setConnection(.noSignal("Capture stopped"))
@@ -211,9 +227,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard confirmEndingStream("Quit") else { return .terminateCancel }
+        endStream()
         guard recorder != nil else { return .terminateNow }
         finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }
-    func applicationWillTerminate(_ n: Notification) { session?.stop(); demoSource?.stop() }
+    func applicationWillTerminate(_ n: Notification) { stopStudioObservers(); endStream(); sceneRuntime.store.flush(scenes.collection); session?.stop(); demoSource?.stop() }
 }

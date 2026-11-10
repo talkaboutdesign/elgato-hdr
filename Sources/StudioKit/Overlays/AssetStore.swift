@@ -10,10 +10,12 @@ import UniformTypeIdentifiers
 enum AssetStore {
     enum ImportError: Error { case unsupported, unreadable }
 
-    static var appSupportAssets: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    /// Read once: render threads look overlays up every frame. `EHDR_ASSETS_DIR` redirects it for test runs.
+    static let appSupportAssets: URL = {
+        if let d = ProcessInfo.processInfo.environment["EHDR_ASSETS_DIR"], !d.isEmpty { return URL(fileURLWithPath: d, isDirectory: true) }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Elgato HDR/Assets", isDirectory: true)
-    }
+    }()
     /// Where to look for a project's assets, in lookup order.
     static func searchPaths(project: URL?) -> [URL] {
         (project.map { [$0.appendingPathComponent("Assets", isDirectory: true)] } ?? []) + [appSupportAssets]

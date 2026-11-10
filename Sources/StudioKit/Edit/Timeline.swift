@@ -5,15 +5,6 @@ extension Segment {
     enum CodingKeys: String, CodingKey { case startMs, endMs }
     init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init(startMs: c.v(.startMs, 0), endMs: c.v(.endMs, 0)) }
 }
-struct SceneTransition: Codable, Equatable {
-    var style: Style = .morph
-    var durationMs = 380.0
-    enum Style: String, Codable { case cut, fade, morph }
-}
-extension SceneTransition {
-    enum CodingKeys: String, CodingKey { case style, durationMs }
-    init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init(style: c.v(.style, .morph), durationMs: c.v(.durationMs, 380)) }
-}
 struct SceneSpan: Codable, Equatable {
     var id = UUID(); var startMs: Double; var sceneID: UUID; var transition = SceneTransition()
 }
@@ -46,17 +37,6 @@ struct Marker: Codable, Equatable { var id = UUID(); var tMs: Double; var label 
 extension Marker {
     enum CodingKeys: String, CodingKey { case id, tMs, label }
     init(from d: Decoder) throws { let c = try d.container(keyedBy: CodingKeys.self); self.init(id: c.v(.id, UUID()), tMs: c.v(.tMs, 0), label: c.v(.label, "")) }
-}
-struct SessionEvent: Codable, Equatable {
-    var tMs: Double; var type: String
-    var sceneID: UUID?; var zoom: Double?; var focusX: Double?; var focusY: Double?
-}
-extension SessionEvent {
-    enum CodingKeys: String, CodingKey { case tMs, type, sceneID, zoom, focusX, focusY }
-    init(from d: Decoder) throws {
-        let c = try d.container(keyedBy: CodingKeys.self)
-        self.init(tMs: c.v(.tMs, 0), type: c.v(.type, ""), sceneID: c.v(.sceneID, nil), zoom: c.v(.zoom, nil), focusX: c.v(.focusX, nil), focusY: c.v(.focusY, nil))
-    }
 }
 struct Timeline: Codable, Equatable {
     var splitPoints: [Double] = []
