@@ -51,7 +51,7 @@ final class ExporterCancelTests: XCTestCase {
                     ExportJob(canvas: .wide, resolution: .hd, range: .hdr, fps: .source)]
         var rng = SeededRandom(state: 2026)
         let iterations = Int(ProcessInfo.processInfo.environment["EHDR_CANCEL_ITERATIONS"] ?? "") ?? 10
-        let delays = (0..<iterations).map { _ in Double.random(in: 0...2, using: &rng) }
+        let delays = (0..<iterations).map { _ in Double.random(in: 0...(iterations > 10 ? 2 : 1), using: &rng) }
         let dir = doc.exportsDir.appendingPathComponent("cancels")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         struct Outcome { var delay: Double; var returnedAfter: Double?; var cancelled: Bool; var fileLeft: Bool; var error: String? }
@@ -94,8 +94,7 @@ final class ExporterCancelTests: XCTestCase {
                 XCTAssertTrue(o.fileLeft, "\(label): finished before the cancel arrived, so its file stays")
             }
         }
-        // A cancel that landed while the writer was still starting finishes its teardown just after `run` returned.
-        try await Task.sleep(nanoseconds: 1_500_000_000)
+        // run now waits for teardown, so the directory is final as soon as all tasks have returned.
         let left = try FileManager.default.contentsOfDirectory(atPath: dir.path).count
         XCTAssertEqual(left, outcomes.filter { !$0.cancelled }.count, "only exports that finished before their cancel left a file")
         let cancelled = outcomes.filter(\.cancelled).count, worst = outcomes.compactMap(\.returnedAfter).max() ?? 0

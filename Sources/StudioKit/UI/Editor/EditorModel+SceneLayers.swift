@@ -58,7 +58,8 @@ extension EditorModel {
     /// drag began: the picture follows the pointer.
     func panSceneGame(from start: (x: Double, y: Double), translation: CGSize, stage: CGSize) {
         guard let g = sceneLayer(.game), stage.width > 0, stage.height > 0 else { return }
-        let frame = g.frame.rect(in: stage), source = gameSize
+        let frame = renderPlan(size: stage).layers(atTimelineMs: playheadMs).first { $0.key == .game }?.dst ?? g.frame.rect(in: stage)
+        let source = gameSize
         let crop = g.fit ? LayoutMath.fillCrop(sourceSize: source, dst: source, zoom: g.zoom, panX: g.panX, panY: g.panY)
                          : LayoutMath.fillCrop(sourceSize: source, dst: frame.size, zoom: g.zoom, panX: g.panX, panY: g.panY)
         let dx = Double(translation.width / max(1, frame.width)) * crop.width

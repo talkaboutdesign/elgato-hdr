@@ -83,6 +83,22 @@ final class EditorRecheckTests: XCTestCase {
         await fulfillment(of: [restarted], timeout: 1)
     }
 
+    func testQuitAsksForActiveExportsAndCancelKeepsThemRunning() {
+        let gate = FakeRunner.Gate()
+        let queue = ExportQueue { _ in FakeRunner(gate: gate) }
+        queue.enqueue([("active", ExportJob(canvas: .wide, resolution: .hd, range: .sdr, fps: .source))])
+        var asked = false
+        XCTAssertNil(ExportQueue.queuesForQuit { asked = true; return false })
+        XCTAssertTrue(asked); XCTAssertTrue(queue.isRunning)
+        XCTAssertTrue(ExportQueue.queuesForQuit { true }?.contains(where: { $0 === queue }) == true)
+        let drained = expectation(description: "discard drained")
+        queue.onDrained = { drained.fulfill() }; queue.cancelAll()
+        wait(for: [drained], timeout: 2)
+        asked = false
+        _ = ExportQueue.queuesForQuit { asked = true; return false }
+        XCTAssertFalse(asked)
+    }
+
     func testWatchdogExcludesEncoderWaitButEnforcesHardLimit() {
         var w = ExportWatchdog()
         XCTAssertFalse(w.expired(now: 0, idle: 0, waiting: false, stall: 20, hardLimit: 600))
@@ -147,8 +163,13 @@ final class EditorRecheckTests: XCTestCase {
     }
 
     func testEditorAndLiveTransitionsMatchBothCanvasesAtTenPoints() {
-        let a = Scene(name: "A", wide: Composition(layers: [Layer(source: .game)]), vertical: Composition(layers: [Layer(source: .camera)]))
-        let b = Scene(name: "B", wide: a.vertical, vertical: a.wide)
+        var a = Scene(name: "A", wide: Composition(layers: [Layer(source: .game)]), vertical: Composition(layers: [Layer(source: .camera)]))
+        var b = Scene(name: "B", wide: a.vertical, vertical: a.wide)
+        let overlay = Layer(source: LayerSource(type: "color", color: [1, 0.3, 0.2, 1]), frame: NRect(x: 0.1, y: 0.1, w: 0.2, h: 0.2))
+        var moved = overlay; moved.frame.x = 0.6
+        a.wide.layers.append(overlay); a.vertical.layers.append(overlay)
+        b.wide.layers.append(moved); b.vertical.layers.append(moved)
+        b.vertical.layers.append(Layer(source: LayerSource(type: "color", color: [0, 1, 0, 1])))
         let sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: CGSize(width: 1920, height: 1080)), .camera: SourceInfo(size: CGSize(width: 640, height: 480))]
         for style in [SceneTransition.Style.cut, .fade, .morph] {
             let transition = SceneTransition(style: style, durationMs: 900)

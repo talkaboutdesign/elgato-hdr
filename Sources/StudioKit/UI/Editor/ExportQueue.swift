@@ -59,6 +59,10 @@ enum ExportPreset: String, CaseIterable, Identifiable {
 final class ExportQueue {
     private static let registry = NSHashTable<ExportQueue>.weakObjects()
     static var runningQueues: [ExportQueue] { registry.allObjects.filter(\.isRunning) }
+    static func queuesForQuit(confirm: () -> Bool) -> [ExportQueue]? {
+        let queues = runningQueues
+        return queues.isEmpty || confirm() ? queues : nil
+    }
     struct Item: Identifiable, Equatable {
         enum State: Equatable { case waiting, running, done(URL), failed(String), cancelled }
         let id = UUID()

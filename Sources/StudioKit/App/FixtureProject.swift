@@ -1,4 +1,6 @@
 #if DEBUG
+import Foundation
+import Dispatch
 import AVFoundation
 import VideoToolbox
 
@@ -11,6 +13,7 @@ enum FixtureProject {
         let camera = try LayerWriter(cameraURL: dir.appendingPathComponent("camera.mov"), width: 1280, height: 720, startNs: zero)
         let mic = try LayerWriter(micURL: dir.appendingPathComponent("mic.mov"), startNs: zero)
         let source = DemoSource(width: 1920, height: 1080, fps: 60)
+        let began = DispatchTime.now().uptimeNanoseconds
         for frame in 0..<frameCount {
             var out: CVPixelBuffer?
             CVPixelBufferCreate(nil, 1920, 1080, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
@@ -40,7 +43,9 @@ enum FixtureProject {
             }
             recorder.appendAudio(stereo.withUnsafeBytes { Data($0) }, ns: ns+16_666_667)
             // Real-time writers intentionally drop on backpressure. Feed at their advertised cadence.
-            try await Task.sleep(nanoseconds: 16_666_667)
+            let deadline = began + UInt64(frame + 1) * 1_000_000_000 / 60
+            let now = DispatchTime.now().uptimeNanoseconds
+            if deadline > now { try await Task.sleep(nanoseconds: deadline - now) }
         }
         let msg = await withCheckedContinuation { c in recorder.finish { c.resume(returning: $0) } }
         let camOK = await withCheckedContinuation { c in camera.finish { c.resume(returning: $0) } }

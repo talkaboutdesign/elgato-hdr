@@ -25,7 +25,8 @@ final class ExportMeasurements: XCTestCase {
     }
     func testTenQueuesWithCancelAndRestart() async throws {
         guard let path = ProcessInfo.processInfo.environment["EHDR_MEASURE_PROJECT"], let doc = ProjectDoc.load(URL(fileURLWithPath: path)) else { throw XCTSkip("Set EHDR_MEASURE_PROJECT") }
-        for run in 0..<10 {
+        let selected = ProcessInfo.processInfo.environment["EHDR_MEASURE_QUEUE"].flatMap(Int.init)
+        for run in 0..<10 where selected == nil || selected == run {
             let drained = expectation(description: "queue \(run)")
             let start = Date()
             let queue = await MainActor.run { ExportQueue { Exporter(doc: doc, job: $0) } }

@@ -72,6 +72,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationDidFinishLaunching(_ n: Notification) {
         view = MetalView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
+        let recordings = Self.recordingsDir
+        DispatchQueue.global(qos: .utility).async {
+            for directory in (try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [] {
+                Exporter.removeStalePartials(in: directory.appendingPathComponent("Exports"))
+            }
+        }
         syncStateFromSettings()
         installActions()
         studio = StudioWindowController(state: state, metalView: view)
@@ -227,14 +233,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let queues = ExportQueue.runningQueues
-        if !queues.isEmpty {
+        guard let queues = ExportQueue.queuesForQuit(confirm: {
             let alert = NSAlert()
             alert.messageText = "Quit and discard unfinished exports?"
             alert.informativeText = "Completed exports will be kept."
             alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Quit and Discard")
-            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
-        }
+            return alert.runModal() == .alertSecondButtonReturn
+        }) else { return .terminateCancel }
         guard confirmEndingStream("Quit") else { return .terminateCancel }
         if !queues.isEmpty {
             queues.forEach { $0.cancelAll() }
