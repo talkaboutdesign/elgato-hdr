@@ -118,6 +118,10 @@ final class StreamSession {
         lane.program.stop(); lane.encoder.finish()
     }
 
+    func invalidateEncoderForTesting(_ canvas: Canvas, fatal: Bool = false) {
+        lanes.first { $0.canvas == canvas }?.encoder.invalidateForTesting(fatal: fatal)
+    }
+
     private func attach(_ publisher: RTMPPublisher, to lane: Lane) {
         if let audio { publisher.setAudioConfig(audioSpecificConfig: audio.audioSpecificConfig) }
         publisher.onNeedKeyframe = { [weak encoder = lane.encoder] in encoder?.requestKeyframe() }

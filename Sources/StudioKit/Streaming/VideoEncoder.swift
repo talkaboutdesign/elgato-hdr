@@ -29,6 +29,7 @@ final class VideoEncoder {
     private let settings: Settings
     private var failures = 0, epoch = 0
     private var lastErrorNs: UInt64 = 0
+    private var failRecoveryForTesting = false
 
     init?(settings: Settings) {
         guard settings.width > 0, settings.height > 0, settings.fps.isFinite, settings.fps > 0, settings.bitrate > 0 else { return nil }
@@ -91,7 +92,7 @@ final class VideoEncoder {
         lock.unlock()
     }
     // Test hook runs on the same serial queue as encode and recovery.
-    func invalidateForTesting() { queue.sync { if let session { VTCompressionSessionInvalidate(session) } } }
+    func invalidateForTesting(fatal: Bool = false) { queue.sync { failRecoveryForTesting = fatal; if let session { VTCompressionSessionInvalidate(session) } } }
     func drainForTesting() { queue.sync {} }
     private func failed(_ status: OSStatus) {
         lock.lock(); counters.dropped += 1; lock.unlock()
@@ -103,7 +104,7 @@ final class VideoEncoder {
         lock.lock(); admission.pending = admission.queued; lock.unlock()
         if let session { VTCompressionSessionInvalidate(session) }
         session = nil; config = []
-        if createSession() { failures = 0; requestKeyframe(); onRecovery?() }
+        if !failRecoveryForTesting && createSession() { failures = 0; requestKeyframe(); onRecovery?() }
         else {
             session = nil
             lock.lock(); accepting = false; lock.unlock()

@@ -91,19 +91,52 @@ final class StreamSessionTests: XCTestCase {
         print("StreamSession add/remove: A frames=\(aAfter) B frames=\(tb["delta"] + tb["key"]) (keys \(tb["key"])) C frames=\(tc["delta"] + tc["key"])")
     }
 
+    func testLaneRecoveryAndFatalFailureIsolation() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer()
+        defer { a.stop(); b.stop() }
+        let ta = Tally(), tb = Tally()
+        watch(a, ta); watch(b, tb)
+        let demo = DemoSource(width: 64, height: 64, fps: 30)
+        let renderer = try XCTUnwrap(Renderer(layer: CAMetalLayer(), shm: demo.memory, demoSource: demo))
+        let size = CGSize(width: 320, height: 180)
+        let session = StreamSession(outputs: [
+            .init(canvas: .wide, size: size, fps: 30, videoBitrate: 500_000, publishers: [publisher(a, size)]),
+            .init(canvas: .vertical, size: size, fps: 30, videoBitrate: 500_000, publishers: [publisher(b, size)])
+        ], audioBitrate: 128_000, renderer: renderer, mixer: AudioMixer())
+        var recovered: [Canvas] = [], failed: [Canvas] = []
+        session.onRecovery = { recovered.append($0) }
+        session.onLaneError = { canvas, reason in failed.append(canvas); XCTAssertTrue(reason.contains("recovery failed")) }
+        XCTAssertTrue(session.start()); defer { session.stop() }
+        XCTAssertTrue(spin(until: 5) { ta["key"] > 0 && tb["key"] > 0 })
+        let keys = ta["key"]
+        session.invalidateEncoderForTesting(.wide)
+        XCTAssertTrue(spin(until: 5) { recovered == [.wide] && ta["key"] > keys })
+        session.invalidateEncoderForTesting(.wide, fatal: true)
+        XCTAssertTrue(spin(until: 5) { failed == [.wide] })
+        XCTAssertEqual(session.activeCanvases, [.vertical])
+        XCTAssertEqual(renderer.programOutputs.count, 1)
+        let before = tb["delta"]
+        XCTAssertTrue(spin(until: 3) { tb["delta"] > before + 20 })
+    }
+
     func testRendererSwapKeepsProgramAndNoSignalAlive() throws {
         let demo = DemoSource(width: 64, height: 64, fps: 60)
         let first = try XCTUnwrap(Renderer(layer: CAMetalLayer(), shm: demo.memory, demoSource: demo))
         let second = try XCTUnwrap(Renderer(layer: CAMetalLayer(), shm: demo.memory, demoSource: demo))
         let stream = StreamSession(outputs: [.init(canvas: .wide, size: CGSize(width: 64, height: 64), fps: 60,
-            videoBitrate: 100_000, publishers: [])], audioBitrate: 160_000, renderer: first, mixer: AudioMixer())
+            videoBitrate: 100_000, publishers: []),
+            .init(canvas: .vertical, size: CGSize(width: 64, height: 64), fps: 60,
+                  videoBitrate: 100_000, publishers: [])], audioBitrate: 160_000, renderer: first, mixer: AudioMixer())
         XCTAssertTrue(stream.start())
-        let program = try XCTUnwrap(first.programOutputs.first)
+        let programs = first.programOutputs
+        XCTAssertEqual(programs.count, 2)
+        let program = try XCTUnwrap(programs.first)
         let gate = DispatchSemaphore(value: 0)
         program.onFrame = { _, _ in gate.signal() }
         stream.replaceRenderer(second)
         XCTAssertTrue(first.programOutputs.isEmpty)
         XCTAssertTrue(second.programOutputs.first === program)
+        XCTAssertTrue(second.programOutputs.last === programs.last)
         XCTAssertEqual(gate.wait(timeout: .now() + 2), .success)
         stream.stop()
         XCTAssertTrue(second.programOutputs.isEmpty)

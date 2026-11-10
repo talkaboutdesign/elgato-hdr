@@ -56,6 +56,30 @@ final class StreamControllerTests: XCTestCase {
         return done()
     }
 
+    func testLaneEventsAndCountersReachState() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer()
+        defer { a.stop(); b.stop() }
+        let wide = local("Wide", a), tall = local("Tall", b, .vertical)
+        let c = try controller([wide, tall]); c.goLive(); defer { c.endStream() }
+        XCTAssertTrue(spin(5) { c.state.health(wide.id).status == .live && c.state.health(tall.id).status == .live })
+        let session = try XCTUnwrap(sessions.first)
+        var stats = StreamSession.Stats(canvas: .wide, fps: 60, renderMs: 1, encodeMs: 1, latencyMs: 1,
+                                       renderDropped: 4, encoderDropped: 2, publishers: [])
+        stats.renderSkips.contention = 3; stats.renderSkips.stale = 1; stats.renderSkips.rateSkipped = 60
+        session.onStats?(stats)
+        XCTAssertEqual(c.state.canvases.first?.contention, 3)
+        XCTAssertEqual(c.state.canvases.first?.stale, 1)
+        XCTAssertEqual(c.state.canvases.first?.rateSkipped, 60)
+        XCTAssertEqual(c.state.canvases.first?.encoderDropped, 2)
+        session.onRecovery?(.wide)
+        XCTAssertEqual(c.state.encoderRecoveryEvents, 1)
+        session.publishers(.wide).forEach { session.removePublisher($0) }
+        session.onLaneError?(.wide, "H.264 recovery failed")
+        XCTAssertEqual(c.state.health(wide.id).status, .failed("H.264 recovery failed"))
+        XCTAssertEqual(c.state.health(tall.id).status, .live)
+        XCTAssertTrue(c.isActive)
+    }
+
     /// Acceptance 4: a rejected key shows "Stream key rejected" and is not retried; the other destination stays live.
     func testRejectedKeyFailsWithoutRetryAndOthersStayLive() throws {
         let good = try FakeRTMPServer(), bad = try FakeRTMPServer(); bad.reject = true
