@@ -42,7 +42,8 @@ struct EditorView: View {
             ToolbarItem(placement: .navigation) {
                 Button(action: back) { Label("Library", systemImage: "chevron.left") }
                     .labelStyle(.titleAndIcon)
-                    .help("Back to the recordings library")
+                    .disabled(model.editsLocked)   // leaving closes the editor, which would cancel the queue
+                    .help(model.editsLocked ? "Available when the export queue finishes" : "Back to the recordings library")
                     .accessibilityLabel("Back to Library")
             }
         }

@@ -449,7 +449,3 @@ func formatTime(_ s: Double) -> String {
     let t = Int(s)
     return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%d:%02d", t / 60, t % 60)
 }
-func formatTimePrecise(_ s: Double) -> String {
-    guard s.isFinite, s >= 0 else { return "0:00.0" }
-    return String(format: "%d:%04.1f", Int(s) / 60, s.truncatingRemainder(dividingBy: 60))
-}

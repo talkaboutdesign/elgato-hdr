@@ -71,7 +71,7 @@ struct FocusTargetOverlay: View {
                     Color.clear.contentShape(Rectangle())
                         .gesture(DragGesture(minimumDistance: 0)
                             .onChanged { v in drag(to: v.location, k: k, plain: g.plain) }
-                            .onEnded { _ in dragging = false; model.focusEditing = false; model.endGesture() })
+                            .onEnded { _ in dragging = false; model.endGesture() })
                     FocusTarget(scale: z.scale, active: dragging)
                         .position(pos)
                         .allowsHitTesting(false)
@@ -99,7 +99,7 @@ struct FocusTargetOverlay: View {
     }
 
     private func drag(to p: CGPoint, k: Double, plain: ResolvedLayer) {
-        if !dragging { dragging = true; model.focusEditing = true; model.beginGesture(); model.parkOnZoom(id) }
+        if !dragging { dragging = true; model.beginGesture(); model.parkOnZoom(id) }
         let c = CGPoint(x: p.x / k, y: p.y / k), d = plain.dst, s = plain.src
         let fx = s.minX + (c.x - d.minX) / d.width * s.width, fy = s.minY + (c.y - d.minY) / d.height * s.height
         let x = min(s.maxX, max(s.minX, fx)), y = min(s.maxY, max(s.minY, fy))

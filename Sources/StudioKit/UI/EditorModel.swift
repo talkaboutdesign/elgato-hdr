@@ -30,14 +30,9 @@ final class EditorModel {
     var hideRemoved = false { didSet { if hideRemoved != oldValue { updateCollapsed() } } }
     var hover: TimelineHit?
     var snapGuide: Double?          // seconds; shown while a drag sits on a snap point
-    var focusEditing = false        // the zoom focus target is being dragged
     var toast: EditorToast?
     var timelineReady = false
     var previewRevision = 0         // bumped when the preview's composition changes
-    // export
-    var exportCanvases: Set<Canvas> = [.wide, .vertical]
-    var resolution: ExportResolution = .hd
-    var fps: ExportFPS = .source
 
     @ObservationIgnored let player = AVPlayer()
     /// Owned by the model rather than the window, so the history goes away with the project and the same editor can
