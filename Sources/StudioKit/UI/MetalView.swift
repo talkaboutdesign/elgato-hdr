@@ -121,7 +121,10 @@ final class MetalView: NSView {
         for l in [hover, selection, handles, guides, cropExtent] as [CALayer] { l.frame = bounds }
         guard editingEnabled, let m = scenes else { [hover, selection, handles, guides, cropExtent, readout].forEach { $0.isHidden = true }; return }
         func outline(_ l: Layer) -> CGPath {
-            let r = viewRect(rect(l)), rad = min(0.5, max(0, l.roundness)) * min(r.width, r.height)
+            let r = viewRect(LayerPicking.bounds(l, canvas: ref))
+            let inner = viewRect(rect(l))
+            let pad = (r.width - inner.width) / 2
+            let rad = min(0.5, max(0, l.roundness)) * min(inner.width, inner.height) + pad
             return CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil)
         }
         if let h = layer(hoverID), h.visible, h.id != m.selectedLayerID, drag == nil { hover.path = outline(h); hover.isHidden = false } else { hover.isHidden = true }
@@ -234,8 +237,11 @@ final class MetalView: NSView {
         case .move(let id, let start, let grab):
             var r = start; r.origin = CGPoint(x: p.x - grab.x, y: p.y - grab.y)
             var g: [SnapGuide] = []
+            var pad: CGFloat = 0
+            if let moving = layer(id), moving.source.type == "camera" { pad = CGFloat(moving.frameWidth) * min(ref.width, ref.height) }
+            r = r.insetBy(dx: -pad, dy: -pad)
             if let s = snapper(excluding: id) { (r, g) = s.snapMove(r) }
-            r = clamp(r, canvas)
+            r = clamp(r, canvas).insetBy(dx: pad, dy: pad)
             guideList = g
             m.actions.editLayer(id) { $0.frame = NRect(r, in: self.ref) }
         case .resize(let id, let start, let handle):

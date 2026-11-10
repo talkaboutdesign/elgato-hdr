@@ -125,12 +125,14 @@ struct LayerInfo: Codable, Equatable {
 struct SessionEvent: Codable, Equatable {
     var tMs: Double; var type: String       // "scene" | "zoomIn" | "zoomOut" | "marker"
     var sceneID: UUID?; var zoom: Double?; var focusX: Double?; var focusY: Double?
+    var transitionStyle: SceneTransition.Style? = nil
+    var transitionDurationMs: Double? = nil
 }
 extension SessionEvent {
-    enum CodingKeys: String, CodingKey { case tMs, type, sceneID, zoom, focusX, focusY }
+    enum CodingKeys: String, CodingKey { case tMs, type, sceneID, zoom, focusX, focusY, transitionStyle, transitionDurationMs }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
-        self.init(tMs: c.v(.tMs, 0), type: c.v(.type, ""), sceneID: c.v(.sceneID, nil), zoom: c.v(.zoom, nil), focusX: c.v(.focusX, nil), focusY: c.v(.focusY, nil))
+        self.init(tMs: c.v(.tMs, 0), type: c.v(.type, ""), sceneID: c.v(.sceneID, nil), zoom: c.v(.zoom, nil), focusX: c.v(.focusX, nil), focusY: c.v(.focusY, nil), transitionStyle: c.v(.transitionStyle, nil), transitionDurationMs: c.v(.transitionDurationMs, nil))
     }
 }
 
@@ -150,6 +152,7 @@ struct Project: Codable, Equatable {
     var wide = CanvasLayout.wideDefault
     var vertical = CanvasLayout.verticalDefault
     var scenes: [Scene] = []                  // the scene collection when recording started
+    var sceneTransition = SceneTransition() // recording-time default for events with absent transition fields
     var events: [SessionEvent] = []           // live switches, zooms and markers, in source milliseconds
     var eventsImported = false                // events turned into the timeline once (importEvents)
     var timeline = Timeline()
@@ -158,7 +161,7 @@ struct Project: Codable, Equatable {
     init(name: String, createdAt: Date) { self.name = name; self.createdAt = createdAt; scenes = [defaultScene] }
     enum CodingKeys: String, CodingKey {
         case version, name, createdAt, state, durationMs, width, height, fps, colorMode, game, camera, mic, cameraMirror
-        case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline, eventsImported
+        case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline, eventsImported, sceneTransition
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -170,6 +173,7 @@ struct Project: Codable, Equatable {
         game = c.v(.game, z.game); camera = c.v(.camera, nil); mic = c.v(.mic, nil); cameraMirror = c.v(.cameraMirror, false)
         trimStartMs = c.v(.trimStartMs, 0); trimEndMs = c.v(.trimEndMs, 0)
         wide = c.v(.wide, z.wide); vertical = c.v(.vertical, z.vertical); lastExport = c.v(.lastExport, [:])
+        sceneTransition = c.v(.sceneTransition, SceneTransition())
         scenes = c.v(.scenes, []); events = c.v(.events, []); timeline = c.v(.timeline, Timeline())
         eventsImported = c.v(.eventsImported, false)
         if scenes.isEmpty { scenes = [defaultScene] }
@@ -248,6 +252,7 @@ struct Project: Codable, Equatable {
         try c.encode(wide, forKey: .wide)
         try c.encode(vertical, forKey: .vertical)
         try c.encode(lastExport, forKey: .lastExport)
+        try c.encode(sceneTransition, forKey: .sceneTransition)
         try c.encode(scenes, forKey: .scenes)
         try c.encode(events, forKey: .events)
         try c.encode(eventsImported, forKey: .eventsImported)

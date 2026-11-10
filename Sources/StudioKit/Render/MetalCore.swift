@@ -77,6 +77,7 @@ struct LayerU {
     float4 shape;       // corner radius px, border px, shadow px, opacity
     float4 color;       // color layers: SDR BT.709 code values and alpha
     int4 fmt;           // kind (0 biplanar YCbCr, 1 premultiplied RGBA, 2 color), source transfer, output transfer, bits
+    float4 ringColor, ringShape;
     int4 flags;         // source uses BT.709 matrix, mirror, hard edge, -
 };
 
@@ -112,6 +113,12 @@ fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]],
         }
         if (border > 0.0) cc = mix(convert(float3(1.0), 2, out), cc, clamp(-(d + border) + 0.5, 0.0, 1.0));
     }
+    // Camera and frame partition one coverage mask, avoiding source-over attenuation at their shared edge.
+    float ring = max(0.0, clamp(0.5 - d + u.ringShape.x, 0.0, 1.0) - clamp(0.5 - d, 0.0, 1.0));
+    float ra = ring * opacity * u.ringColor.a;
+    float combined = a + ra;
+    cc = combined > 0.0 ? (cc * a + convert(u.ringColor.rgb, 2, out) * ra) / combined : float3(0.0);
+    a = combined;
     float A = a + s - a * s;
     return A > 0.0 ? float4(cc * (a / A), A) : float4(0.0);
 }
@@ -130,6 +137,26 @@ fragment float2 chromaFrag(V in [[stage_in]], texture2d<float> rgb [[texture(0)]
     float Cb = (c.b - Y) / 1.8814, Cr = (c.r - Y) / 1.4746;
     return float2(512.0 + 896.0 * Cb, 512.0 + 896.0 * Cr) * 64.0 / 65535.0;
 }
+// The same BT.709 video-range luma/chroma math as the planar render passes, fused into one
+// dispatch. Each thread owns a 2x2 luma block and its centre-sited chroma sample.
+kernel void streamNV12(texture2d<float, access::read> rgb [[texture(0)]],
+                       texture2d<float, access::write> yPlane [[texture(1)]],
+                       texture2d<float, access::write> cPlane [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
+    if (p.x >= cPlane.get_width() || p.y >= cPlane.get_height()) return;
+    float3 sum = float3(0.0);
+    for (uint dy = 0; dy < 2; ++dy) for (uint dx = 0; dx < 2; ++dx) {
+        uint2 q = p * 2 + uint2(dx, dy);
+        float3 c = rgb.read(q).rgb;
+        float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+        yPlane.write(float4((16.0 + 219.0 * y) / 255.0), q);
+        sum += c;
+    }
+    float3 c = sum * 0.25;
+    float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+    float2 uv = (128.0 + 224.0 * float2((c.b - y) / 1.8556, (c.r - y) / 1.5748)) / 255.0;
+    cPlane.write(float4(uv, 0, 1), p);
+}
+
 """
 
 /// Uniforms for `layerFrag`; layout matches the Metal `LayerU` struct.
@@ -139,6 +166,7 @@ struct LayerParams {
     var shape = SIMD4<Float>(0, 0, 0, 1)
     var color = SIMD4<Float>(0, 0, 0, 1)
     var fmt = SIMD4<Int32>(2, 2, 2, 8)
+    var ringColor = SIMD4<Float>(0, 0, 0, 0), ringShape = SIMD4<Float>(0, 0, 0, 0)
     var flags = SIMD4<Int32>(0, 0, 0, 0)
 }
 
@@ -261,22 +289,29 @@ final class MetalCore {
         return (tex, ref)
     }
 
-    /// Draws the background, then each layer bottom first, into `target` in one render pass, in the output encoding
-    /// `outTransfer`. `viewport` places the canvas inside the target (the live view letterboxes it). Every layer is a
-    /// full-viewport quad scissored to its frame plus shadow, so small layers on large canvases stay cheap.
-    func encodeLayers(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil,
-                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, layers: [DrawLayer]) {
+    typealias LayerPipelines = (blended: MTLRenderPipelineState, opaque: MTLRenderPipelineState)
+    // Program targets and pipeline formats do not change while live; prepare this state off the reader.
+    func layerRenderPass(target: MTLTexture) -> MTLRenderPassDescriptor {
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = target
         rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         // Alpha 1: blending keeps it there, and the HDR export's intermediate must stay opaque.
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        return rp
+    }
+
+    /// Draws the background, then each layer bottom first, into `target` in one render pass, in the output encoding
+    /// `outTransfer`. `viewport` places the canvas inside the target (the live view letterboxes it). Every layer is a
+    /// full-viewport quad scissored to its frame plus shadow, so small layers on large canvases stay cheap.
+    func encodeLayers(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil,
+                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, layers: [DrawLayer], renderPass: MTLRenderPassDescriptor? = nil, layerPipelines: LayerPipelines? = nil) {
+        let rp = renderPass ?? layerRenderPass(target: target)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
         defer { enc.endEncoding() }
         guard canvas.width > 0, canvas.height > 0 else { return }
         let vp = viewport ?? MTLViewport(originX: 0, originY: 0, width: Double(target.width), height: Double(target.height), znear: 0, zfar: 1)
         enc.setViewport(vp)
-        let blended = pipeline("layerFrag", target.pixelFormat, blend: true)
+        let blended = layerPipelines?.blended ?? pipeline("layerFrag", target.pixelFormat, blend: true)
         enc.setRenderPipelineState(blended)
         let sx = vp.width / canvas.width, sy = vp.height / canvas.height
         func draw(_ u: LayerParams, area: CGRect, _ t0: MTLTexture, _ t1: MTLTexture) {
@@ -304,7 +339,7 @@ final class MetalCore {
             bg.dst = SIMD4(full); bg.color = background; bg.fmt.x = 2
             draw(bg, area: full, blank8, blank8c)
         }
-        let opaque = cover.map { _ in pipeline("layerFrag", target.pixelFormat) }
+        let opaque = cover.map { _ in layerPipelines?.opaque ?? pipeline("layerFrag", target.pixelFormat) }
         for (i, l) in layers.enumerated() where i >= cover ?? 0 {
             if let o = opaque { enc.setRenderPipelineState(i == cover ? o : blended) }
             let r = l.resolved
@@ -319,8 +354,10 @@ final class MetalCore {
             case .none: u.fmt.x = 2; u.color = r.color ?? SIMD4(0, 0, 0, 0)
             }
             // Half a pixel of edge coverage, plus the shadow: it reaches `shadow` past the frame and 0.35·shadow lower.
-            let grow = r.shadow * 1.35 + 1
+            u.ringColor = r.frameColor; u.ringShape.x = Float(r.frameWidth)
+            let grow = max(r.shadow * 1.35, r.frameWidth) + 1
             draw(u, area: r.dst.insetBy(dx: -grow, dy: -grow), t0, t1)
+
         }
     }
 

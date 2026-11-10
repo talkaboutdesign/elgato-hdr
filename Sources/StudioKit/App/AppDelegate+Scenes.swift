@@ -50,8 +50,10 @@ extension AppDelegate {
         view.contextMenu = { [weak self] id in self?.pictureMenu(layer: id) }
         installSceneKeys()
         startThumbnails()
+        #if DEBUG
         scheduleSceneTorture()
         scheduleSceneScript()
+        #endif
         startOverlayClock()
         #if DEBUG
         startSceneDebug()
@@ -147,7 +149,7 @@ extension AppDelegate {
         m.selectedLayerID = kind.flatMap { k in k == "game" || k == "camera" ? scene.composition(m.canvas).layers.first { $0.source.type == k }?.id : nil }
         m.cropLayerID = nil
         m.transition = TransitionMark(id: id, start: Date(), duration: tr.style == .cut ? 0 : tr.durationMs / 1000)
-        logSessionEvent { $0.event("scene", atNs: t, sceneID: id) }
+        logSessionEvent { $0.event("scene", atNs: t, sceneID: id, transition: tr) }
         log("scenes: switched to \(scene.name) (\(tr.style.rawValue), \(String(format: "%.0f", tr.durationMs)) ms)")
         sceneDidChange()
     }
@@ -241,15 +243,19 @@ extension AppDelegate {
 
     /// Edits the active scene on the shown canvas; the picture changes at once, without a transition.
     func editComposition(undo: String? = nil, _ edit: (inout Composition) -> Void) {
+        _ = editComposition(sceneID: scenes.collection.activeID, canvas: scenes.canvas, undo: undo, edit)
+    }
+
+    @discardableResult func editComposition(sceneID: UUID, canvas: Canvas, undo: String? = nil, _ edit: (inout Composition) -> Void) -> Bool {
         let m = scenes
-        guard let i = m.collection.activeIndex else { return }
         let before = m.collection
-        var s = m.collection.scenes[i]
-        if m.canvas == .wide { edit(&s.wide) } else { edit(&s.vertical) }
-        guard s != m.collection.scenes[i] else { return }
-        m.collection.scenes[i] = s
+        guard m.collection.edit(sceneID: sceneID, canvas: canvas, edit) else {
+            toast(undo == "Replace Image" ? "Image not replaced" : "Image not added", detail: "The destination scene was deleted.", style: .warning); return false
+        }
+        guard m.collection != before else { return false }
         if let name = undo, sceneRuntime.gestureStart == nil { registerSceneUndo(name, before: before) }
         sceneDidChange()
+        return true
     }
 
     func editLayer(_ id: UUID, _ f: (inout Layer) -> Void) {
@@ -583,6 +589,7 @@ extension AppDelegate {
     /// editor reads, taken from that scene.
     func beginSceneLog(_ proj: inout Project, startNs: UInt64) {
         let m = scenes, el = SessionEventLog(startNs: startNs)
+        proj.sceneTransition = m.collection.transition
         proj.scenes = m.collection.scenes
         proj.events = [el.event("scene", atNs: startNs, sceneID: m.collection.activeID)]
         if m.punchedIn { proj.events.append(el.event("zoomIn", atNs: startNs, zoom: m.punchAmount, focus: gameCropCentre())) }
@@ -626,6 +633,7 @@ extension AppDelegate {
         sceneRuntime.eventLog = nil
     }
 
+    #if DEBUG
     // MARK: Torture test
 
     /// `--scene-torture`: 20 switches in 10 seconds, cycling through the scenes, once the picture is live. Compare the
@@ -662,6 +670,8 @@ extension AppDelegate {
                 switch action {
                 case "next": self.nextScene()
                 case "prev": self.previousScene()
+                case "record-start": self.startRecording()
+                case "record-stop": self.stopRecording()
                 case "punch": self.togglePunchIn()
                 case "marker": self.addMarker()
                 case "canvas=wide": self.setCanvas(.wide)
@@ -676,6 +686,7 @@ extension AppDelegate {
         }
     }
 
+    #endif
     // MARK: Thumbnails
 
     /// Twice a second, off the reader thread: each scene rendered small through the same compositor.

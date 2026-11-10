@@ -32,6 +32,8 @@ final class FakeRTMPServer {
     init(port: UInt16 = 0) throws {
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
         let p = NWParameters(tls: nil, tcp: tcp)
+        // CI rapidly recycles loopback ports while previous connections are in TIME_WAIT.
+        p.allowLocalEndpointReuse = true
         p.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port == 0 ? .any : NWEndpoint.Port(rawValue: port)!)
         listener = try NWListener(using: p)
         let ready = DispatchSemaphore(value: 0)

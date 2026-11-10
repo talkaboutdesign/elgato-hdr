@@ -10,6 +10,7 @@ protocol StreamSessionDriving: AnyObject {
     var onLaneError: ((Canvas, String) -> Void)? { get set }
     var onRecovery: ((Canvas) -> Void)? { get set }
     func replaceRenderer(_ renderer: Renderer)
+    func refreshLoad()
     var activeCanvases: [Canvas] { get }
     func start() -> Bool
     func stop()
@@ -17,6 +18,7 @@ protocol StreamSessionDriving: AnyObject {
     func addPublisher(_ publisher: RTMPPublisher, to output: StreamSession.Output) throws
     func removePublisher(_ publisher: RTMPPublisher)
 }
+extension StreamSessionDriving { func refreshLoad() {} }
 extension StreamSession: StreamSessionDriving {}
 
 final class StreamController {
@@ -66,6 +68,7 @@ final class StreamController {
     }
 
     var isActive: Bool { session != nil || pendingStart != nil }
+    func refreshLoad() { session?.refreshLoad() }
 
     func replaceRenderer(_ renderer: Renderer) {
         guard let session else { return }
@@ -399,6 +402,7 @@ final class StreamController {
     private func finish(reason: String?) {
         generation += 1
         pendingStart = nil; pendingSingle = [:]
+        state.reducedRates = [:]
         let s = session; session = nil
         for r in runtimes.values { r.publisher.onState = nil }
         runtimes = [:]
@@ -410,16 +414,20 @@ final class StreamController {
 
     private func apply(_ stats: StreamSession.Stats) {
         guard let session else { return }
-        let c = CanvasHealth(canvas: stats.canvas, fps: stats.fps, renderMs: stats.renderMs, encodeMs: stats.encodeMs,
+        let c = CanvasHealth(queueRejected: stats.queueRejected, inFlightRejected: stats.inFlightRejected,
+                             latencyP50: stats.latency.percentile(0.5), latencyP95: stats.latency.percentile(0.95),
+                             latencyP99: stats.latency.percentile(0.99), latencyMax: stats.latency.maxMs, canvas: stats.canvas, fps: stats.fps, renderMs: stats.renderMs, encodeMs: stats.encodeMs,
                              dropped: stats.renderDropped + stats.encoderDropped,
                              rateSkipped: stats.renderSkips.rateSkipped, contention: stats.renderSkips.contention,
                              capacity: stats.renderSkips.capacity, stale: stats.renderSkips.stale, gpu: stats.renderSkips.gpu,
                              inactive: stats.renderSkips.inactive, encoderDropped: stats.encoderDropped)
+        state.reducedRates = state.reducedRates.filter { session.activeCanvases.contains($0.key) }
         var canvases = state.canvases.filter { $0.canvas != stats.canvas && session.activeCanvases.contains($0.canvas) }
         canvases.append(c); canvases.sort { $0.canvas == .wide && $1.canvas == .vertical }
         if state.canvases != canvases { state.canvases = canvases }
         log(String(format: "stream %@: %.1f fps render %.3f ms encode %.3f ms dropped render=%d encoder=%d", stats.canvas.rawValue,
                    stats.fps, stats.renderMs, stats.encodeMs, stats.renderDropped, stats.encoderDropped))
+        log("stream \(stats.canvas.rawValue): queueRejected=\(stats.queueRejected) inFlightRejected=\(stats.inFlightRejected) latency p50=\(c.latencyP50) p95=\(c.latencyP95) p99=\(c.latencyP99) max=\(c.latencyMax) ms")
         for (oid, p) in zip(stats.publisherIDs, stats.publishers) {
             guard let (id, r) = runtimes.first(where: { ObjectIdentifier($0.value.publisher) == oid }) else { continue }
             var h = state.health(id)

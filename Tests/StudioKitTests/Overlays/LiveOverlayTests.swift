@@ -25,12 +25,13 @@ final class LiveOverlayTests: XCTestCase {
         let t0: UInt64 = 10_000_000_000
         let s = LiveSceneState(scene: a).switching(to: b, atNs: t0, transition: morph, sources: [:])
         let mid = s.overlayLayers(canvas: .wide, atNs: t0 + 200_000_000)
-        XCTAssertEqual(Set(mid.map(\.id)), [shared, img, other])
+        XCTAssertEqual(Set(mid.map(\.id)).count, 4)
+        XCTAssertEqual(Set(mid.compactMap { $0.source.text?.string }), ["A", "B", "only B"])
         XCTAssertEqual(mid.first { $0.id == shared }?.source.text?.string, "B", "a layer in both scenes is drawn as the target has it")
         XCTAssertEqual(Set(s.overlayLayers(canvas: .wide, atNs: t0 + 600_000_000).map(\.id)), [shared, other])
         // Interrupted: the frozen picture still holds A's and B's overlays until the new transition ends.
         let s2 = s.switching(to: c, atNs: t0 + 200_000_000, transition: morph, sources: [:])
-        XCTAssertEqual(Set(s2.overlayLayers(canvas: .vertical, atNs: t0 + 300_000_000).map(\.id)), [shared, img, other])
+        XCTAssertEqual(Set(s2.overlayLayers(canvas: .vertical, atNs: t0 + 300_000_000).map(\.id)), Set(mid.map(\.id)))
         XCTAssertEqual(s2.overlayLayers(canvas: .vertical, atNs: t0 + 900_000_000), [])
     }
 
@@ -99,7 +100,7 @@ final class LiveOverlayTests: XCTestCase {
         let fill = Layer(source: LayerSource(type: "color", color: [1, 0, 0, 1]))
         renderer.scene = LiveSceneState(scene: scene("I", [fill, image(name, frame: NRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5))]))
         renderer.overlayContext = LiveOverlayContext(timerStartNs: nil, assets: [dir])
-        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60)
+        let output = ProgramOutput(canvas: .wide, size: CGSize(width: 64, height: 36), fps: 60, nv12: false)
         output.picture = { [weak renderer] s, src, ns in renderer?.livePicture(canvas: .wide, size: s, sources: src, atNs: ns) ?? LivePicture() }
         let gate = DispatchSemaphore(value: 0), lock = NSLock()
         var centre: [[UInt8]] = []

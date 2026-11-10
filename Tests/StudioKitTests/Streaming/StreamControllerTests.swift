@@ -40,7 +40,11 @@ final class StreamControllerTests: XCTestCase {
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("ehdr-controller-\(UUID().uuidString)")
         toasts = []; sessions = []
     }
-    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
+    override func tearDownWithError() throws {
+        // The fixture retains sessions for assertions; stop their publishers before the next test's listeners.
+        sessions.forEach { $0.stop() }; sessions = []
+        try? FileManager.default.removeItem(at: dir)
+    }
 
     private func controller(_ destinations: [Destination]) throws -> StreamController {
         let store = DestinationStore(url: dir.appendingPathComponent("streaming.json"))
