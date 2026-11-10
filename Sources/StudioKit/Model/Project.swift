@@ -120,6 +120,20 @@ struct LayerInfo: Codable, Equatable {
     }
 }
 
+/// Something the user did live while recording, so the editor can replay it. `tMs` is source time (host time minus
+/// the recording's start).
+struct SessionEvent: Codable, Equatable {
+    var tMs: Double; var type: String       // "scene" | "zoomIn" | "zoomOut" | "marker"
+    var sceneID: UUID?; var zoom: Double?; var focusX: Double?; var focusY: Double?
+}
+extension SessionEvent {
+    enum CodingKeys: String, CodingKey { case tMs, type, sceneID, zoom, focusX, focusY }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        self.init(tMs: c.v(.tMs, 0), type: c.v(.type, ""), sceneID: c.v(.sceneID, nil), zoom: c.v(.zoom, nil), focusX: c.v(.focusX, nil), focusY: c.v(.focusY, nil))
+    }
+}
+
 struct Project: Codable, Equatable {
     var version = 1
     var name: String
@@ -136,11 +150,13 @@ struct Project: Codable, Equatable {
     var wide = CanvasLayout.wideDefault
     var vertical = CanvasLayout.verticalDefault
     var lastExport: [String: String] = [:]    // canvas raw value -> file name
+    var scenes: [Scene] = []                  // the scene collection when recording started
+    var events: [SessionEvent] = []           // live switches, zooms and markers, in source milliseconds
 
     init(name: String, createdAt: Date) { self.name = name; self.createdAt = createdAt }
     enum CodingKeys: String, CodingKey {
         case version, name, createdAt, state, durationMs, width, height, fps, colorMode, game, camera, mic, cameraMirror
-        case trimStartMs, trimEndMs, wide, vertical, lastExport
+        case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -152,6 +168,7 @@ struct Project: Codable, Equatable {
         game = c.v(.game, z.game); camera = c.v(.camera, nil); mic = c.v(.mic, nil); cameraMirror = c.v(.cameraMirror, false)
         trimStartMs = c.v(.trimStartMs, 0); trimEndMs = c.v(.trimEndMs, 0)
         wide = c.v(.wide, z.wide); vertical = c.v(.vertical, z.vertical); lastExport = c.v(.lastExport, [:])
+        scenes = c.v(.scenes, []); events = c.v(.events, [])
     }
 
     var color: ColorMode { ColorMode(rawValue: colorMode) ?? .pq }
