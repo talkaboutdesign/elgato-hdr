@@ -22,6 +22,7 @@ final class ExportTests: XCTestCase {
             for range in [ExportRange.hdr,.sdr] {
                 let start = Date()
                 let url = try await Exporter(doc:doc,job:ExportJob(canvas:canvas,resolution:.hd,range:range,fps:.source)).run { _ in }
+                XCTAssertLessThan(Date().timeIntervalSince(start), max(8, doc.project.durationMs / 1000 * 4), "Export throughput regressed")
                 print(String(format: "Fixture export %@ %@: %.3fs",canvas.rawValue,range.rawValue,Date().timeIntervalSince(start)))
                 if range == .hdr, FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/ffprobe") {
                     let process = Process(), pipe = Pipe()
