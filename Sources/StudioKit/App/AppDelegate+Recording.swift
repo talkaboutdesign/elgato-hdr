@@ -94,6 +94,7 @@ extension AppDelegate {
                 catch { log("mic layer failed: \(error)") }
             }
             if proj.camera == nil { proj.wide.kind = .screenOnly; proj.vertical.kind = .screenOnly }
+            proj.ensureRecordingScene()
             camera.attach(camera: camWriter, mic: micWriter)
             let doc = ProjectDoc(dir: dir, project: proj); doc.save()
             recDoc = doc; AppDelegate.activeRecordingDir = dir

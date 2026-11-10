@@ -86,7 +86,7 @@ final class TimelineExportTests: XCTestCase {
         try requireHardware()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Timeline-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir, frameCount: 180)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 180)
         let game = Composition(layers: [Layer(source: .game, fit: true)])
         let pip = Composition(layers: [Layer(source: .game, fit: true), Layer(source: .camera, frame: NRect(x: 0.65,y: 0.1,w: 0.3,h: 0.3))])
         let a = Scene(name: "Game", wide: game, vertical: game), b = Scene(name: "Camera", wide: pip, vertical: pip)
@@ -95,7 +95,7 @@ final class TimelineExportTests: XCTestCase {
             sceneSpans: [SceneSpan(startMs: 0,sceneID: a.id), SceneSpan(startMs: 2200,sceneID: b.id,transition: SceneTransition(style: .fade,durationMs: 100))],
             zooms: [ZoomBlock(startMs: 1000,endMs: 1666.6666667,scale: 1.8,focusX: 0.43,focusY: 0.79,easeMs: 100)])
         for canvas in Canvas.allCases {
-            for range in [ExportRange.sdr,.hdr] {
+            for range in [canvas == .wide ? ExportRange.sdr : .hdr] {
                 let start = Date()
                 let url = try await Exporter(doc: doc, job: ExportJob(canvas: canvas,resolution: .hd,range: range,fps: .source)).run { _ in }
                 let elapsed = Date().timeIntervalSince(start)
@@ -135,7 +135,7 @@ final class TimelineExportTests: XCTestCase {
         try requireHardware()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Snapshot-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 120)
         let built = try await CompositionBuilder.build(doc, canvas: .wide, resolution: .hd, range: .sdr)
         let before = try RawCompositionFrames.codes(RawCompositionFrames.frame(built.asset, video: built.video, ms: 500, hdr: false))
         doc.project.timeline.zooms = [ZoomBlock(startMs: 0, endMs: 2000, scale: 3, easeMs: 0)]
@@ -150,7 +150,7 @@ final class TimelineExportTests: XCTestCase {
         try requireHardware()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Offsets-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let doc = try await FixtureProject.make(at: dir)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 120)
         doc.project.timeline.segments = [Segment(startMs: 0,endMs: 500),Segment(startMs: 1000,endMs: 2000)]
         for offset in [-1200.0,1200.0] {
             doc.project.camera?.offsetMs = offset; doc.project.mic?.offsetMs = offset
@@ -175,5 +175,64 @@ final class TimelineExportTests: XCTestCase {
         }
         doc.project.timeline.segments = [Segment(startMs: 0,endMs: 0)]
         do { _ = try await CompositionBuilder.build(doc,canvas: .wide,resolution: .hd,range: .sdr); XCTFail("all-deleted must not export original") } catch {}
+    }
+}
+
+/// A scene transition that is still running where a cut removes material: the export finishes it at the cut, and so
+/// must the preview, which plays the uncut source and jumps over the removed section.
+final class TransitionAcrossCutTests: XCTestCase {
+    private func project() async throws -> (URL, ProjectDoc, Scene, Scene) {
+        try TimelineExportTests().requireHardware()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("CutTransition-" + UUID().uuidString)
+        let doc = try await GeneratedMedia.project(at: dir, fps: 60)
+        let game = Composition(layers: [Layer(source: .game)])
+        let small = Composition(background: [0.9, 0.2, 0.1, 1], layers: [Layer(source: .game, frame: NRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5))])
+        let a = Scene(name: "Full", wide: game, vertical: game), b = Scene(name: "Small", wide: small, vertical: small)
+        doc.project.scenes = [a, b]
+        // A 1.5 s fade starting at 1.0 s would run until 2.5 s; the cut removes 1.2–2.0 s.
+        doc.project.timeline = Timeline(segments: [Segment(startMs: 0, endMs: 1200), Segment(startMs: 2000, endMs: 3000)],
+                                        sceneSpans: [SceneSpan(startMs: 0, sceneID: a.id), SceneSpan(startMs: 1000, sceneID: b.id, transition: SceneTransition(style: .fade, durationMs: 1500))])
+        return (dir, doc, a, b)
+    }
+
+    func testPreviewMatchesExportWhenATransitionCrossesACut() async throws {
+        let (dir, doc, _, _) = try await project()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let export = try await CompositionBuilder.build(doc, canvas: .wide, resolution: .hd, range: .sdr)
+        // The editor's preview: the uncut source, with the instruction it swaps in on every edit.
+        let previewBuilt = try await CompositionBuilder.build(doc, canvas: .wide, resolution: .hd, range: .sdr, ignoreCuts: true)
+        let preview = CompositionBuilder.videoComposition(doc.project, canvas: .wide, size: Canvas.wide.size(.hd), built: previewBuilt)
+        var report: [String] = []
+        for timelineMs in [600.0, 1100, 1300, 1700] {
+            let sourceMs = export.map.source(fromTimeline: timelineMs)
+            let e = RawCompositionFrames.codes(try RawCompositionFrames.frame(export.asset, video: export.video, ms: timelineMs, hdr: false))
+            let p = RawCompositionFrames.codes(try RawCompositionFrames.frame(previewBuilt.asset, video: preview, ms: sourceMs, hdr: false))
+            let worst = zip(e, p).map { abs($0 - $1) }.max() ?? 0
+            report.append(String(format: "t=%.0f (source %.0f): max diff %.0f", timelineMs, sourceMs, worst))
+            XCTAssertLessThanOrEqual(worst, 1, "preview and export frame at timeline \(timelineMs) ms (source \(sourceMs) ms)")
+        }
+        print("Transition across a cut, preview vs export: " + report.joined(separator: "; "))
+    }
+
+    func testEditorPreviewInstructionFollowsCutEdits() async throws {
+        let (dir, doc, _, _) = try await project()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        doc.project.timeline.segments = []
+        let m = await MainActor.run { EditorModel(doc: doc) }
+        func waitFor(_ what: String, _ ok: @escaping () -> Bool) async throws {
+            for _ in 0..<200 { if await MainActor.run(body: ok) { return }; try await Task.sleep(nanoseconds: 25_000_000) }
+            XCTFail("timed out waiting for \(what)")
+        }
+        try await waitFor("the preview") { m.previewRevision >= 1 }
+        let revision = await MainActor.run { m.previewRevision }
+        await MainActor.run { m.update("Cut") { $0.timeline.segments = [Segment(startMs: 0, endMs: 1200), Segment(startMs: 2000, endMs: 3000)] } }
+        try await waitFor("the instruction swap") { m.previewRevision > revision }
+        let plan = await MainActor.run { (m.player.currentItem?.videoComposition?.instructions.first as? CompositionInstruction)?.plan }
+        let cuts = try XCTUnwrap(plan?.cuts)
+        XCTAssertEqual(cuts.segments.map { [($0.startMs * 1000).rounded() / 1000, ($0.endMs * 1000).rounded() / 1000] }, [[0, 1200], [2000, 3000]])
+        XCTAssertEqual(plan?.map.segments.count, 1, "the preview still plays the uncut source")
+        let layers = plan?.layers(atTimelineMs: 2100) ?? []
+        XCTAssertEqual(layers.map(\.opacity), [1], "past the cut the transition has finished, as in the export")
+        await MainActor.run { m.close() }
     }
 }

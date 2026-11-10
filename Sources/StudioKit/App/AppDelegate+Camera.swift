@@ -28,6 +28,16 @@ extension AppDelegate {
     }
 
     func applyOverlay() {
+        let rt = sceneRuntime
+        if rt.cameraAvailable != camera.cameraOn {
+            var old = switchSources()
+            if !rt.cameraAvailable { old.removeValue(forKey: .camera) }
+            else if old[.camera] == nil { old[.camera] = SourceInfo(size: CGSize(width: 1280, height: 720)) }
+            var transition = scenes.collection.transition
+            if DS.Motion.reduceMotion && transition.style != .cut { transition = SceneTransition(style: .fade, durationMs: 150) }
+            rt.live = rt.live.changingSources(atNs: nowNs(), transition: transition, previous: old)
+            rt.cameraAvailable = camera.cameraOn
+        }
         renderer?.overlay = LiveOverlay(camera: camera.cameraOn ? camera : nil)
         pushScene()
         view.refreshOverlay()

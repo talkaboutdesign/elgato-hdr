@@ -15,13 +15,14 @@ final class ExportTests: XCTestCase {
         VTCompressionSessionInvalidate(encoder)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Foundation-"+UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:dir) }
-        let doc = try await FixtureProject.make(at:dir)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 120)
         XCTAssertEqual(doc.project.durationMs,2000,accuracy:1000/60)
         XCTAssertTrue(doc.hasCamera); XCTAssertTrue(doc.hasMic)
         for canvas in Canvas.allCases {
             for range in [ExportRange.hdr,.sdr] {
                 let start = Date()
                 let url = try await Exporter(doc:doc,job:ExportJob(canvas:canvas,resolution:.hd,range:range,fps:.source)).run { _ in }
+                XCTAssertLessThan(Date().timeIntervalSince(start), max(8, doc.project.durationMs / 1000 * 4), "Export throughput regressed")
                 print(String(format: "Fixture export %@ %@: %.3fs",canvas.rawValue,range.rawValue,Date().timeIntervalSince(start)))
                 if range == .hdr, FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/ffprobe") {
                     let process = Process(), pipe = Pipe()

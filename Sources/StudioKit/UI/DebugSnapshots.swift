@@ -8,6 +8,7 @@ import SwiftUI
 enum DebugSnapshots {
     static func start() {
         let env = ProcessInfo.processInfo.environment
+        EditorHarness.start()
         if let n = env["EHDR_OPEN"].flatMap(Int.init) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 Library.shared.reload()

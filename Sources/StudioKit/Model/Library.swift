@@ -57,7 +57,7 @@ final class Library: ObservableObject {
         while fm.fileExists(atPath: dest.path) { dest = root.appendingPathComponent(doc.dir.lastPathComponent + " copy \(n)"); n += 1 }
         do {
             try fm.createDirectory(at: dest, withIntermediateDirectories: true)
-            for f in try fm.contentsOfDirectory(atPath: doc.dir.path) where f != "Exports" {
+            for f in try fm.contentsOfDirectory(atPath: doc.dir.path) where f != "Exports" && f != ".cache" {   // .cache: disposable editor thumbnails and waveforms
                 // Layers are immutable once recorded: clone (APFS copy-on-write) so duplicates are free.
                 try fm.copyItem(at: doc.url(f), to: dest.appendingPathComponent(f))
             }

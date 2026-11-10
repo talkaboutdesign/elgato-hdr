@@ -72,6 +72,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationDidFinishLaunching(_ n: Notification) {
         view = MetalView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
+        let recordings = Self.recordingsDir
+        DispatchQueue.global(qos: .utility).async {
+            for directory in (try? FileManager.default.contentsOfDirectory(at: recordings, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [] {
+                Exporter.removeStalePartials(in: directory.appendingPathComponent("Exports"))
+            }
+        }
         syncStateFromSettings()
         installActions()
         studio = StudioWindowController(state: state, metalView: view)
@@ -228,7 +234,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let queues = ExportQueue.queuesForQuit(confirm: {
+            let alert = NSAlert()
+            alert.messageText = "Quit and discard unfinished exports?"
+            alert.informativeText = "Completed exports will be kept."
+            alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Quit and Discard")
+            return alert.runModal() == .alertSecondButtonReturn
+        }) else { return .terminateCancel }
         guard confirmEndingStream("Quit") else { return .terminateCancel }
+        if !queues.isEmpty {
+            queues.forEach { $0.cancelAll() }
+            endStream()
+            Task { @MainActor in
+                if recorder != nil { await withCheckedContinuation { continuation in finishRecording { _ in continuation.resume() } } }
+                while queues.contains(where: \.isRunning) { try? await Task.sleep(nanoseconds: 100_000_000) }
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
         endStream()
         guard recorder != nil else { return .terminateNow }
         finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }

@@ -136,31 +136,38 @@ final class SceneCollectionTests: XCTestCase {
                     SessionEvent(tMs: 2500, type: "zoomOut"), SessionEvent(tMs: 3000, type: "marker")]
         let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
         let back = try dec.decode(Project.self, from: enc.encode(p))
-        XCTAssertEqual(back, p)
+        // Loading a finished project turns its events into the timeline once (plan 31's importEvents); after that a
+        // round trip is exact.
+        XCTAssertEqual(back.scenes, p.scenes); XCTAssertEqual(back.events, p.events); XCTAssertTrue(back.eventsImported)
+        XCTAssertEqual(back.timeline.zooms.map(\.startMs), [1500]); XCTAssertEqual(back.timeline.markers.map(\.tMs), [3000])
+        XCTAssertEqual(try dec.decode(Project.self, from: enc.encode(back)), back)
         let odd = try dec.decode(SessionEvent.self, from: Data(#"{"type":"marker","future":1}"#.utf8))
         XCTAssertEqual(odd, SessionEvent(tMs: 0, type: "marker"))
     }
 
-    /// A recording writes events but no timeline; finalizing turns them into the timeline the editor and export read,
-    /// so the export shows the scene that was live at each moment rather than the collection's first scene.
+    /// A recording writes events but no timeline; once it is no longer recording they become the timeline the editor
+    /// and export read (plan 31's `importEvents`), so the export shows the scene that was live at each moment rather
+    /// than the collection's first scene. Only once: an edited timeline is left alone.
     func testRecordedEventsSeedTheTimeline() {
         var p = Project(name: "Rec", createdAt: Date())
         let c = SceneCollection.defaults()
-        p.scenes = c.scenes; p.durationMs = 10_000
+        p.scenes = c.scenes; p.durationMs = 10_000; p.state = "recording"
         p.events = [SessionEvent(tMs: 0, type: "scene", sceneID: c.scenes[2].id),
                     SessionEvent(tMs: 2000, type: "zoomIn", zoom: 1.6, focusX: 0.5, focusY: 0.4),
                     SessionEvent(tMs: 3000, type: "zoomOut"),
                     SessionEvent(tMs: 4000, type: "scene", sceneID: c.scenes[1].id),
                     SessionEvent(tMs: 5000, type: "marker")]
-        p.seedTimelineFromEvents()
+        p.importEvents()
+        XCTAssertEqual(p.timeline, Timeline(), "not while recording")
+        p.state = "complete"
+        p.importEvents()
         XCTAssertEqual(p.timeline.sceneSpans.map(\.sceneID), [c.scenes[2].id, c.scenes[1].id])
         XCTAssertEqual(p.timeline.sceneSpans.map(\.startMs), [0, 4000])
         XCTAssertEqual(p.timeline.zooms.map { [$0.startMs, $0.endMs, $0.scale] }, [[2000, 3000, 1.6]])
         XCTAssertEqual(p.timeline.markers.map(\.tMs), [5000])
-        // An edited timeline is left alone.
-        var edited = p; edited.timeline.zooms = []
-        edited.seedTimelineFromEvents()
-        XCTAssertEqual(edited.timeline.zooms, [])
+        p.timeline.zooms = []
+        p.importEvents()
+        XCTAssertEqual(p.timeline.zooms, [])
     }
 }
 

@@ -13,9 +13,9 @@ final class RenderPlanTests: XCTestCase {
             var p = plan(c)
             XCTAssertEqual(p.layers(atTimelineMs: 999).map(\.key), [.game])
             let start = p.layers(atTimelineMs: 1000), middle = p.layers(atTimelineMs: 1500)
-            XCTAssertEqual(start[0].opacity, 1); XCTAssertEqual(start[1].opacity, 0)
+            XCTAssertEqual(start.map(\.key), [.game]); XCTAssertEqual(start[0].opacity, 1)
             XCTAssertGreaterThan(middle[1].opacity, 0); XCTAssertLessThan(middle[1].opacity, 1)
-            XCTAssertEqual(middle[0].opacity + middle[1].opacity, 1, accuracy: 0.0001)
+            XCTAssertEqual(middle[0].opacity, SceneEasing.hold(SceneEasing.spring(500, duration: 1000)), accuracy: 0.0001)
             XCTAssertEqual(p.layers(atTimelineMs: 2000).map(\.key), [.camera])
             p.timeline.sceneSpans[1].transition.style = .cut
             XCTAssertEqual(p.layers(atTimelineMs: 1000).map(\.key), [.camera])

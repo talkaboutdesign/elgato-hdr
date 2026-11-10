@@ -10,6 +10,7 @@ final class SceneRuntime {
     var menuStructure = ""
     var keyMonitor: Any?
     var spaceHeld = false
+    var cameraAvailable = false
     let thumbnailer = SceneThumbnailer()
     var thumbnailTimer: Timer?
     /// The collection when the current drag or slider began; its edits become one undo step at the end.
@@ -565,7 +566,7 @@ extension AppDelegate {
             return m
         }
         let m = NSMenu(title: l.displayName)
-        func add(_ title: String, _ f: @escaping () -> Void) { m.addItem(ClosureMenuItem(title: title, f)) }
+        func add(_ title: String, _ f: @escaping () -> Void) { m.addItem(ClosureMenuItem(title: title, action: f)) }
         if l.isGameOrCamera { add("Crop…") { [weak self] in self?.setCrop(id) } }
         add(l.fit ? "Fill Frame" : "Fit Inside Frame") { [weak self] in self?.editLayer(id) { $0.fit.toggle() } }
         m.addItem(.separator())
@@ -711,16 +712,4 @@ extension AppDelegate {
             th.images = images
         }
     }
-}
-
-/// A menu item that runs a closure, for menus built on the fly.
-final class ClosureMenuItem: NSMenuItem {
-    private let run: () -> Void
-    init(title: String, _ run: @escaping () -> Void) {
-        self.run = run
-        super.init(title: title, action: #selector(fire), keyEquivalent: "")
-        target = self
-    }
-    required init(coder: NSCoder) { fatalError() }
-    @objc private func fire() { run() }
 }

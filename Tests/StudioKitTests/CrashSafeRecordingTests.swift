@@ -26,7 +26,10 @@ final class CrashSafeRecordingTests: XCTestCase {
     func duration(_ url: URL) async throws -> Double { try await AVURLAsset(url: url).load(.duration).seconds }
 
     /// Feeds `seconds` of demo video and audio at real-time cadence (real-time writers drop on backpressure).
-    func writeGame(_ url: URL, seconds: Double) async throws -> Recorder {
+    func writeGame(_ url: URL, seconds: Double, layers: Bool = false) async throws -> Recorder {
+        let folder = url.deletingLastPathComponent()
+        let camera = layers ? try LayerWriter(cameraURL: folder.appendingPathComponent("camera.mov"), width: 640, height: 360, startNs: zero) : nil
+        let mic = layers ? try LayerWriter(micURL: folder.appendingPathComponent("mic.mov"), startNs: zero) : nil
         let r = try Recorder(url: url, width: 640, height: 360, fps: 30, colorMode: .pq, startNs: zero)
         let frames = Int(seconds * 30)
         for frame in 0..<frames {
@@ -35,50 +38,53 @@ final class CrashSafeRecordingTests: XCTestCase {
                 [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &out)
             let ns = zero + UInt64(Double(frame) * 1e9 / 30)
             r.appendVideo(try XCTUnwrap(out), ns: ns)
+            camera?.appendVideo(CameraCapture.demoPixelBuffer(frame: frame), ns: ns + 1)
+            if let mic, let audio = CameraCapture.demoAudio(sample: frame * 1600, count: 1600) { mic.appendAudio(audio, ns: ns + 1) }
             r.appendAudio(Data(count: 1600 * 4), ns: ns + 33_333_333)
             try await Task.sleep(nanoseconds: 33_333_333)
         }
+        camera?.queue.sync {}; mic?.queue.sync {}
+        if layers { XCTAssertGreaterThan(camera?.count ?? 0, 60) }
         r.queue.sync {}
         return r
     }
 
-    func testGameRecorderSurvivesWithoutFinish() async throws {
+    private static var interrupted: Task<URL, Error>?
+    private static var interruptedDir: URL?
+    private func interruptedRecording() async throws -> URL {
         try requireHEVC()
-        let url = dir.appendingPathComponent("game.mov")
-        var r: Recorder? = try await writeGame(url, seconds: 3)
-        XCTAssertEqual(r?.writer.status, .writing)
-        r = nil   // released without finishWriting, as after a crash
-        XCTAssertNil(r)
-        let d = try await duration(url)
-        XCTAssertGreaterThanOrEqual(d, 2, "unfinished game.mov reads as \(d) s")
+        if let task = Self.interrupted { return try await task.value }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("InterruptedShared-" + UUID().uuidString)
+        Self.interruptedDir = folder
+        let task = Task {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var recorder: Recorder? = try await self.writeGame(folder.appendingPathComponent("game.mov"), seconds: 3, layers: true)
+            XCTAssertEqual(recorder?.writer.status, .writing)
+            recorder = nil
+            return folder
+        }
+        Self.interrupted = task
+        return try await task.value
     }
-
+    override class func tearDown() {
+        if let folder = interruptedDir { try? FileManager.default.removeItem(at: folder) }
+        interrupted = nil; interruptedDir = nil
+        super.tearDown()
+    }
+    func testGameRecorderSurvivesWithoutFinish() async throws {
+        let folder = try await interruptedRecording()
+        let d = try await duration(folder.appendingPathComponent("game.mov"))
+        XCTAssertGreaterThanOrEqual(d, 2)
+    }
     func testCameraLayerSurvivesWithoutFinish() async throws {
-        let url = dir.appendingPathComponent("camera.mov")
-        var w: LayerWriter? = try LayerWriter(cameraURL: url, width: 640, height: 360, startNs: zero)
-        for frame in 0..<90 {
-            w?.appendVideo(CameraCapture.demoPixelBuffer(frame: frame), ns: zero + 1 + UInt64(Double(frame) * 1e9 / 30))
-            try await Task.sleep(nanoseconds: 33_333_333)
-        }
-        w?.queue.sync {}
-        XCTAssertGreaterThan(w?.count ?? 0, 60)
-        w = nil
-        let d = try await duration(url)
-        XCTAssertGreaterThanOrEqual(d, 2, "unfinished camera.mov reads as \(d) s")
+        let folder = try await interruptedRecording()
+        let d = try await duration(folder.appendingPathComponent("camera.mov"))
+        XCTAssertGreaterThanOrEqual(d, 2)
     }
-
     func testMicLayerSurvivesWithoutFinish() async throws {
-        let url = dir.appendingPathComponent("mic.mov")
-        var w: LayerWriter? = try LayerWriter(micURL: url, startNs: zero)
-        for chunk in 0..<150 {   // 20 ms chunks
-            if let sb = CameraCapture.demoAudio(sample: chunk * 960, count: 960) { w?.appendAudio(sb, ns: zero + 1 + UInt64(chunk) * 20_000_000) }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        w?.queue.sync {}
-        w = nil
-        let d = try await duration(url)
-        // AAC fragments end on a 1024-sample packet boundary, so the first fragment can stop a packet or two short of 2 s.
-        XCTAssertGreaterThanOrEqual(d, 2 - 2048.0 / 48000, "unfinished mic.mov reads as \(d) s")
+        let folder = try await interruptedRecording()
+        let d = try await duration(folder.appendingPathComponent("mic.mov"))
+        XCTAssertGreaterThanOrEqual(d, 2 - 2048.0 / 48000)
     }
 
     func project(camera: Bool) -> ProjectDoc {

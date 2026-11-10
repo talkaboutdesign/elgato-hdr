@@ -20,7 +20,12 @@ final class ProjectDoc: Identifiable, Hashable {
         guard let d = try? Data(contentsOf: dir.appendingPathComponent("project.json")) else { return nil }
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         guard let p = try? dec.decode(Project.self, from: d) else { return nil }
-        return ProjectDoc(dir: dir, project: p)
+        let doc = ProjectDoc(dir: dir, project: p)
+        Exporter.removeStalePartials(in: doc.exportsDir)
+        let raw = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        if (raw?["scenes"] as? [Any])?.isEmpty != false || (raw?["version"] as? Int ?? 1) < 2 ||
+            (p.eventsImported && raw?["eventsImported"] as? Bool != true) { doc.save() }
+        return doc
     }
 
     func save() {
@@ -44,14 +49,14 @@ final class ProjectDoc: Identifiable, Hashable {
                 return
             }
             project.durationMs = d.seconds * 1000
-            project.seedTimelineFromEvents()
             if let s = try? await t.load(.naturalSize) { project.width = Int(s.width); project.height = Int(s.height) }
             if let f = try? await t.load(.nominalFrameRate), f > 0 { project.fps = Double(f) }
             if let c = project.camera, await !layerReadable(c) { log("finalize: dropping unreadable camera layer \(c.file)"); project.camera = nil }
             if let m = project.mic, await !layerReadable(m) { log("finalize: dropping unreadable mic layer \(m.file)"); project.mic = nil }
-            // Thumbnail first: the library reloads a card's image when its state changes, so it must exist by then.
-            await writeThumbnail()
             project.state = "complete"
+            project.importEvents()
+            // Import before choosing the thumbnail time; notify the library only after it exists.
+            await writeThumbnail()
             save()
             await MainActor.run { completion() }
         }

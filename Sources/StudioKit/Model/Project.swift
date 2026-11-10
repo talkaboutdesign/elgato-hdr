@@ -154,13 +154,14 @@ struct Project: Codable, Equatable {
     var scenes: [Scene] = []                  // the scene collection when recording started
     var sceneTransition = SceneTransition() // recording-time default for events with absent transition fields
     var events: [SessionEvent] = []           // live switches, zooms and markers, in source milliseconds
+    var eventsImported = false                // events turned into the timeline once (importEvents)
     var timeline = Timeline()
     var lastExport: [String: String] = [:]    // canvas raw value -> file name
 
-    init(name: String, createdAt: Date) { self.name = name; self.createdAt = createdAt }
+    init(name: String, createdAt: Date) { self.name = name; self.createdAt = createdAt; scenes = [defaultScene] }
     enum CodingKeys: String, CodingKey {
         case version, name, createdAt, state, durationMs, width, height, fps, colorMode, game, camera, mic, cameraMirror
-        case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline, sceneTransition
+        case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline, eventsImported, sceneTransition
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -174,14 +175,11 @@ struct Project: Codable, Equatable {
         wide = c.v(.wide, z.wide); vertical = c.v(.vertical, z.vertical); lastExport = c.v(.lastExport, [:])
         sceneTransition = c.v(.sceneTransition, SceneTransition())
         scenes = c.v(.scenes, []); events = c.v(.events, []); timeline = c.v(.timeline, Timeline())
-        if version < 2 { migrateTimeline() }; version = 2
-    }
-
-    /// A recording logs live events (plan 22) but writes no timeline. Once its duration is known, an untouched timeline
-    /// is derived from them, exactly as an older project's is on migration.
-    mutating func seedTimelineFromEvents() {
-        guard timeline == Timeline(), !events.isEmpty else { return }
-        migrateTimeline()
+        eventsImported = c.v(.eventsImported, false)
+        if scenes.isEmpty { scenes = [defaultScene] }
+        if version < 2 { migrateTimeline() }
+        importEvents()
+        version = 2
     }
 
     mutating func migrateTimeline() {
@@ -189,6 +187,13 @@ struct Project: Codable, Equatable {
         if timeline.segments.isEmpty && (trimStartMs > 0 || trimEndMs > 0) {
             timeline.segments = [Segment(startMs: trimmedRange.0, endMs: trimmedRange.1)]
         }
+        importEvents()
+        if timeline.sceneSpans.isEmpty, let scene = scenes.first { timeline.sceneSpans = [SceneSpan(startMs: 0, sceneID: scene.id)] }
+    }
+
+    mutating func importEvents() {
+        guard state != "recording", !eventsImported, !events.isEmpty else { return }
+        eventsImported = true
         let sorted = events.sorted { $0.tMs < $1.tMs }
         if timeline.sceneSpans.isEmpty {
             timeline.sceneSpans = sorted.compactMap { e in
@@ -213,11 +218,17 @@ struct Project: Codable, Equatable {
         if timeline.markers.isEmpty { timeline.markers = sorted.filter { $0.type == "marker" }.map { Marker(tMs: $0.tMs) } }
     }
 
+    mutating func ensureRecordingScene() {
+        if scenes.isEmpty { scenes = [defaultScene] }
+    }
+
     var defaultScene: Scene {
         var w = Composition.from(layout: wide, canvas: Canvas.wide.size(.hd), hasCamera: true, mirror: cameraMirror)
         var v = Composition.from(layout: vertical, canvas: Canvas.vertical.size(.hd), hasCamera: true, mirror: cameraMirror)
         w.legacyLayout = wide; v.legacyLayout = vertical
-        return Scene(name: "Default", wide: w, vertical: v)
+        var scene = Scene(name: "Default", wide: w, vertical: v)
+        if let id = scenes.first?.id { scene.id = id }
+        return scene
     }
     var editSegments: [Segment] {
         if !timeline.segments.isEmpty { return timeline.segments }
@@ -244,6 +255,7 @@ struct Project: Codable, Equatable {
         try c.encode(sceneTransition, forKey: .sceneTransition)
         try c.encode(scenes, forKey: .scenes)
         try c.encode(events, forKey: .events)
+        try c.encode(eventsImported, forKey: .eventsImported)
         try c.encode(timeline, forKey: .timeline)
         let bounds = timeline.segments.sorted { $0.startMs < $1.startMs }
         try c.encode(bounds.first?.startMs ?? trimStartMs, forKey: .trimStartMs)

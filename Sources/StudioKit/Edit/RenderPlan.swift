@@ -6,6 +6,21 @@ struct RenderPlan {
     var scenes: [Scene]; var timeline: Timeline; var map: TimeMap
     var canvas: Canvas; var canvasSize: CGSize
     var sources: [SourceKey: SourceInfo]; var mirrorCamera: Bool
+    /// Where the cuts are, in source time. `map` only says which source time a composition time shows: the editor
+    /// preview plays the uncut source (identity map) but must end a transition at a cut exactly as the export does.
+    var cuts: TimeMap? = nil
+
+    var cameraRanges: [Segment]? = nil
+
+    static func joinedCameraRanges(_ ranges: [Segment]) -> [Segment] {
+        var out: [Segment] = []
+        for range in ranges.sorted(by: { $0.startMs < $1.startMs }) {
+            if let last = out.last, range.startMs <= last.endMs + 0.01 {
+                out[out.count - 1].endMs = max(last.endMs, range.endMs)
+            } else { out.append(range) }
+        }
+        return out
+    }
 
     private func selection(at t: Double) -> (Scene?, Scene?, SceneTransition, Double) {
         let s = map.source(fromTimeline: t)
@@ -14,11 +29,24 @@ struct RenderPlan {
         let span = spans[i]
         let to = scenes.first { $0.id == span.sceneID }
         let from = i > 0 ? scenes.first { $0.id == spans[i-1].sceneID } : nil
-        let done = span.transition.durationMs <= 0 || map.crossedCut(from: span.startMs, through: s)
+        let done = span.transition.durationMs <= 0 || (cuts ?? map).crossedCut(from: span.startMs, through: s)
         let progress = done ? 1 : min(1, max(0, (s - span.startMs) / span.transition.durationMs))
         return (from, to, span.transition, progress)
     }
     func layers(atTimelineMs t: Double) -> [ResolvedLayer] {
+        guard let ranges = cameraRanges, sources[.camera] != nil else { return evaluatedLayers(atTimelineMs: t) }
+        var absent = self; absent.sources.removeValue(forKey: .camera); absent.cameraRanges = nil
+        let gameOnly = absent.evaluatedLayers(atTimelineMs: t)
+        guard let range = Self.joinedCameraRanges(ranges).first(where: { t >= $0.startMs && t < $0.endMs }) else { return gameOnly }
+        let fadeIn = range.startMs > 0 ? min(1, (t - range.startMs) / 150) : 1
+        let fadeOut = range.endMs < map.durationMs - 1 ? min(1, (range.endMs - t) / 150) : 1
+        let weight = max(0, min(fadeIn, fadeOut))
+        let picture = evaluatedLayers(atTimelineMs: t)
+        guard weight < 1 else { return picture }
+        return SceneBlend(canvas: CGRect(origin: .zero, size: canvasSize)).mix(gameOnly, picture, e: weight, match: false)
+    }
+
+    private func evaluatedLayers(atTimelineMs t: Double) -> [ResolvedLayer] {
         let (from, to, transition, progress) = selection(at: t)
         guard let to = to else { return [] }
         var layers = Self.transitionLayers(from: from, to: to, transition: transition, progress: progress,
@@ -48,16 +76,13 @@ struct RenderPlan {
         let a = from.composition(canvas).backgroundColor, e = Float(Self.ease(progress))
         return a + (b-a)*e
     }
-    private static func ease(_ t: Double) -> Double { t >= 1 ? 1 : 1 - (1 + 6.638*t)*exp(-6.638*t) }
+    private static func ease(_ t: Double) -> Double { SceneEasing.spring(t, duration: 1) }
 
-    /// Plan 22 is not present yet. This boundary takes resolved inputs at a normalized progress so its morph
-    /// evaluator can replace the fade fallback without changing timeline or compositor callers.
     static func transitionLayers(from: Scene?, to: Scene, transition: SceneTransition, progress: Double,
                                  canvas: Canvas, size: CGSize, sources: [SourceKey: SourceInfo]) -> [ResolvedLayer] {
-        let target = SceneResolver.resolve(to.composition(canvas), canvas: size, sources: sources)
-        guard let from = from, transition.style != .cut, progress < 1, from.id != to.id else { return target }
-        let e = ease(max(0, progress))
-        let old = SceneResolver.resolve(from.composition(canvas), canvas: size, sources: sources)
-        return old.map { var l = $0; l.opacity *= 1-e; return l } + target.map { var l = $0; l.opacity *= e; return l }
+        var state = LiveSceneState(scene: to)
+        state.from = from; state.transition = transition
+        let time = UInt64(max(0, progress * max(0, transition.durationMs) * 1e6).rounded())
+        return state.layers(canvas: canvas, size: size, sources: sources, atNs: time)
     }
 }

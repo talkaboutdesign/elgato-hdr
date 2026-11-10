@@ -68,7 +68,9 @@ class LayerCompositor: NSObject, AVVideoCompositing {
                 keep += p.2
                 textures[key] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: tags.transfer, bt709: tags.bt709)
             }
-            let layers = DrawLayer.pair(ins.plan.layers(atTimelineMs: request.compositionTime.seconds * 1000), textures)
+            var plan = ins.plan
+            if textures[.camera] == nil { plan.sources.removeValue(forKey: .camera) }
+            let layers = DrawLayer.pair(plan.layers(atTimelineMs: request.compositionTime.seconds * 1000), textures)
             guard let cb = core.queue.makeCommandBuffer() else { request.finish(with: NSError(domain: "Compositor", code: 2)); return }
             let w = CVPixelBufferGetWidth(out), h = CVPixelBufferGetHeight(out)
             if Self.hdr {

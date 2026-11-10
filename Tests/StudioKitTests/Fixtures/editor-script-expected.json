@@ -1,0 +1,342 @@
+{
+  "camera" : {
+    "file" : "camera.mov",
+    "offsetMs" : 0,
+    "volume" : 1
+  },
+  "cameraMirror" : false,
+  "colorMode" : "pq",
+  "createdAt" : "…",
+  "durationMs" : 2000,
+  "events" : [
+
+  ],
+  "eventsImported" : false,
+  "fps" : 60,
+  "game" : {
+    "file" : "game.mov",
+    "offsetMs" : 0,
+    "volume" : 1
+  },
+  "height" : 1080,
+  "lastExport" : {
+
+  },
+  "mic" : {
+    "file" : "mic.mov",
+    "offsetMs" : 0,
+    "volume" : 1
+  },
+  "name" : "Fixture",
+  "scenes" : [
+    {
+      "id" : "UUID-1",
+      "name" : "Default",
+      "vertical" : {
+        "background" : [
+          0.06,
+          0.06,
+          0.07,
+          1
+        ],
+        "layers" : [
+          {
+            "border" : false,
+            "fit" : false,
+            "frame" : {
+              "h" : 0.35989583333333336,
+              "w" : 1,
+              "x" : 0,
+              "y" : 0
+            },
+            "id" : "UUID-2",
+            "mirror" : false,
+            "name" : "Camera",
+            "opacity" : 1,
+            "panX" : 0.5,
+            "panY" : 0.5,
+            "roundness" : 0,
+            "shadow" : false,
+            "source" : {
+              "type" : "camera"
+            },
+            "visible" : true,
+            "zoom" : 1
+          },
+          {
+            "border" : false,
+            "fit" : false,
+            "frame" : {
+              "h" : 0.6401041666666667,
+              "w" : 1,
+              "x" : 0,
+              "y" : 0.35989583333333336
+            },
+            "id" : "UUID-3",
+            "mirror" : false,
+            "name" : "Game",
+            "opacity" : 1,
+            "panX" : 0.5,
+            "panY" : 0.5,
+            "roundness" : 0,
+            "shadow" : false,
+            "source" : {
+              "type" : "game"
+            },
+            "visible" : true,
+            "zoom" : 1
+          }
+        ],
+        "legacyLayout" : {
+          "camera" : {
+            "aspect" : "1:1",
+            "border" : false,
+            "roundness" : 0.5,
+            "shadow" : true,
+            "size" : 0.5,
+            "x" : 0.5,
+            "y" : 0.17
+          },
+          "fit" : false,
+          "kind" : "stacked",
+          "panX" : 0.5,
+          "panY" : 0.5,
+          "split" : 0.36,
+          "zoom" : 1
+        }
+      },
+      "wide" : {
+        "background" : [
+          0.06,
+          0.06,
+          0.07,
+          1
+        ],
+        "layers" : [
+          {
+            "border" : false,
+            "fit" : false,
+            "frame" : {
+              "h" : 1,
+              "w" : 1,
+              "x" : 0,
+              "y" : 0
+            },
+            "id" : "UUID-4",
+            "mirror" : false,
+            "name" : "Game",
+            "opacity" : 1,
+            "panX" : 0.5,
+            "panY" : 0.5,
+            "roundness" : 0,
+            "shadow" : false,
+            "source" : {
+              "type" : "game"
+            },
+            "visible" : true,
+            "zoom" : 1
+          },
+          {
+            "border" : false,
+            "fit" : false,
+            "frame" : {
+              "h" : 0.34,
+              "w" : 0.19125000000000003,
+              "x" : 0.754375,
+              "y" : 0.59
+            },
+            "id" : "UUID-5",
+            "mirror" : false,
+            "name" : "Camera",
+            "opacity" : 1,
+            "panX" : 0.5,
+            "panY" : 0.5,
+            "roundness" : 0.16,
+            "shadow" : true,
+            "source" : {
+              "type" : "camera"
+            },
+            "visible" : true,
+            "zoom" : 1
+          }
+        ],
+        "legacyLayout" : {
+          "camera" : {
+            "aspect" : "1:1",
+            "border" : false,
+            "roundness" : 0.16,
+            "shadow" : true,
+            "size" : 0.34,
+            "x" : 0.85,
+            "y" : 0.76
+          },
+          "fit" : false,
+          "kind" : "pip",
+          "panX" : 0.5,
+          "panY" : 0.5,
+          "split" : 0.36,
+          "zoom" : 1
+        }
+      }
+    },
+    {
+      "id" : "UUID-6",
+      "name" : "Camera Focus",
+      "vertical" : {
+        "background" : [
+          0.06,
+          0.06,
+          0.07,
+          1
+        ],
+        "layers" : [
+          {
+            "border" : false,
+            "fit" : false,
+            "frame" : {
+              "h" : 1,
+              "w" : 1,
+              "x" : 0,
+              "y" : 0
+            },
+            "id" : "UUID-7",
+            "mirror" : false,
+            "name" : "Camera",
+            "opacity" : 1,
+            "panX" : 0.5,
+            "panY" : 0.5,
+            "roundness" : 0,
+            "shadow" : false,
+            "source" : {
+              "type" : "camera"
+            },
+            "visible" : true,
+            "zoom" : 1
+          }
+        ]
+      },
+      "wide" : {
+        "background" : [
+          0.06,
+          0.06,
+          0.07,
+          1
+        ],
+        "layers" : [
+          {
+            "border" : false,
+            "fit" : false,
+            "frame" : {
+              "h" : 1,
+              "w" : 1,
+              "x" : 0,
+              "y" : 0
+            },
+            "id" : "UUID-8",
+            "mirror" : false,
+            "name" : "Camera",
+            "opacity" : 1,
+            "panX" : 0.5,
+            "panY" : 0.5,
+            "roundness" : 0,
+            "shadow" : false,
+            "source" : {
+              "type" : "camera"
+            },
+            "visible" : true,
+            "zoom" : 1
+          }
+        ]
+      }
+    }
+  ],
+  "state" : "complete",
+  "timeline" : {
+    "markers" : [
+
+    ],
+    "sceneSpans" : [
+      {
+        "id" : "UUID-9",
+        "sceneID" : "UUID-1",
+        "startMs" : 0,
+        "transition" : {
+          "durationMs" : 380,
+          "style" : "morph"
+        }
+      },
+      {
+        "id" : "UUID-10",
+        "sceneID" : "UUID-6",
+        "startMs" : 1500,
+        "transition" : {
+          "durationMs" : 380,
+          "style" : "morph"
+        }
+      }
+    ],
+    "segments" : [
+      {
+        "endMs" : 500.00000000000006,
+        "startMs" : 0
+      },
+      {
+        "endMs" : 2000,
+        "startMs" : 1000.0000000000001
+      }
+    ],
+    "splitPoints" : [
+      500.00000000000006,
+      1000.0000000000001
+    ],
+    "zooms" : [
+      {
+        "easeMs" : 450,
+        "endMs" : 2000,
+        "focusX" : 0.5,
+        "focusY" : 0.5,
+        "id" : "UUID-11",
+        "scale" : 1.8,
+        "startMs" : 250.00000000000003
+      }
+    ]
+  },
+  "trimEndMs" : 2000,
+  "trimStartMs" : 0,
+  "version" : 2,
+  "vertical" : {
+    "camera" : {
+      "aspect" : "1:1",
+      "border" : false,
+      "roundness" : 0.5,
+      "shadow" : true,
+      "size" : 0.5,
+      "x" : 0.5,
+      "y" : 0.17
+    },
+    "fit" : false,
+    "kind" : "stacked",
+    "panX" : 0.5,
+    "panY" : 0.5,
+    "split" : 0.36,
+    "zoom" : 1
+  },
+  "wide" : {
+    "camera" : {
+      "aspect" : "1:1",
+      "border" : false,
+      "roundness" : 0.16,
+      "shadow" : true,
+      "size" : 0.34,
+      "x" : 0.85,
+      "y" : 0.76
+    },
+    "fit" : false,
+    "kind" : "pip",
+    "panX" : 0.5,
+    "panY" : 0.5,
+    "split" : 0.36,
+    "zoom" : 1
+  },
+  "width" : 1920
+}
