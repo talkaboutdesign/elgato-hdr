@@ -21,6 +21,7 @@ final class ProjectDoc: Identifiable, Hashable {
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         guard let p = try? dec.decode(Project.self, from: d) else { return nil }
         let doc = ProjectDoc(dir: dir, project: p)
+        Exporter.removeStalePartials(in: doc.exportsDir)
         let raw = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
         if (raw?["scenes"] as? [Any])?.isEmpty != false || (raw?["version"] as? Int ?? 1) < 2 ||
             (p.eventsImported && raw?["eventsImported"] as? Bool != true) { doc.save() }

@@ -15,19 +15,18 @@ struct ExportJob: Hashable {
 
 /// Renders a project to a single MP4 through AVAssetReader (composited) -> AVAssetWriter.
 ///
-/// The reader and writer lifecycle (start, cancel, finish) runs on one serial queue: a cancel can never interleave
-/// with `startReading`/`startWriting` (that race crashed inside `AVAssetReaderAudioMixOutput`), and a cancel that
-/// arrives first prevents the start. Every wait in `run` (a lifecycle step, each pump, `finishWriting`) is an
-/// exactly-once completion that cancel and the stall watchdog resolve directly, without the lifecycle queue: after
-/// `cancelWriting` the writer may never ask for data again, and an AVFoundation call can block that queue for a long
-/// time when the media engines are busy.
+/// Lifecycle operations are serialized. Cancellation closes pump admission and drains all callbacks before
+/// cancelling AVFoundation objects; run returns only after teardown, so the queue cannot accumulate encoders.
 final class Exporter {
     let doc: ProjectDoc
     let job: ExportJob
     let output: URL
     private let partialOutput: URL
     /// No appended sample and no state change for this long fails the export as stalled.
+    var useSoftwareH264 = false
     var stallTimeout: TimeInterval = 20
+    var encoderWaitLimit: TimeInterval = 600
+    var onEncoderWaiting: ((Bool) -> Void)?
     /// Starts feeding one writer input. Tests replace it to simulate a pump that never produces.
     var startPump: (Pump) -> Void = Exporter.feed
     var finishWriter: (AVAssetWriter, @escaping () -> Void) -> Void = { $0.finishWriting(completionHandler: $1) }
@@ -54,8 +53,26 @@ final class Exporter {
         let name = doc.project.name.replacingOccurrences(of: "/", with: "-")
         let res = job.resolution == .uhd ? "4K" : "1080p"
         self.output = output ?? doc.exportsDir.appendingPathComponent("\(name) — \(job.canvas == .wide ? "16x9" : "9x16") \(res) \(job.range == .hdr ? "HDR" : "SDR").mp4")
-        partialOutput = self.output.deletingLastPathComponent().appendingPathComponent(".export-" + UUID().uuidString + ".mp4")
+        partialOutput = self.output.deletingLastPathComponent().appendingPathComponent(".export-\(getpid())-" + UUID().uuidString + ".mp4")
         // Exports are file names only: the project folder can be renamed or moved freely.
+    }
+
+    static func removeStalePartials(in directory: URL) {
+        let fm = FileManager.default
+        for url in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+            let name = url.lastPathComponent
+            guard name.hasPrefix(".export-"), name.hasSuffix(".mp4") else { continue }
+            let part = name.dropFirst(8).split(separator: "-").first ?? ""
+            if let pid = Int32(part), pid > 0 {
+                // Another app instance may be exporting into this project. EPERM also means it is alive.
+                guard kill(pid, 0) != 0, errno == ESRCH else { continue }
+            } else {
+                // Older versions did not name the owner. Avoid deleting another instance's recent export.
+                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+                guard Date().timeIntervalSince(date) > 86400 else { continue }
+            }
+            try? fm.removeItem(at: url)
+        }
     }
 
     /// Safe from any thread, at any time: before `run`, while it builds, starts, pumps or finishes, or after it
@@ -66,12 +83,8 @@ final class Exporter {
         do { return try await export(progress: progress) } catch {
             let reason = aborted.reason ?? .failed
             abort(reason, why: error.localizedDescription)
-            // Teardown (and deleting the partial file) is queued behind whatever the lifecycle queue is doing. Wait
-            // for it, but never long: a blocked media engine must not keep the caller (and the export queue) waiting.
-            watchQueue.asyncAfter(deadline: .now() + 1.2) { self.tornDown.resolve(false) }
-            if await !tornDown.wait() { log("export: teardown still waiting on the media engine") }
-            // Each run owns a unique partial path; a late teardown cannot delete a restarted export.
-            try? FileManager.default.removeItem(at: partialOutput)
+            // Do not return ownership to the queue until every pump and encoder has stopped.
+            _ = await tornDown.wait()
             throw abortError(reason) ?? error
         }
     }
@@ -99,7 +112,7 @@ final class Exporter {
         stopWatchdog()
         guard started else { return }
         let statusBeforeCancel = reason == .cancelled ? "" : diagnostics()
-        gate.close()
+        gate.closeAndWait()
         if let r = reader, r.status == .reading { r.cancelReading() }
         if let w = writer, w.status == .writing { w.cancelWriting() }
         if ownsOutput { try? FileManager.default.removeItem(at: partialOutput) }
@@ -161,7 +174,7 @@ final class Exporter {
         let fps = 1 / built.video.frameDuration.seconds
         let writer = try AVAssetWriter(outputURL: partialOutput, fileType: .mp4)
         var compression: [String: Any] = [AVVideoExpectedSourceFrameRateKey: fps, AVVideoMaxKeyFrameIntervalKey: Int(fps * 2)]
-        let videoSettings: [String: Any]
+        var videoSettings: [String: Any]
         if hdr {
             compression[AVVideoAverageBitRateKey] = Int(Double(size.width * size.height) * fps * 0.12)
             compression[AVVideoProfileLevelKey] = kVTProfileLevel_HEVC_Main10_AutoLevel as String
@@ -185,6 +198,9 @@ final class Exporter {
                                                          AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2],
                              AVVideoCompressionPropertiesKey: compression]
         }
+        if !hdr && useSoftwareH264 {
+            videoSettings[AVVideoEncoderSpecificationKey] = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
+        }
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         writer.add(vIn)
         let total = max(0.001, built.duration.seconds)
@@ -199,7 +215,7 @@ final class Exporter {
 
         // The watchdog covers the start too: starting the writer can block when the media engines are busy.
         activity.touch()
-        startWatchdog(reader: reader, writer: writer)
+        startWatchdog(reader: reader, writer: writer, video: pumps[0])
         try await step(blocking: true) {
             self.phase = .starting
             self.ownsOutput = true
@@ -241,9 +257,10 @@ final class Exporter {
 
     // MARK: Watchdog
 
-    private func startWatchdog(reader: AVAssetReader, writer: AVAssetWriter) {
+    private func startWatchdog(reader: AVAssetReader, writer: AVAssetWriter, video: Pump) {
         watchQueue.async {
             var readerStatus = reader.status, writerStatus = writer.status
+            var policy = ExportWatchdog()
             let t = DispatchSource.makeTimerSource(queue: self.watchQueue)
             let interval = max(0.05, min(1, self.stallTimeout / 4))
             t.schedule(deadline: .now() + interval, repeating: interval)
@@ -254,7 +271,10 @@ final class Exporter {
                     readerStatus = rs; writerStatus = ws; self.activity.touch()
                 }
                 let idle = self.activity.idle
-                guard idle >= self.stallTimeout else { return }
+                let waiting = !video.done.isResolved && ws == .writing && !video.input.isReadyForMoreMediaData
+                self.onEncoderWaiting?(waiting)
+                guard policy.expired(now: CACurrentMediaTime(), idle: idle, waiting: waiting,
+                                     stall: self.stallTimeout, hardLimit: self.encoderWaitLimit) else { return }
                 log(String(format: "export: STALLED, nothing appended and no state change for %.1f s", idle))
                 self.abort(.stalled, why: "stall watchdog")
                 // The lifecycle queue may be the thing that is stuck: report what can be read without it.
@@ -281,12 +301,16 @@ final class Exporter {
     /// Feeds the writer input whenever it asks, until the reader runs dry or the pump is resolved by cancel.
     static func feed(_ p: Pump) {
         p.input.requestMediaDataWhenReady(on: DispatchQueue(label: p.label)) {
-            p.enter(); defer { p.exit() }
-            while !p.done.isResolved && p.input.isReadyForMoreMediaData {
-                guard let sb = p.output.copyNextSampleBuffer() else { p.finish(true); return }
-                let t = CMSampleBufferGetPresentationTimeStamp(sb).seconds
-                guard p.append(sb, at: t) else { p.finish(false); return }
-            }
+            guard p.begin() else { return }; defer { p.end() }
+            autoreleasepool { feedAvailable(p) }
+        }
+    }
+
+    private static func feedAvailable(_ p: Pump) {
+        while !p.done.isResolved && p.input.isReadyForMoreMediaData {
+            guard let sb = p.output.copyNextSampleBuffer() else { p.finish(true); return }
+            let t = CMSampleBufferGetPresentationTimeStamp(sb).seconds
+            guard p.append(sb, at: t) else { p.finish(false); return }
         }
     }
 
@@ -311,7 +335,13 @@ final class Exporter {
             self.label = label; self.output = output; self.input = input; self.gate = gate; self.activity = activity; self.progress = progress
         }
         func retain(_ objects: [AnyObject]) { lock.lock(); owners = objects; lock.unlock() }
-        func enter() { lock.lock(); inside = true; lock.unlock() }
+        func begin() -> Bool {
+            guard gate.enter() else { return false }
+            lock.lock(); inside = true; lock.unlock()
+            return true
+        }
+        // Sample buffers are scoped inside the callback body and released before this defer drains the gate.
+        func end() { exit(); gate.leave() }
         func exit() { lock.lock(); inside = false; if released { owners = nil }; lock.unlock() }
         /// After teardown or a finished export; takes effect when no callback is running.
         func release() { lock.lock(); released = true; if !inside { owners = nil }; lock.unlock() }
@@ -399,11 +429,36 @@ final class Activity {
 /// Never hold a shared lock across append: the writer may wait for the other input to advance.
 /// AVFoundation cancellation stops an in-flight append; the flag prevents further work afterwards.
 final class WriterGate {
-    private let lock = NSLock()
-    private var closed = false
-    func run<T>(_ f: () -> T) -> T? {
-        lock.lock(); let stop = closed; lock.unlock()
-        return stop ? nil : f()
+    private let condition = NSCondition()
+    private var closed = false, active = 0
+    func enter() -> Bool {
+        condition.lock(); defer { condition.unlock() }
+        guard !closed else { return false }
+        active += 1; return true
     }
-    func close() { lock.lock(); closed = true; lock.unlock() }
+    func leave() { condition.lock(); active -= 1; condition.broadcast(); condition.unlock() }
+    func run<T>(_ f: () -> T) -> T? {
+        guard enter() else { return nil }
+        defer { leave() }
+        return f()
+    }
+    // Close admission before waiting. No reader/writer cancellation can race a sample read or append.
+    func closeAndWait() {
+        condition.lock(); closed = true
+        while active > 0 { condition.wait() }
+        condition.unlock()
+    }
+}
+
+/// Only reader/compositor inactivity consumes the short timeout; encoder backpressure has a separate ceiling.
+struct ExportWatchdog {
+    private var previous: Double?
+    private var readerIdle = 0.0
+    mutating func expired(now: Double, idle: Double, waiting: Bool, stall: Double, hardLimit: Double) -> Bool {
+        let delta = previous.map { max(0, now - $0) } ?? 0
+        previous = now
+        if idle < delta { readerIdle = 0 }
+        else if !waiting { readerIdle += delta }
+        return idle >= hardLimit || readerIdle >= stall
+    }
 }

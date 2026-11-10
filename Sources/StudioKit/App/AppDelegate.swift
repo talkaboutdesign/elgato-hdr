@@ -227,7 +227,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let queues = ExportQueue.runningQueues
+        if !queues.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "Quit and discard unfinished exports?"
+            alert.informativeText = "Completed exports will be kept."
+            alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Quit and Discard")
+            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+        }
         guard confirmEndingStream("Quit") else { return .terminateCancel }
+        if !queues.isEmpty {
+            queues.forEach { $0.cancelAll() }
+            endStream()
+            Task { @MainActor in
+                if recorder != nil { await withCheckedContinuation { continuation in finishRecording { _ in continuation.resume() } } }
+                while queues.contains(where: \.isRunning) { try? await Task.sleep(nanoseconds: 100_000_000) }
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
         endStream()
         guard recorder != nil else { return .terminateNow }
         finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }

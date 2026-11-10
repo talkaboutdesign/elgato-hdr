@@ -57,6 +57,8 @@ enum ExportPreset: String, CaseIterable, Identifiable {
 /// at full speed). Observable for the progress capsule and its popover. Main thread only.
 @Observable
 final class ExportQueue {
+    private static let registry = NSHashTable<ExportQueue>.weakObjects()
+    static var runningQueues: [ExportQueue] { registry.allObjects.filter(\.isRunning) }
     struct Item: Identifiable, Equatable {
         enum State: Equatable { case waiting, running, done(URL), failed(String), cancelled }
         let id = UUID()
@@ -64,21 +66,23 @@ final class ExportQueue {
         var job: ExportJob
         var state: State = .waiting
         var progress = 0.0
+        var encoderWaiting = false
         var started: Date?
         var isActive: Bool { state == .waiting || state == .running }
     }
 
     var items: [Item] = []
+    var encoderWaitMessage: String {
+        let app = NSApp?.delegate as? AppDelegate
+        let live = app.map { $0.state.recording || $0.state.streaming.isActive } ?? false
+        return live ? "Waiting for the video encoder — recording in progress" : "Waiting for the video encoder"
+    }
     @ObservationIgnored var onFinished: ((Item) -> Void)?
     @ObservationIgnored var onDrained: (() -> Void)?
     @ObservationIgnored private let makeRunner: (ExportJob) throws -> ExportRunning
     @ObservationIgnored private var current: (id: UUID, runner: ExportRunning)?
     @ObservationIgnored private var cancelRequested = Set<UUID>()
-    /// A cancelled job that has not returned after this long is resolved anyway, so the queue moves on and editing
-    /// unlocks even if an export never calls back (the exporter's own watchdog should make this unreachable).
-    @ObservationIgnored var cancelGrace: TimeInterval = 5
-
-    init(makeRunner: @escaping (ExportJob) throws -> ExportRunning) { self.makeRunner = makeRunner }
+    init(makeRunner: @escaping (ExportJob) throws -> ExportRunning) { self.makeRunner = makeRunner; Self.registry.add(self) }
 
     var isRunning: Bool { items.contains { $0.isActive } }
     var activeCount: Int { items.filter(\.isActive).count }
@@ -97,7 +101,7 @@ final class ExportQueue {
     func enqueue(_ jobs: [(title: String, job: ExportJob)]) -> Int {
         if !isRunning { items.removeAll() }
         var added = 0
-        for (title, job) in jobs where !items.contains(where: { $0.isActive && ExportPreset.fileKey($0.job) == ExportPreset.fileKey(job) }) {
+        for (title, job) in jobs where !items.contains(where: { $0.isActive && !cancelRequested.contains($0.id) && ExportPreset.fileKey($0.job) == ExportPreset.fileKey(job) }) {
             items.append(Item(title: title, job: job)); added += 1
         }
         startNext()
@@ -108,11 +112,7 @@ final class ExportQueue {
         guard let i = items.firstIndex(where: { $0.id == id }), items[i].isActive else { return }
         if items[i].state == .running, let c = current, c.id == id {
             cancelRequested.insert(id); c.runner.cancel()
-            DispatchQueue.main.asyncAfter(deadline: .now() + cancelGrace) { [weak self] in
-                guard let self = self, self.current?.id == id else { return }
-                log("export: \(self.items.first { $0.id == id }?.title ?? "job") did not stop within \(self.cancelGrace) s of cancel; abandoning it")
-                self.finish(id, .cancelled)
-            }
+
         }
         else { items[i].state = .cancelled; drainedIfIdle() }
     }
@@ -130,6 +130,14 @@ final class ExportQueue {
         let item = items[i]
         let runner: ExportRunning
         do { runner = try makeRunner(item.job) } catch { finish(item.id, .failed(error.localizedDescription)); return }
+        if let exporter = runner as? Exporter {
+            exporter.onEncoderWaiting = { [weak self] waiting in
+                DispatchQueue.main.async {
+                    guard let self, let i = self.items.firstIndex(where: { $0.id == item.id }) else { return }
+                    self.items[i].encoderWaiting = waiting
+                }
+            }
+        }
         current = (item.id, runner)
         items[i].state = .running; items[i].started = Date(); items[i].progress = 0
         let id = item.id

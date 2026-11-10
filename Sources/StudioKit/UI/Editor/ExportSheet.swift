@@ -171,7 +171,7 @@ struct ExportProgressCapsule: View {
                 HStack(spacing: 7) {
                     if running {
                         ProgressView(value: q.overallProgress).progressViewStyle(.circular).controlSize(.mini)
-                        Text(String(format: "Exporting %d of %d · %.0f%%", min(q.runningIndex, items.count), items.count, q.overallProgress * 100))
+                        Text(items.contains { $0.state == .running && $0.encoderWaiting } ? q.encoderWaitMessage : String(format: "Exporting %d of %d · %.0f%%", min(q.runningIndex, items.count), items.count, q.overallProgress * 100))
                             .font(.system(size: 12, weight: .medium).monospacedDigit())
                             .contentTransition(.numericText())
                     } else {
@@ -230,7 +230,7 @@ struct ExportQueueRow: View {
                 case .running:
                     ProgressView(value: item.progress).progressViewStyle(.linear).controlSize(.small)
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                        Text(remainingText(queue.remaining(item, now: ctx.date), item.progress)).font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
+                        Text(item.encoderWaiting ? queue.encoderWaitMessage : remainingText(queue.remaining(item, now: ctx.date), item.progress)).font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
                     }
                 case .done(let url):
                     HStack(spacing: 6) {

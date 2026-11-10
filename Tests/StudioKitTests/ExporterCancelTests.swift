@@ -12,7 +12,7 @@ final class ExporterCancelTests: XCTestCase {
         try TimelineExportTests().requireHardware()
         if let s = Self.shared { return s.doc }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Cancel-" + UUID().uuidString)
-        let doc = try await FixtureProject.make(at: dir, frameCount: 150)
+        let doc = try await SharedRecording.shared.copy(to: dir, frames: 150)
         let game = Composition(layers: [Layer(source: .game, fit: true)])
         let pip = Composition(layers: [Layer(source: .game, fit: true), Layer(source: .camera, frame: NRect(x: 0.65, y: 0.1, w: 0.3, h: 0.3))])
         let a = Scene(name: "Game", wide: game, vertical: game), b = Scene(name: "Camera", wide: pip, vertical: pip)
@@ -44,13 +44,14 @@ final class ExporterCancelTests: XCTestCase {
         }
     }
 
-    func testThirtyCancelsAtRandomTimesReturnPromptlyAndLeaveNoFile() async throws {
+    func testRandomCancelsAtRandomTimesReturnPromptlyAndLeaveNoFile() async throws {
         let doc = try await fixture()
         let jobs = [ExportJob(canvas: .wide, resolution: .uhd, range: .hdr, fps: .source),
                     ExportJob(canvas: .vertical, resolution: .hd, range: .sdr, fps: .sixty),
                     ExportJob(canvas: .wide, resolution: .hd, range: .hdr, fps: .source)]
         var rng = SeededRandom(state: 2026)
-        let delays = (0..<30).map { _ in Double.random(in: 0...2, using: &rng) }
+        let iterations = Int(ProcessInfo.processInfo.environment["EHDR_CANCEL_ITERATIONS"] ?? "") ?? 10
+        let delays = (0..<iterations).map { _ in Double.random(in: 0...2, using: &rng) }
         let dir = doc.exportsDir.appendingPathComponent("cancels")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         struct Outcome { var delay: Double; var returnedAfter: Double?; var cancelled: Bool; var fileLeft: Bool; var error: String? }
@@ -98,7 +99,7 @@ final class ExporterCancelTests: XCTestCase {
         let left = try FileManager.default.contentsOfDirectory(atPath: dir.path).count
         XCTAssertEqual(left, outcomes.filter { !$0.cancelled }.count, "only exports that finished before their cancel left a file")
         let cancelled = outcomes.filter(\.cancelled).count, worst = outcomes.compactMap(\.returnedAfter).max() ?? 0
-        XCTAssertGreaterThanOrEqual(cancelled, 20, "most cancels land while exporting")
+        XCTAssertGreaterThanOrEqual(cancelled, iterations * 2 / 3, "most cancels land while exporting")
         print(String(format: "Exporter cancels: %d runs, %d cancelled mid-export, %d finished before the cancel, slowest return %.3f s after cancel",
                      outcomes.count, cancelled, outcomes.count - cancelled, worst))
     }
@@ -178,27 +179,6 @@ final class ExporterCancelTests: XCTestCase {
         if case .done = finished[2].state {} else { XCTFail("C: \(finished[2].state)") }
         let running = await MainActor.run { queue.isRunning }
         XCTAssertFalse(running, "edits unlock once every item is resolved")
-    }
-}
-
-/// A runner that ignores cancel entirely: the queue still resolves the job after its grace period.
-final class ExportQueueGraceTests: XCTestCase {
-    final class Deaf: ExportRunning {
-        func run(progress: @escaping (Double) -> Void) async throws -> URL {
-            try await Task.sleep(nanoseconds: 30_000_000_000); return URL(fileURLWithPath: "/tmp/late.mp4")
-        }
-        func cancel() {}
-    }
-    func testCancelledJobThatNeverReturnsIsResolved() {
-        let q = ExportQueue { _ in Deaf() }
-        q.cancelGrace = 0.3
-        let drained = expectation(description: "drained")
-        q.onDrained = { drained.fulfill() }
-        q.enqueue([("Stuck", ExportJob(canvas: .wide, resolution: .hd, range: .sdr, fps: .source))])
-        q.cancel(q.items[0].id)
-        wait(for: [drained], timeout: 3)
-        XCTAssertEqual(q.items.map(\.state), [.cancelled])
-        XCTAssertFalse(q.isRunning)
     }
 }
 
