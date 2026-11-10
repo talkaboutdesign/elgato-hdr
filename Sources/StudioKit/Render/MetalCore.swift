@@ -1,6 +1,6 @@
-// One Metal compositor shared by the live view and by editing/export: draws the game layer and the facecam with
-// its shape, border and shadow into any canvas (16:9, 9:16, ...), in PQ, HLG or SDR output. The live view and the
-// exported video therefore match exactly.
+// One Metal compositor shared by the live view and by editing/export: draws an ordered list of layers (game, camera,
+// color, RGBA images), each with its crop, shape, border, shadow and opacity, into any canvas (16:9, 9:16, ...), in PQ,
+// HLG or SDR output. The live view and the exported video therefore match exactly.
 import AVFoundation
 import CoreVideo
 import Metal
@@ -13,17 +13,6 @@ vertex V vtx(uint id [[vertex_id]]) {
     float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };
     V o; o.pos = float4(p[id], 0, 1); o.uv = float2((p[id].x + 1) * 0.5, 1 - (p[id].y + 1) * 0.5); return o;
 }
-
-// Mirrors `CompParams` in Swift. Rects are x, y, w, h; destinations in canvas pixels, sources normalized.
-struct Comp {
-    float4 canvas;      // w, h, -, -
-    float4 screenDst, screenSrc, camDst, camSrc;
-    float4 shape;       // corner radius px, border px, shadow px, -
-    float4 bg;          // background, SDR BT.709 code values
-    int4 fmt;           // screen transfer (0 PQ, 1 HLG, 2 SDR), output transfer, screen bits, camera bits
-    int4 flags;         // screen visible, camera visible, mirror camera, -
-    int4 fmt2;          // camera transfer, screen uses BT.709 matrix, camera uses BT.709 matrix, -
-};
 
 constant float3x3 m709to2020 = float3x3(float3(0.6274, 0.0691, 0.0164), float3(0.3293, 0.9195, 0.0880), float3(0.0433, 0.0114, 0.8956));
 constant float3x3 m2020to709 = float3x3(float3(1.6605, -0.1246, -0.0182), float3(-0.5876, 1.1329, -0.1006), float3(-0.0728, -0.0083, 1.1187));
@@ -81,40 +70,50 @@ float sdRoundRect(float2 p, float2 c, float2 h, float r) {
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
 
-float3 composite(float2 p, texture2d<float> sY, texture2d<float> sC, texture2d<float> cY, texture2d<float> cC, constant Comp &u) {
-    int out = u.fmt.y;
-    float3 col = convert(u.bg.rgb, 2, out);
-    if (u.flags.x != 0) {
-        float2 t = (p - u.screenDst.xy) / u.screenDst.zw;
-        if (all(t >= 0.0) && all(t <= 1.0)) {
-            float3 e = yuvToRgb(sY, sC, u.screenSrc.xy + t * u.screenSrc.zw, u.fmt.z, u.fmt2.y != 0);
-            col = convert(e, u.fmt.x, out);
-        }
-    }
-    if (u.flags.y != 0) {
-        float2 h = u.camDst.zw * 0.5, c = u.camDst.xy + h;
-        float r = min(u.shape.x, min(h.x, h.y)), border = u.shape.y, shadow = u.shape.z;
-        if (shadow > 0.0) {
-            float ds = sdRoundRect(p - float2(0.0, shadow * 0.35), c, h, r);
-            float a = 0.45 * (1.0 - smoothstep(-shadow * 0.5, shadow, ds));
-            col = mix(col, float3(0.0), a);
-        }
-        float d = sdRoundRect(p, c, h, r);
-        float a = clamp(0.5 - d, 0.0, 1.0);
-        if (a > 0.0) {
-            float2 t = clamp((p - u.camDst.xy) / u.camDst.zw, 0.0, 1.0);
-            if (u.flags.z != 0) t.x = 1.0 - t.x;
-            float3 cc = convert(yuvToRgb(cY, cC, u.camSrc.xy + t * u.camSrc.zw, u.fmt.w, u.fmt2.z != 0), u.fmt2.x, out);
-            if (border > 0.0) cc = mix(convert(float3(1.0), 2, out), cc, clamp(-(d + border) + 0.5, 0.0, 1.0));
-            col = mix(col, cc, a);
-        }
-    }
-    return col;
-}
+// Mirrors `LayerParams` in Swift. One layer: its source, shape and shadow, drawn source-over onto what lies below.
+struct LayerU {
+    float4 canvas;      // w, h, -, -
+    float4 dst, src;    // destination in canvas pixels, normalized source crop (x, y, w, h)
+    float4 shape;       // corner radius px, border px, shadow px, opacity
+    float4 color;       // color layers: SDR BT.709 code values and alpha
+    int4 fmt;           // kind (0 biplanar YCbCr, 1 premultiplied RGBA, 2 color), source transfer, output transfer, bits
+    int4 flags;         // source uses BT.709 matrix, mirror, hard edge, -
+};
 
-fragment float4 compositeFrag(V in [[stage_in]], texture2d<float> sY [[texture(0)]], texture2d<float> sC [[texture(1)]],
-                              texture2d<float> cY [[texture(2)]], texture2d<float> cC [[texture(3)]], constant Comp &u [[buffer(0)]]) {
-    return float4(composite(in.uv * u.canvas.xy, sY, sC, cY, cC, u), 1.0);
+// Returns non-premultiplied colour and alpha for source-over blending. With coverage a and shadow s the result over
+// the destination is cc·a + dst·(1 − a)(1 − s), which is the two-step mix(mix(dst, 0, s), cc, a) of the former
+// fixed game-plus-camera shader; that identity is why the layer path reproduces its output (and its goldens).
+fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]], texture2d<float> tC [[texture(1)]], constant LayerU &u [[buffer(0)]]) {
+    float2 p = in.uv * u.canvas.xy;
+    int out = u.fmt.z;
+    float2 h = u.dst.zw * 0.5, c = u.dst.xy + h;
+    float r = min(u.shape.x, min(h.x, h.y)), border = u.shape.y, shadow = u.shape.z, opacity = u.shape.w;
+    float d = sdRoundRect(p, c, h, r);
+    // Hard edge: the former shader's inclusive clip of the game to its rectangle, so no row is half covered.
+    float2 e = (p - u.dst.xy) / u.dst.zw;
+    float a = (u.flags.z != 0 ? (all(e >= 0.0) && all(e <= 1.0) ? 1.0 : 0.0) : clamp(0.5 - d, 0.0, 1.0)) * opacity;
+    float s = 0.0;
+    if (shadow > 0.0) s = 0.45 * (1.0 - smoothstep(-shadow * 0.5, shadow, sdRoundRect(p - float2(0.0, shadow * 0.35), c, h, r))) * opacity;
+    float3 cc = float3(0.0);
+    if (a > 0.0) {
+        if (u.fmt.x == 2) {
+            cc = convert(u.color.rgb, 2, out); a *= u.color.a;
+        } else {
+            float2 t = clamp((p - u.dst.xy) / u.dst.zw, 0.0, 1.0);
+            if (u.flags.y != 0) t.x = 1.0 - t.x;
+            float2 uv = u.src.xy + t * u.src.zw;
+            if (u.fmt.x == 1) {
+                constexpr sampler ls(filter::linear, address::clamp_to_edge);
+                float4 px = tY.sample(ls, uv);
+                cc = convert(px.a > 0.0 ? clamp(px.rgb / px.a, 0.0, 1.0) : float3(0.0), 2, out); a *= px.a;
+            } else {
+                cc = convert(yuvToRgb(tY, tC, uv, u.fmt.w, u.flags.x != 0), u.fmt.y, out);
+            }
+        }
+        if (border > 0.0) cc = mix(convert(float3(1.0), 2, out), cc, clamp(-(d + border) + 0.5, 0.0, 1.0));
+    }
+    float A = a + s - a * s;
+    return A > 0.0 ? float4(cc * (a / A), A) : float4(0.0);
 }
 
 // RGB (output encoding) -> 10-bit video-range BT.2020 YCbCr planes, MSB-aligned in 16 bits (P010 layout).
@@ -133,37 +132,41 @@ fragment float2 chromaFrag(V in [[stage_in]], texture2d<float> rgb [[texture(0)]
 }
 """
 
-/// Uniforms for `composite`; layout matches the Metal `Comp` struct.
-struct CompParams {
+/// Uniforms for `layerFrag`; layout matches the Metal `LayerU` struct.
+struct LayerParams {
     var canvas = SIMD4<Float>(1, 1, 0, 0)
-    var screenDst = SIMD4<Float>(0, 0, 1, 1), screenSrc = SIMD4<Float>(0, 0, 1, 1)
-    var camDst = SIMD4<Float>(0, 0, 0, 0), camSrc = SIMD4<Float>(0, 0, 1, 1)
-    var shape = SIMD4<Float>(0, 0, 0, 0)
-    var bg = SIMD4<Float>(0, 0, 0, 1)
-    var fmt = SIMD4<Int32>(0, 0, 10, 8)
-    var flags = SIMD4<Int32>(1, 0, 0, 0)
-    var fmt2 = SIMD4<Int32>(2, 0, 1, 0)
+    var dst = SIMD4<Float>(0, 0, 1, 1), src = SIMD4<Float>(0, 0, 1, 1)
+    var shape = SIMD4<Float>(0, 0, 0, 1)
+    var color = SIMD4<Float>(0, 0, 0, 1)
+    var fmt = SIMD4<Int32>(2, 2, 2, 8)
+    var flags = SIMD4<Int32>(0, 0, 0, 0)
+}
 
-    /// Decode each layer the way its frames are actually tagged. AVFoundation may hand the compositor a layer
-    /// already converted into another layer's colour space (e.g. the SDR camera into the game's PQ), so the tags on
-    /// the buffer, not the source file, are what count.
-    mutating func adopt(screen pb: CVPixelBuffer) {
-        if let t = transfer(of: pb) { fmt.x = t }
-        fmt2.y = matrixIs709(pb) ?? (fmt.x == 2) ? 1 : 0
+struct LayerTextures {
+    enum Kind {
+        case biplanar(y: MTLTexture, c: MTLTexture, bits: Int32, transfer: Int32, bt709: Bool)
+        case rgba(MTLTexture)       // sRGB-encoded, premultiplied alpha
+        case none                   // color layers
     }
-    mutating func adopt(camera pb: CVPixelBuffer) {
-        fmt2.x = transfer(of: pb) ?? 2
-        fmt2.z = matrixIs709(pb) ?? (fmt2.x == 2) ? 1 : 0
+}
+struct DrawLayer {
+    var resolved: ResolvedLayer
+    var textures: LayerTextures.Kind
+
+    /// Pairs resolved layers with their sources' textures. Color layers need none; a layer whose texture is missing
+    /// is dropped.
+    static func pair(_ resolved: [ResolvedLayer], _ textures: [SourceKey: LayerTextures.Kind]) -> [DrawLayer] {
+        resolved.compactMap { r in r.color != nil ? DrawLayer(resolved: r, textures: .none) : textures[r.key].map { DrawLayer(resolved: r, textures: $0) } }
     }
-    private func transfer(of pb: CVPixelBuffer) -> Int32? {
-        guard let v = CVBufferCopyAttachment(pb, kCVImageBufferTransferFunctionKey, nil) as? String else { return nil }
-        if v == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String { return 0 }
-        if v == kCVImageBufferTransferFunction_ITU_R_2100_HLG as String { return 1 }
-        return 2
-    }
-    private func matrixIs709(_ pb: CVPixelBuffer) -> Bool? {
-        guard let v = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, nil) as? String else { return nil }
-        return v != kCVImageBufferYCbCrMatrix_ITU_R_2020 as String
+
+    /// Fully opaque over all of `rect`.
+    func covers(_ rect: CGRect) -> Bool {
+        guard resolved.opacity >= 1, resolved.radius == 0, resolved.dst.contains(rect) else { return false }
+        switch textures {
+        case .biplanar: return true
+        case .rgba: return false
+        case .none: return (resolved.color?.w ?? 0) >= 1
+        }
     }
 }
 
@@ -184,7 +187,7 @@ final class MetalCore {
     let textureCache: CVMetalTextureCache
     private var pipelines: [String: MTLRenderPipelineState] = [:]
     private let lock = NSLock()
-    /// Bound when a layer is absent so the shader always sees valid textures.
+    /// Bound to the texture slots a layer does not use so the shader always sees valid textures.
     let blank8: MTLTexture
     let blank8c: MTLTexture
 
@@ -200,13 +203,19 @@ final class MetalCore {
         blank8c = device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg8Unorm, width: 1, height: 1, mipmapped: false))!
     }
 
-    func pipeline(_ fragment: String, _ format: MTLPixelFormat) -> MTLRenderPipelineState {
-        let key = "\(fragment)/\(format.rawValue)"
+    /// `blend`: source-over for non-premultiplied output, as `layerFrag` writes it.
+    func pipeline(_ fragment: String, _ format: MTLPixelFormat, blend: Bool = false) -> MTLRenderPipelineState {
+        let key = "\(fragment)/\(format.rawValue)/\(blend)"
         lock.lock(); defer { lock.unlock() }
         if let p = pipelines[key] { return p }
         let d = MTLRenderPipelineDescriptor()
         d.vertexFunction = library.makeFunction(name: "vtx"); d.fragmentFunction = library.makeFunction(name: fragment)
         d.colorAttachments[0].pixelFormat = format
+        if blend, let a = d.colorAttachments[0] {
+            a.isBlendingEnabled = true
+            a.sourceRGBBlendFactor = .sourceAlpha; a.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            a.sourceAlphaBlendFactor = .one; a.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        }
         let p = try! device.makeRenderPipelineState(descriptor: d)
         pipelines[key] = p
         return p
@@ -229,6 +238,19 @@ final class MetalCore {
         return (out[0], out[1], refs, tenBit ? 10 : 8)
     }
 
+    /// How a frame is actually tagged: transfer (0 PQ, 1 HLG, 2 SDR) and whether its matrix is BT.709. AVFoundation
+    /// may hand the compositor a layer already converted into another layer's colour space (e.g. the SDR camera into
+    /// the game's PQ), so the tags on the buffer, not the source file, are what count. Untagged buffers keep
+    /// `transfer` and the matrix that goes with it.
+    static func colorTags(_ pb: CVPixelBuffer, fallback transfer: Int32) -> (transfer: Int32, bt709: Bool) {
+        var t = transfer
+        if let v = CVBufferCopyAttachment(pb, kCVImageBufferTransferFunctionKey, nil) as? String {
+            t = v == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String ? 0 : v == kCVImageBufferTransferFunction_ITU_R_2100_HLG as String ? 1 : 2
+        }
+        let matrix = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, nil) as? String
+        return (t, matrix.map { $0 != kCVImageBufferYCbCrMatrix_ITU_R_2020 as String } ?? (t == 2))
+    }
+
     func texture(_ pb: CVPixelBuffer, _ format: MTLPixelFormat, plane: Int = 0) -> (MTLTexture, CVMetalTexture)? {
         var t: CVMetalTexture?
         let planar = CVPixelBufferIsPlanar(pb)
@@ -239,22 +261,67 @@ final class MetalCore {
         return (tex, ref)
     }
 
-    /// Encodes the composite into `target` as a full-screen pass.
-    func encodeComposite(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil, clear: Bool = true,
-                         screen: (MTLTexture, MTLTexture)?, camera: (MTLTexture, MTLTexture)?, params: CompParams) {
+    /// Draws the background, then each layer bottom first, into `target` in one render pass, in the output encoding
+    /// `outTransfer`. `viewport` places the canvas inside the target (the live view letterboxes it). Every layer is a
+    /// full-viewport quad scissored to its frame plus shadow, so small layers on large canvases stay cheap.
+    func encodeLayers(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil,
+                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, layers: [DrawLayer]) {
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = target
-        rp.colorAttachments[0].loadAction = clear ? .clear : .load; rp.colorAttachments[0].storeAction = .store
+        rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
+        // Alpha 1: blending keeps it there, and the HDR export's intermediate must stay opaque.
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
-        if let v = viewport { enc.setViewport(v) }
-        enc.setRenderPipelineState(pipeline("compositeFrag", target.pixelFormat))
-        enc.setFragmentTexture(screen?.0 ?? blank8, index: 0); enc.setFragmentTexture(screen?.1 ?? blank8c, index: 1)
-        enc.setFragmentTexture(camera?.0 ?? blank8, index: 2); enc.setFragmentTexture(camera?.1 ?? blank8c, index: 3)
-        var p = params
-        enc.setFragmentBytes(&p, length: MemoryLayout<CompParams>.stride, index: 0)
-        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-        enc.endEncoding()
+        defer { enc.endEncoding() }
+        guard canvas.width > 0, canvas.height > 0 else { return }
+        let vp = viewport ?? MTLViewport(originX: 0, originY: 0, width: Double(target.width), height: Double(target.height), znear: 0, zfar: 1)
+        enc.setViewport(vp)
+        let blended = pipeline("layerFrag", target.pixelFormat, blend: true)
+        enc.setRenderPipelineState(blended)
+        let sx = vp.width / canvas.width, sy = vp.height / canvas.height
+        func draw(_ u: LayerParams, area: CGRect, _ t0: MTLTexture, _ t1: MTLTexture) {
+            func px(_ v: Double, _ limit: Int) -> Int { Int(min(max(v, 0), Double(limit))) }
+            let x0 = px((vp.originX + area.minX * sx).rounded(.down), target.width), x1 = px((vp.originX + area.maxX * sx).rounded(.up), target.width)
+            let y0 = px((vp.originY + area.minY * sy).rounded(.down), target.height), y1 = px((vp.originY + area.maxY * sy).rounded(.up), target.height)
+            guard x1 > x0, y1 > y0 else { return }
+            enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+            var u = u
+            enc.setFragmentBytes(&u, length: MemoryLayout<LayerParams>.stride, index: 0)
+            enc.setFragmentTexture(t0, index: 0); enc.setFragmentTexture(t1, index: 1)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        let full = CGRect(origin: .zero, size: canvas)
+        var base = LayerParams()
+        base.canvas = SIMD4(Float(canvas.width), Float(canvas.height), 0, 0)
+        base.fmt.z = outTransfer
+        // Nothing beneath an opaque layer that covers the canvas can show, so start there (the live game usually
+        // does), and draw it without blending. Exact when canvas pixels are target pixels: every pixel centre then
+        // sits half a pixel inside the canvas, where such a layer's coverage and alpha are 1.
+        let aligned = vp.originX == vp.originX.rounded() && vp.originY == vp.originY.rounded() && vp.width == canvas.width && vp.height == canvas.height
+        let cover = aligned ? layers.lastIndex { $0.covers(full) } : nil
+        if cover == nil {
+            var bg = base
+            bg.dst = SIMD4(full); bg.color = background; bg.fmt.x = 2
+            draw(bg, area: full, blank8, blank8c)
+        }
+        let opaque = cover.map { _ in pipeline("layerFrag", target.pixelFormat) }
+        for (i, l) in layers.enumerated() where i >= cover ?? 0 {
+            if let o = opaque { enc.setRenderPipelineState(i == cover ? o : blended) }
+            let r = l.resolved
+            var u = base, t0 = blank8, t1 = blank8c
+            u.dst = SIMD4(r.dst); u.src = SIMD4(r.src)
+            u.shape = SIMD4(Float(r.radius), Float(r.border), Float(r.shadow), Float(r.opacity))
+            u.flags.y = r.mirror ? 1 : 0; u.flags.z = r.hardEdge ? 1 : 0
+            switch l.textures {
+            case let .biplanar(y, c, bits, transfer, bt709):
+                u.fmt.x = 0; u.fmt.y = transfer; u.fmt.w = bits; u.flags.x = bt709 ? 1 : 0; t0 = y; t1 = c
+            case let .rgba(t): u.fmt.x = 1; t0 = t
+            case .none: u.fmt.x = 2; u.color = r.color ?? SIMD4(0, 0, 0, 0)
+            }
+            // Half a pixel of edge coverage, plus the shadow: it reaches `shadow` past the frame and 0.35·shadow lower.
+            let grow = r.shadow * 1.35 + 1
+            draw(u, area: r.dst.insetBy(dx: -grow, dy: -grow), t0, t1)
+        }
     }
 
     func encodeConvert(_ cb: MTLCommandBuffer, fragment: String, source: MTLTexture, target: MTLTexture) {

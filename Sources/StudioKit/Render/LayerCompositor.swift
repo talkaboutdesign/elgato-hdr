@@ -12,12 +12,19 @@ final class CompositionInstruction: NSObject, AVVideoCompositionInstructionProto
     let passthroughTrackID = kCMPersistentTrackID_Invalid
     let screenTrack: CMPersistentTrackID
     let cameraTrack: CMPersistentTrackID
-    let params: CompParams
+    let composition: Composition
+    let canvas: CGSize
+    let outTransfer: Int32
+    let screenTransfer: Int32       // assumed for game frames that carry no transfer tag
+    let screenSize: CGSize          // the tracks' natural sizes: what the layout is resolved against
+    let cameraSize: CGSize?
     let hdrOutput: Bool
 
-    init(timeRange: CMTimeRange, screenTrack: CMPersistentTrackID, cameraTrack: CMPersistentTrackID, params: CompParams, hdrOutput: Bool) {
+    init(timeRange: CMTimeRange, screenTrack: CMPersistentTrackID, cameraTrack: CMPersistentTrackID, composition: Composition, canvas: CGSize,
+         outTransfer: Int32, screenTransfer: Int32, screenSize: CGSize, cameraSize: CGSize?) {
         self.timeRange = timeRange; self.screenTrack = screenTrack; self.cameraTrack = cameraTrack
-        self.params = params; self.hdrOutput = hdrOutput
+        self.composition = composition; self.canvas = canvas; self.outTransfer = outTransfer; self.screenTransfer = screenTransfer
+        self.screenSize = screenSize; self.cameraSize = cameraSize; hdrOutput = outTransfer != 2
         requiredSourceTrackIDs = [screenTrack, cameraTrack].filter { $0 != kCMPersistentTrackID_Invalid }.map { NSNumber(value: $0) }
     }
 }
@@ -50,15 +57,14 @@ class LayerCompositor: NSObject, AVVideoCompositing {
             }
             let core = MetalCore.shared
             var keep: [CVMetalTexture] = []
-            var params = ins.params
-            var screen: (MTLTexture, MTLTexture)?
-            if ins.screenTrack != kCMPersistentTrackID_Invalid, let pb = request.sourceFrame(byTrackID: ins.screenTrack), let p = core.planes(pb) {
-                screen = (p.0, p.1); keep += p.2; params.fmt.z = p.3; params.adopt(screen: pb)
-            } else { params.flags.x = 0 }
-            var camera: (MTLTexture, MTLTexture)?
-            if ins.cameraTrack != kCMPersistentTrackID_Invalid, let pb = request.sourceFrame(byTrackID: ins.cameraTrack), let p = core.planes(pb) {
-                camera = (p.0, p.1); keep += p.2; params.fmt.w = p.3; params.adopt(camera: pb)
-            } else { params.flags.y = 0 }
+            var sources: [SourceKey: SourceInfo] = [:], textures: [SourceKey: LayerTextures.Kind] = [:]
+            for (key, track, size, fallback) in [(SourceKey.game, ins.screenTrack, Optional(ins.screenSize), ins.screenTransfer), (.camera, ins.cameraTrack, ins.cameraSize, 2)] {
+                guard track != kCMPersistentTrackID_Invalid, let size = size, let pb = request.sourceFrame(byTrackID: track), let p = core.planes(pb) else { continue }
+                let tags = MetalCore.colorTags(pb, fallback: fallback)
+                keep += p.2; sources[key] = SourceInfo(size: size)
+                textures[key] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: tags.transfer, bt709: tags.bt709)
+            }
+            let layers = DrawLayer.pair(SceneResolver.resolve(ins.composition, canvas: ins.canvas, sources: sources), textures)
             guard let cb = core.queue.makeCommandBuffer() else { request.finish(with: NSError(domain: "Compositor", code: 2)); return }
             let w = CVPixelBufferGetWidth(out), h = CVPixelBufferGetHeight(out)
             if Self.hdr {
@@ -71,14 +77,14 @@ class LayerCompositor: NSObject, AVVideoCompositing {
                     request.finish(with: NSError(domain: "Compositor", code: 3)); return
                 }
                 keep += [yRef, cRef]
-                core.encodeComposite(cb, target: mid, screen: screen, camera: camera, params: params)
+                core.encodeLayers(cb, target: mid, canvas: ins.canvas, background: ins.composition.backgroundColor, outTransfer: ins.outTransfer, layers: layers)
                 core.encodeConvert(cb, fragment: "lumaFrag", source: mid, target: yT)
                 core.encodeConvert(cb, fragment: "chromaFrag", source: mid, target: cT)
-                tag(out, hdrTransfer: params.fmt.y)
+                tag(out, hdrTransfer: ins.outTransfer)
             } else {
                 guard let (t, ref) = core.texture(out, .bgra8Unorm) else { request.finish(with: NSError(domain: "Compositor", code: 3)); return }
                 keep.append(ref)
-                core.encodeComposite(cb, target: t, screen: screen, camera: camera, params: params)
+                core.encodeLayers(cb, target: t, canvas: ins.canvas, background: ins.composition.backgroundColor, outTransfer: ins.outTransfer, layers: layers)
                 tag(out, hdrTransfer: nil)
             }
             cb.addCompletedHandler { _ in
