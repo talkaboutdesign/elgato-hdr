@@ -221,7 +221,7 @@ final class Exporter {
         for p in pumps { try await await_(p.done) }
 
         let finished = Once<Bool>()
-        try await step {
+        try await step(blocking: true) {
             if reader.status == .failed { throw reader.error ?? CompositionBuilder.err("cannot read layers") }
             self.phase = .finishing
             self.activity.touch()
