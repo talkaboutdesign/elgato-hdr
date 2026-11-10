@@ -557,6 +557,8 @@ extension AppDelegate {
         let rt = sceneRuntime
         guard let doc = recDoc, var l = rt.eventLog else { return }
         let e = make(l)
+        // A scene added after the start is stored when it is first switched to, so every event's scene exists.
+        if let id = e.sceneID, !doc.project.scenes.contains(where: { $0.id == id }), let sc = scenes.collection[id] { doc.project.scenes.append(sc) }
         doc.project.events.append(e)
         log("event: \(e.type) at \(String(format: "%.1f", e.tMs)) ms")
         let now = nowNs(), wait = l.saveDelay(atNs: now)
