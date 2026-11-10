@@ -100,12 +100,14 @@ extension AppDelegate {
             recorder = r; s.recorder = r; recStart = Date()
             recordItem.title = "Stop Recording"
             var ticks = 0
-            recTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
                 self.setTitle(self.lastInfo)
                 ticks += 1
                 if ticks % 5 == 0 { self.checkDiskWhileRecording() }
             }
+            RunLoop.main.add(t, forMode: .common)   // the timer keeps counting during window resizes and menu tracking
+            recTimer = t
             setTitle(lastInfo)
         } catch { setTitle("record failed: \(error.localizedDescription)"); log("record failed: \(error)") }
     }
@@ -128,12 +130,13 @@ extension AppDelegate {
         if let cw = cw { group.enter(); cw.finish { ok in camOK = ok; group.leave() } }
         if let mw = mw { group.enter(); mw.finish { ok in micOK = ok; group.leave() } }
         group.notify(queue: .main) {
-            AppDelegate.activeRecordingDir = nil
             guard let doc = doc else { done(msg); return }
             if !camOK { doc.project.camera = nil }
             if !micOK { doc.project.mic = nil }
             let layers = ["game"] + (doc.project.camera != nil ? ["camera"] : []) + (doc.project.mic != nil ? ["mic"] : [])
             doc.finalize {
+                // Only this folder: another recording may have started while this one was finishing.
+                AppDelegate.recordingFinalized(doc.dir)
                 Library.shared.reload()
                 done("saved \(doc.project.name) [\(layers.joined(separator: " + "))]")
             }

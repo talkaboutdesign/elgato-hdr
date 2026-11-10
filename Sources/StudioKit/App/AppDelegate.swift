@@ -42,8 +42,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }()
     var recDoc: ProjectDoc?
     var camWriter: LayerWriter?, micWriter: LayerWriter?
-    static var activeRecordingDir: URL?
-    static func isRecording(_ dir: URL) -> Bool { activeRecordingDir == dir }
+    /// Folder of the recording in progress. Setting it registers the folder in `recordingDirs`, where it stays until
+    /// `recordingFinalized`: a new recording can start while the previous one's writers are still finishing.
+    static var activeRecordingDir: URL? { didSet { if let d = activeRecordingDir { recordingDirs.insert(recordingKey(d)) } } }
+    /// Folders recording or still finalizing, which library recovery must leave alone. Keyed by path: folder URLs
+    /// listed from disk carry a trailing slash, the one `newProjectDir` returns does not. Main thread only.
+    static var recordingDirs = Set<String>()
+    static func recordingKey(_ dir: URL) -> String { dir.standardizedFileURL.path }
+    static func isRecording(_ dir: URL) -> Bool { recordingDirs.contains(recordingKey(dir)) }
+    static func recordingFinalized(_ dir: URL) {
+        recordingDirs.remove(recordingKey(dir))
+        if let d = activeRecordingDir, recordingKey(d) == recordingKey(dir) { activeRecordingDir = nil }
+    }
     var libraryWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ n: Notification) {
