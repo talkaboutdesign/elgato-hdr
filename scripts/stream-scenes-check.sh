@@ -1,8 +1,8 @@
 #!/bin/bash
 # Verification only: streams the demo source to two local listeners (16:9 and 9:16) while --scene-script switches
 # scenes and the live zoom, then pulls frames from both received files before, during and after each scripted action
-# and checks changes and intentional no-ops against static colour fixtures. Usage:
-#   scripts/stream-scenes-check.sh                      # default scenes, two switches and one marker (no visual change)
+# and checks scene layouts and punch-in changes. Usage:
+#   scripts/stream-scenes-check.sh                      # game and camera scenes, two switches and a punch-in
 #   CHECK_SCENES=my-scenes.json CHECK_SCRIPT="9:scene=Overlays" CHECK_PROBES="10,11,12,13" scripts/stream-scenes-check.sh
 # CHECK_SCENES is copied, never written. CHECK_ASSETS is the overlay asset folder (default: an empty one in the
 # output folder). CHECK_PROBES are extra stream times (seconds) to extract frames at. CHECK_RECORD=<seconds> also
@@ -17,7 +17,7 @@ ffprobe=/opt/homebrew/bin/ffprobe
 out="${CHECK_DIR:-$(mktemp -d /tmp/ehdr-scenes.XXXXXX)}"
 mkdir -p "$out/frames"
 wide_port="${CHECK_WIDE_PORT:-26351}" tall_port="${CHECK_TALL_PORT:-26352}"
-script="${CHECK_SCRIPT:-8:next,12:marker,16:next}"
+script="${CHECK_SCRIPT:-8:next,12:punch,16:next}"
 live_for="${CHECK_LIVE_FOR:-25}"
 PYTHONPATH=scripts python3 -c 'import sys; from stream_checks import expected_actions; expected_actions(sys.argv[1])' "$script"
 extra=()
@@ -37,7 +37,9 @@ if [[ -n "${CHECK_SCENES:-}" ]]; then cp "$CHECK_SCENES" "$scenes"; else
 import json, sys, uuid
 scenes = []
 for name, color in [('Red', [1,0,0,1]), ('Blue', [0,0,1,1]), ('Green', [0,1,0,1])]:
-    comp = {'layers': [{'id': str(uuid.uuid4()), 'source': {'type': 'color', 'color': color}}]}
+    comp = {'background': color, 'layers': [
+        {'id': str(uuid.uuid4()), 'source': {'type': 'game'}, 'frame': {'x': 0.05, 'y': 0.05, 'w': 0.8 if name != 'Blue' else 0.6, 'h': 0.8}},
+        {'id': str(uuid.uuid4()), 'source': {'type': 'camera'}, 'frame': {'x': 0.65, 'y': 0.65, 'w': 0.3, 'h': 0.3}}]}
     scenes.append({'id': str(uuid.uuid4()), 'name': name, 'wide': comp, 'vertical': comp})
 json.dump({'scenes': scenes, 'activeID': scenes[0]['id'], 'transition': {'style': 'fade', 'durationMs': 380}}, open(sys.argv[1], 'w'))
 FIXTURE

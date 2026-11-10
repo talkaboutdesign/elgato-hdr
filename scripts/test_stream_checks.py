@@ -7,6 +7,10 @@ class StreamChecksTests(unittest.TestCase):
         for gap in [1.9 / 60, 2 / 60]:
             with self.assertRaises(AssertionError): check_timing([0, 1, 1 + gap + 1e-10], 60)
         with self.assertRaises(AssertionError): check_timing([0, 1, 1.017], 59.49)
+    def test_half_rate_timing_uses_lane_rate(self):
+        check_timing([0, 1, 1.034, 1.067], 30, fps=30)
+        with self.assertRaises(AssertionError): check_timing([0, 1, 1.067], 30, fps=30)
+        with self.assertRaises(AssertionError): check_timing([0, 1, 1.034, 1.067], 30, fps=60)
     def test_all_drop_counters(self):
         base = 'dropped render=0 encoder=0 queueRejected=0 inFlightRejected=0'
         check_drops(base)

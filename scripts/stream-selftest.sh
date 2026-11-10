@@ -69,9 +69,9 @@ assert v['codec_name']=='h264' and (v['width'],v['height'])==((1920,1080) if can
 pts=[float(f['best_effort_timestamp_time']) for f in json.loads((p/'pts.json').read_text())['frames']]
 sys.path.insert(0, 'scripts')
 from stream_checks import check_timing, check_drops
-check_timing(pts, actual)
+check_timing(pts, actual, fps=round(fps))
 check_drops((p/'app.log').read_text())
-assert abs(actual-60)<=0.5 and abs(fps-60)<2 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
+assert abs(actual-round(fps))<=0.5 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
 assert abs(duration-20)<1
 # The bottom strip also encodes a binary counter; identify the periodic flash from video alone.
 frames=[]; time=None
