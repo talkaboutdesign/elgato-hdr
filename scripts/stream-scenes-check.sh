@@ -6,7 +6,8 @@
 #   CHECK_SCENES=my-scenes.json CHECK_SCRIPT="9:scene=Overlays" CHECK_PROBES="10,11,12,13" scripts/stream-scenes-check.sh
 # CHECK_SCENES is copied, never written. CHECK_ASSETS is the overlay asset folder (default: an empty one in the
 # output folder). CHECK_PROBES are extra stream times (seconds) to extract frames at. CHECK_RECORD=<seconds> also
-# records during the stream. Ports default to 23935 (wide) and 23936 (vertical).
+# records during the stream (from 4 s after launch). CHECK_LIVE_FOR is the stream length (default 25 s). Ports
+# default to 23935 (wide) and 23936 (vertical).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ffmpeg=/opt/homebrew/bin/ffmpeg
@@ -15,12 +16,13 @@ out="${CHECK_DIR:-$(mktemp -d /tmp/ehdr-scenes.XXXXXX)}"
 mkdir -p "$out/frames"
 wide_port="${CHECK_WIDE_PORT:-23935}" tall_port="${CHECK_TALL_PORT:-23936}"
 script="${CHECK_SCRIPT:-8:next,12:punch,16:next}"
+live_for="${CHECK_LIVE_FOR:-25}"
 pids=()
 cleanup() { for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 if [[ "${CHECK_SKIP_BUILD:-0}" != 1 ]]; then ./build.sh > "$out/build.log" 2>&1; fi
 for port in "$wide_port" "$tall_port"; do
-    "$ffmpeg" -hide_banner -loglevel warning -y -listen 1 -i "rtmp://127.0.0.1:$port/live/test" -t 24 -c copy "$out/out-$port.flv" > "$out/listener-$port.log" 2>&1 &
+    "$ffmpeg" -hide_banner -loglevel warning -y -listen 1 -i "rtmp://127.0.0.1:$port/live/test" -t $((live_for - 1)) -c copy "$out/out-$port.flv" > "$out/listener-$port.log" 2>&1 &
     pids+=($!)
 done
 sleep 1
@@ -35,9 +37,9 @@ JSON
 EHDR_STREAM_KEY=test EHDR_STREAMING_FILE="$out/streaming.json" EHDR_SCENES_FILE="$scenes" \
     EHDR_ASSETS_DIR="${CHECK_ASSETS:-$out/Assets}" "dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" \
     --demo-source "${CHECK_SOURCE:-2560x1440@60}" --demo-camera -presentation game -recordingsDir "$out/recordings" \
-    ${CHECK_RECORD:+--record "$CHECK_RECORD"} --scene-script "$script" --go-live-for 25 > "$out/app.log" 2>&1 &
+    ${CHECK_RECORD:+--record "$CHECK_RECORD"} --scene-script "$script" --go-live-for "$live_for" > "$out/app.log" 2>&1 &
 app=$!; pids+=("$app")
-for ((i=0;i<50;i++)); do kill -0 "$app" 2>/dev/null || break; sleep 1; done
+for ((i=0;i<live_for+25;i++)); do kill -0 "$app" 2>/dev/null || break; sleep 1; done
 if kill -0 "$app" 2>/dev/null; then echo 'FAIL: app did not terminate'; exit 1; fi
 wait "$app" || true
 for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null || true; done
@@ -49,7 +51,7 @@ probes = [float(x) for x in sys.argv[4].split(',') if x]
 ffmpeg, ffprobe = '/opt/homebrew/bin/ffmpeg', '/opt/homebrew/bin/ffprobe'
 log = (out / 'app.log').read_text()
 base = {m[1]: int(m[2]) for m in re.finditer(r'RTMP 127\.0\.0\.1:(\d+): stream time 0 is host (\d+) ns', log)}
-actions = [(m[1], int(m[2])) for m in re.finditer(r'scene-script: (\S+) at host (\d+) ns', log)]
+actions = [(m[1], int(m[2])) for m in re.finditer(r'scene-script: (.+?) at host (\d+) ns', log)]
 print('actions:', ', '.join(a for a, _ in actions) or 'none')
 def frame(f, t, w, h):
     r = subprocess.run([ffmpeg, '-v', 'error', '-ss', f'{t:.3f}', '-i', str(f), '-frames:v', '1', '-vf', f'scale={w}:{h}',
@@ -70,7 +72,8 @@ for port, canvas in ports.items():
         t = (host - base[port]) / 1e9
         shots = {'before': t - 0.30, 'during-120ms': t + 0.12, 'during-200ms': t + 0.20, 'after': t + 0.90}
         raw = {k: frame(f, s, w, h) for k, s in shots.items()}
-        for k, s in shots.items(): png(f, s, f'{canvas}-{n + 1}-{name}-{k}.png')
+        slug = re.sub(r'[^A-Za-z0-9]+', '-', name).strip('-')
+        for k, s in shots.items(): png(f, s, f'{canvas}-{n + 1}-{slug}-{k}.png')
         d_total, d_mid = diff(raw['before'], raw['after']), diff(raw['before'], raw['during-200ms'])
         changed = d_total > 4 and d_mid > 1
         ok &= changed

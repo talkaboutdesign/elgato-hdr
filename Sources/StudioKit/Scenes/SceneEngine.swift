@@ -104,6 +104,8 @@ struct LiveSceneState {
     /// A picture frozen at a switch, in pixels of `reference` for each canvas.
     struct Snapshot: Equatable {
         var wide: SceneFrame, vertical: SceneFrame
+        /// The image and text layers in the frozen picture, so their textures can still be looked up.
+        var wideOverlays: [Layer] = [], verticalOverlays: [Layer] = []
         static func reference(_ c: Canvas) -> CGSize { c.size(.hd) }
 
         /// The frozen picture at `size`. A source that has lost its frames since the switch is left out, as the
@@ -147,9 +149,21 @@ struct LiveSceneState {
         next.from = to
         if isTransitioning(atNs: t) || (t < startNs && (from != nil || snapshot != nil)) {
             func flat(_ c: Canvas) -> SceneFrame { rawFrame(canvas: c, size: Snapshot.reference(c), sources: sources, atNs: t) }
-            next.snapshot = Snapshot(wide: flat(.wide), vertical: flat(.vertical))
+            next.snapshot = Snapshot(wide: flat(.wide), vertical: flat(.vertical),
+                                     wideOverlays: overlayLayers(canvas: .wide, atNs: t), verticalOverlays: overlayLayers(canvas: .vertical, atNs: t))
         }
         return next
+    }
+
+    /// The image and text layers that can be in the picture at `t`: the scene's own and, while a transition runs, those
+    /// of the picture it starts from. A layer id in both (a morph match) is the target's definition.
+    func overlayLayers(canvas: Canvas, atNs t: UInt64) -> [Layer] {
+        var out = to.composition(canvas).layers.filter(\.isOverlay)
+        guard progress(atNs: t) < 1 else { return out }
+        var seen = Set(out.map(\.id))
+        let frozen = canvas == .wide ? snapshot?.wideOverlays : snapshot?.verticalOverlays
+        for l in (from?.composition(canvas).layers ?? []) + (frozen ?? []) where l.isOverlay && seen.insert(l.id).inserted { out.append(l) }
+        return out
     }
 
     /// The picture at host time `t` for one canvas. `size` is the canvas in pixels; `sources` the pixel sizes of the

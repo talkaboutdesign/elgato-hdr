@@ -82,6 +82,7 @@ extension AppDelegate {
             proj.width = s.w; proj.height = s.h; proj.fps = fps; proj.colorMode = colorMode.rawValue
             proj.cameraMirror = cameraMirror
             beginSceneLog(&proj, startNs: startNs)
+            bundleOverlayAssets(proj.scenes, into: dir)
             if camera.cameraOn, let pb = camera.latest {
                 do {
                     camWriter = try LayerWriter(cameraURL: dir.appendingPathComponent("camera.mov"), width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb), startNs: startNs)

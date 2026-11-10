@@ -15,12 +15,19 @@ struct OverlayTokens: Equatable {
     /// `{time}`: local clock as HH:mm. `{timer}`: elapsed time as M:SS, or H:MM:SS from an hour on.
     func replace(_ s: String) -> String {
         guard Self.contains(s) else { return s }
-        var cal = Calendar(identifier: .gregorian); cal.timeZone = timeZone
-        let t = cal.dateComponents([.hour, .minute], from: now)
-        let e = max(0, Int((elapsed ?? 0).rounded(.down)))
-        let timer = e >= 3600 ? String(format: "%d:%02d:%02d", e / 3600, e / 60 % 60, e % 60) : String(format: "%d:%02d", e / 60, e % 60)
-        return s.replacingOccurrences(of: "{time}", with: String(format: "%02d:%02d", t.hour ?? 0, t.minute ?? 0))
-            .replacingOccurrences(of: "{timer}", with: timer)
+        // Render threads call this for every text layer on every frame: the calendar only when `{time}` is used.
+        var out = s
+        if out.contains("{timer}") {
+            let e = max(0, Int((elapsed ?? 0).rounded(.down)))
+            let timer = e >= 3600 ? String(format: "%d:%02d:%02d", e / 3600, e / 60 % 60, e % 60) : String(format: "%d:%02d", e / 60, e % 60)
+            out = out.replacingOccurrences(of: "{timer}", with: timer)
+        }
+        if out.contains("{time}") {
+            var cal = Calendar(identifier: .gregorian); cal.timeZone = timeZone
+            let t = cal.dateComponents([.hour, .minute], from: now)
+            out = out.replacingOccurrences(of: "{time}", with: String(format: "%02d:%02d", t.hour ?? 0, t.minute ?? 0))
+        }
+        return out
     }
 }
 

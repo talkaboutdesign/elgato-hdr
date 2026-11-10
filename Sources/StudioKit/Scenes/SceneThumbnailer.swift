@@ -20,7 +20,9 @@ final class SceneThumbnailer {
 
     /// `done` runs on the main thread with an image per scene id (SDR, BT.709).
     /// `hasGame`: the renderer has drawn game frames, so a pass without the snapshot would show none.
-    func render(scenes: [Scene], canvas: Canvas, hasGame: Bool, camera: CVPixelBuffer?, done: @escaping ([UUID: CGImage]) -> Void) {
+    /// `context`: overlays are drawn as the live picture draws them; one not rasterized yet appears in the next pass.
+    func render(scenes: [Scene], canvas: Canvas, hasGame: Bool, camera: CVPixelBuffer?, context: LiveOverlayContext = LiveOverlayContext(),
+                done: @escaping ([UUID: CGImage]) -> Void) {
         lock.lock()
         if busy { lock.unlock(); return }
         busy = true; lock.unlock()
@@ -28,13 +30,13 @@ final class SceneThumbnailer {
             let game = snapshot.beginRead()
             defer { if game != nil { snapshot.endRead() } }
             guard game != nil || !hasGame else { lock.lock(); busy = false; lock.unlock(); return }
-            let images = draw(scenes, canvas, game, camera)
+            let images = draw(scenes, canvas, game, camera, context)
             lock.lock(); busy = false; lock.unlock()
             DispatchQueue.main.async { done(images) }
         }
     }
 
-    private func draw(_ scenes: [Scene], _ canvas: Canvas, _ game: LiveGameFrame?, _ camera: CVPixelBuffer?) -> [UUID: CGImage] {
+    private func draw(_ scenes: [Scene], _ canvas: Canvas, _ game: LiveGameFrame?, _ camera: CVPixelBuffer?, _ context: LiveOverlayContext) -> [UUID: CGImage] {
         let core = MetalCore.shared
         guard let commands = commands, let cb = commands.makeCommandBuffer() else { return [:] }
         let size = canvas == .wide ? Self.size : CGSize(width: Self.size.height, height: Self.size.width)
@@ -56,10 +58,13 @@ final class SceneThumbnailer {
             sources[.camera] = SourceInfo(size: CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb)))
             textures[.camera] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: 2, bt709: true)
         }
+        let tokens = context.tokens(atNs: nowNs())
         for (i, s) in scenes.enumerated() {
             let comp = s.composition(canvas)
+            let o = OverlayTextureCache.shared.overlays(for: comp, canvas: size, assets: context.assets, tokens: tokens, consumer: .thumbnails)
+            let all = sources.merging(o.sources) { own, _ in own }
             core.encodeLayers(cb, target: targets[i], canvas: size, background: comp.backgroundColor, outTransfer: 2,
-                              layers: DrawLayer.pair(SceneResolver.resolve(comp, canvas: size, sources: sources), textures))
+                              layers: DrawLayer.pair(SceneResolver.resolve(comp, canvas: size, sources: all), textures.merging(o.textures) { own, _ in own }))
         }
         cb.commit(); cb.waitUntilCompleted()
         _ = keep

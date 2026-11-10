@@ -19,6 +19,8 @@ final class SceneRuntime {
     /// View › Show Clean Game Picture in Focus Mode (persisted, on by default).
     var cleanGameInFocus = WindowPicture.setting()
     var cleanGameItem: NSMenuItem?
+    /// `{timer}` origin and asset folders, copied into the renderer.
+    var overlayContext = LiveOverlayContext()
 }
 
 // Scenes: switching with transitions, editing the active scene, punch-in, the Scenes menu and the event log.
@@ -49,6 +51,7 @@ extension AppDelegate {
         startThumbnails()
         scheduleSceneTorture()
         scheduleSceneScript()
+        startOverlayClock()
         #if DEBUG
         startSceneDebug()
         #endif
@@ -102,6 +105,7 @@ extension AppDelegate {
         guard let r = renderer else { return }
         if r.gameSnapshot !== sceneRuntime.thumbnailer.snapshot { r.gameSnapshot = sceneRuntime.thumbnailer.snapshot }
         r.cleanGame = WindowPicture.clean(setting: sceneRuntime.cleanGameInFocus, focusMode: state.focusMode)
+        if r.overlayContext != sceneRuntime.overlayContext { r.overlayContext = sceneRuntime.overlayContext }
         r.scene = sceneRuntime.live
         r.viewCanvas = scenes.canvas
     }
@@ -131,7 +135,7 @@ extension AppDelegate {
         var tr = m.collection.transition
         if DS.Motion.reduceMotion && tr.style != .cut { tr = SceneTransition(style: .fade, durationMs: 150) }
         let t = nowNs()
-        rt.live = rt.live.switching(to: scene, atNs: t, transition: tr, sources: liveSources())
+        rt.live = rt.live.switching(to: scene, atNs: t, transition: tr, sources: switchSources())
         // Keep editing the same source if the new scene has it (the camera stays selected across scenes).
         let kind = m.selectedLayer?.source.type
         m.collection.activeID = id
@@ -582,7 +586,10 @@ extension AppDelegate {
         guard let doc = recDoc, var l = rt.eventLog else { return }
         let e = make(l)
         // A scene added after the start is stored when it is first switched to, so every event's scene exists.
-        if let id = e.sceneID, !doc.project.scenes.contains(where: { $0.id == id }), let sc = scenes.collection[id] { doc.project.scenes.append(sc) }
+        if let id = e.sceneID, !doc.project.scenes.contains(where: { $0.id == id }), let sc = scenes.collection[id] {
+            doc.project.scenes.append(sc)
+            bundleOverlayAssets([sc], into: doc.dir)
+        }
         doc.project.events.append(e)
         log("event: \(e.type) at \(String(format: "%.1f", e.tMs)) ms")
         let now = nowNs(), wait = l.saveDelay(atNs: now)
@@ -676,7 +683,7 @@ extension AppDelegate {
         if m.galleryOpen { list += m.templates.map(\.scene) }
         let canvas = m.canvas
         sceneRuntime.thumbnailer.render(scenes: list, canvas: canvas, hasGame: renderer?.latestGameFrame != nil,
-                                        camera: camera.cameraOn ? camera.latest : nil) { [weak self] images in
+                                        camera: camera.cameraOn ? camera.latest : nil, context: sceneRuntime.overlayContext) { [weak self] images in
             guard let self = self else { return }
             let th = self.scenes.thumbnails
             if th.canvas != canvas { th.canvas = canvas }

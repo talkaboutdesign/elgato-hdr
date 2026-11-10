@@ -13,6 +13,13 @@ struct LiveOverlay {
     var camera: CameraCapture?
 }
 
+/// Average and worst time of some per-frame work, in microseconds.
+struct CostMeter {
+    var totalNs: UInt64 = 0, maxNs: UInt64 = 0, n = 0
+    mutating func add(_ ns: UInt64) { totalNs += ns; maxNs = max(maxNs, ns); n += 1 }
+    var summary: String { n == 0 ? "– (0)" : String(format: "%.0f µs avg / %.0f max (%d)", Double(totalNs) / Double(n) / 1000, Double(maxNs) / 1000, n) }
+}
+
 struct LiveGameFrame { let y: MTLTexture, c: MTLTexture; let size: CGSize; let transfer: Int32 }
 
 final class Renderer: NSObject {
@@ -49,6 +56,9 @@ final class Renderer: NSObject {
     private var _lastGame: LiveGameFrame?
     private var _gameSnapshot: GameSnapshot?
     private var _cleanGame = false
+    private var _overlayContext = LiveOverlayContext()
+    /// `{timer}` origin and asset folders for the image and text layers.
+    var overlayContext: LiveOverlayContext { get { lock.lock(); defer { lock.unlock() }; return _overlayContext } set { lock.lock(); _overlayContext = newValue; lock.unlock() } }
     /// Focus mode with the clean game picture on: the window draws the whole game alone (`WindowPicture`).
     var cleanGame: Bool { get { lock.lock(); defer { lock.unlock() }; return _cleanGame } set { lock.lock(); _cleanGame = newValue; lock.unlock() } }
     /// Where drawn frames are copied for the scene thumbnails (twice a second; see `GameSnapshot`).
@@ -69,6 +79,8 @@ final class Renderer: NSObject {
     var hist = [Int](repeating: 0, count: 6)
     var arrHist = [Int](repeating: 0, count: 6)   // |arrival delta - period| in 4 ms buckets
     var lastTick = 0.0, tickGaps = 0
+    /// Reader-thread time spent on program outputs and on drawing the window (CPU side: scene, overlays, encoding).
+    var outputCost = CostMeter(), drawCost = CostMeter()
 
     init?(layer: CAMetalLayer, shm: UnsafeMutableRawPointer, demoSource: DemoSource? = nil) {
         let core = MetalCore.shared
@@ -152,8 +164,10 @@ final class Renderer: NSObject {
         guard let (sy, sc) = shmTextures(slot: slot, w: w, h: h) else { return }
         let outputs = programOutputs
         if !outputs.isEmpty {
-            let camera = overlay.camera?.latest
+            let begin = nowNs(), camera = overlay.camera?.latest
             for output in outputs { output.gameFrame(y: sy, c: sc, size: CGSize(width: w, height: h), colorMode: colorMode, camera: camera, hostNs: arrivalNs, isCurrent: isCurrent) }
+            let spent = nowNs() - begin
+            lock.lock(); outputCost.add(spent); lock.unlock()
         }
         let a = Double(arrivalNs) / 1e9
         if presentation == .immediate { drawNow(y: sy, c: sc, w: w, h: h, arrival: a); return }
@@ -219,7 +233,7 @@ final class Renderer: NSObject {
 
     @discardableResult
     func drawNow(y yT: MTLTexture, c cT: MTLTexture, w gw: Int, h gh: Int, arrival: Double, onPresented: (() -> Void)? = nil) -> Bool {
-        let live = drawState(y: yT, c: cT, w: gw, h: gh)
+        let begin = nowNs(), live = drawState(y: yT, c: cT, w: gw, h: gh)
         // After this frame's commands on the same queue, so the copy reads what was drawn; also when nothing could be
         // drawn (no drawable), so the thumbnails keep up while the window is hidden.
         defer { live.snapshot?.capture(y: yT, c: cT, transfer: colorMode.transfer, on: queue, atNs: nowNs()) }
@@ -237,9 +251,15 @@ final class Renderer: NSObject {
             textures[.camera] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: 2, bt709: true)
         }
         // The frame's capture time, as program outputs use it, so window and stream show the same transition frame.
-        // The letterbox fits the canvas (or, clean, the game), not the drawable.
-        let pic = WindowPicture.picture(clean: live.clean, scene: live.scene, canvas: live.canvas, game: CGSize(width: gw, height: gh),
-                                        drawable: CGSize(width: dw, height: dh), sources: sources, atNs: UInt64(max(0, arrival) * 1e9))
+        // The letterbox fits the canvas (or, clean, the game), not the drawable. Text is rasterized at the size the
+        // canvas has in the window, so it stays sharp when the window is bigger than the stream.
+        let t = UInt64(max(0, arrival) * 1e9), game = CGSize(width: gw, height: gh), target = CGSize(width: dw, height: dh)
+        if !live.clean {
+            let size = WindowPicture.size(clean: false, canvas: live.canvas, game: game, drawable: target)
+            let o = live.scene.overlays(canvas: live.canvas, size: size, atNs: t, context: live.context, consumer: .window)
+            sources.merge(o.sources) { own, _ in own }; textures.merge(o.textures) { own, _ in own }
+        }
+        let pic = WindowPicture.picture(clean: live.clean, scene: live.scene, canvas: live.canvas, game: game, drawable: target, sources: sources, atNs: t)
         let canvas = pic.size, frame = pic.frame, vw = Double(canvas.width), vh = Double(canvas.height)
         MetalCore.shared.encodeLayers(cb, target: drawable.texture,
                                       viewport: MTLViewport(originX: ((dw - vw) / 2).rounded(.down), originY: ((dh - vh) / 2).rounded(.down), width: vw, height: vh, znear: 0, zfar: 1),
@@ -258,14 +278,16 @@ final class Renderer: NSObject {
         }
         cb.present(drawable)
         cb.commit()
+        let spent = nowNs() - begin
+        lock.lock(); drawCost.add(spent); lock.unlock()
         return true
     }
 
     /// One lock for everything a frame reads; also remembers the frame for scene thumbnails.
-    private func drawState(y: MTLTexture, c: MTLTexture, w: Int, h: Int) -> (overlay: LiveOverlay, scene: LiveSceneState, canvas: Canvas, snapshot: GameSnapshot?, clean: Bool) {
+    private func drawState(y: MTLTexture, c: MTLTexture, w: Int, h: Int) -> (overlay: LiveOverlay, scene: LiveSceneState, canvas: Canvas, snapshot: GameSnapshot?, clean: Bool, context: LiveOverlayContext) {
         lock.lock(); defer { lock.unlock() }
         _lastGame = LiveGameFrame(y: y, c: c, size: CGSize(width: w, height: h), transfer: colorMode.transfer)
-        return (_overlay, _scene, _viewCanvas, _gameSnapshot, _cleanGame)
+        return (_overlay, _scene, _viewCanvas, _gameSnapshot, _cleanGame, _overlayContext)
     }
 
     /// The live scene's picture for any canvas at host time `atNs`. Program outputs (plan 20) call this from their own
@@ -276,9 +298,11 @@ final class Renderer: NSObject {
         scene.frame(canvas: canvas, size: size, sources: sources, atNs: atNs)
     }
 
-    /// `sceneFrame` in the shape a program output draws. Every stream lane renders through this.
+    /// `sceneFrame` plus the scene's image and text layers, as a program output draws it. Every stream lane renders
+    /// through this, at its own size; overlay textures that are not ready yet are left out of this frame.
     func livePicture(canvas: Canvas, size: CGSize, sources: [SourceKey: SourceInfo], atNs: UInt64) -> LivePicture {
-        LivePicture(frame: sceneFrame(canvas: canvas, size: size, sources: sources, atNs: atNs))
+        lock.lock(); let scene = _scene, context = _overlayContext; lock.unlock()
+        return scene.picture(canvas: canvas, size: size, sources: sources, atNs: atNs, context: context, consumer: .output(canvas))
     }
 
     /// The game frame drawn (or dropped) last. In Smooth mode it is a ring texture and otherwise shared memory, so a
@@ -290,6 +314,10 @@ final class Renderer: NSObject {
         lock.lock(); defer { lock.unlock() }
         let r = (latN > 0 ? latSum / Double(latN) * 1000 : 0, latMax * 1000, latN)
         log(String(format: "pacing [%@] (refresh units 0..5+): %@  k=%d period=%.2f ms refresh=%.2f ms slips=%d drops=%d queue=%d  arrival-jitter(4ms buckets)=%@ tickGaps=%d", presentation.rawValue, hist.description, period > 0 ? Int((period / refresh).rounded()) : 0, period * 1000, refresh * 1000, slips, pacingDrops, pending.count, arrHist.description, tickGaps))
+        if outputCost.n > 0 || drawCost.n > 0 {
+            log("reader cost: program outputs \(outputCost.summary) per frame (\(_programOutputs.count) lanes), window draw \(drawCost.summary)")
+        }
+        outputCost = CostMeter(); drawCost = CostMeter()
         slips = 0; pacingDrops = 0; arrHist = [Int](repeating: 0, count: 6); tickGaps = 0
         latSum = 0; latMax = 0; latN = 0; hist = [Int](repeating: 0, count: 6)
         return r

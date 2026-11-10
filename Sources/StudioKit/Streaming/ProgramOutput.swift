@@ -19,13 +19,6 @@ struct FramePhase {
     }
 }
 
-/// What a program output draws for one frame: the live scene's picture for its canvas and the textures of the overlay
-/// layers in it (images and text; game and camera textures are added by the output).
-struct LivePicture {
-    var frame = SceneFrame(background: SIMD4(0, 0, 0, 1), layers: [])
-    var textures: [SourceKey: LayerTextures.Kind] = [:]
-}
-
 final class ProgramOutput {
     let canvas: Canvas, size: CGSize, fps: Double
     /// The picture at a host time for this output's size, given the sources that have frames. The stream session
