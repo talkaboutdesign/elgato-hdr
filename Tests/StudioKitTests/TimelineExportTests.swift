@@ -1,5 +1,7 @@
 import XCTest
 import AVFoundation
+import CoreMedia
+import CoreVideo
 import CoreGraphics
 import Metal
 import VideoToolbox
@@ -45,8 +47,8 @@ final class TimelineExportTests: XCTestCase {
         }
         func maxDifference(_ other: Pixels) -> Double {
             var worst = 0.0
-            for y in stride(from: 4, to: height, by: 8) {
-                for x in stride(from: 4, to: width, by: 8) {
+            for y in 0..<height {
+                for x in 0..<width {
                     for (a,b) in zip(rgb(x,y),other.rgb(x,y)) { worst = max(worst,abs(a-b)) }
                 }
             }
@@ -55,8 +57,8 @@ final class TimelineExportTests: XCTestCase {
         func difference(_ other: Pixels, in rect: CGRect? = nil) -> Double {
             let r = rect ?? CGRect(x: 0,y: 0,width: width,height: height)
             var total = 0.0, n = 0
-            for y in stride(from: Int(r.minY)+4, to: min(height,Int(r.maxY)), by: 8) {
-                for x in stride(from: Int(r.minX)+4, to: min(width,Int(r.maxX)), by: 8) {
+            for y in max(0,Int(r.minY))..<min(height,Int(r.maxY)) {
+                for x in max(0,Int(r.minX))..<min(width,Int(r.maxX)) {
                     for (a,b) in zip(rgb(x,y),other.rgb(x,y)) { total += abs(a-b); n += 1 }
                 }
             }
@@ -100,7 +102,7 @@ final class TimelineExportTests: XCTestCase {
                 let asset = AVURLAsset(url: url), built = try await CompositionBuilder.build(doc,canvas: canvas,resolution: .hd,range: range)
                 let duration = try await asset.load(.duration)
                 XCTAssertEqual(duration.seconds, 2.5, accuracy: 1/60)
-                let export = generator(asset), preview = generator(built.asset,video: built.video)
+                let export = generator(asset)
                 let gameRect = LayoutMath.fitRect(CGSize(width: 1920,height: 1080), in: CGRect(origin: .zero,size: canvas.size(.hd)))
                 // Avoid the once-per-second all-white flash in the demo strip.
                 let frames = [29,30,89,91]
@@ -114,25 +116,35 @@ final class TimelineExportTests: XCTestCase {
                 let before = try await pixels(export,100), after = try await pixels(export,140)
                 let size = canvas.size(.hd), cameraRect = CGRect(x: size.width*0.7,y: size.height*0.15,width: size.width*0.2,height: size.height*0.2)
                 XCTAssertGreaterThan(before.difference(after,in: cameraRect),10,"camera appears after scene span")
-                var worst = 0.0, maxChannel = 0.0, cutSeek = 0.0
+                let previewBuilt = try await CompositionBuilder.build(doc, canvas: canvas, resolution: .hd, range: range, ignoreCuts: true)
                 for frame in [10,30,70,110,140] {
-                    let seekStart = Date()
-                    let p = try await pixels(preview,frame)
-                    if frame == 30 { cutSeek = Date().timeIntervalSince(seekStart) }
-                    let e = try await pixels(export,frame)
-                    maxChannel = max(maxChannel,p.maxDifference(e))
-                    let error = p.difference(e); worst = max(worst,error)
-                    XCTAssertLessThanOrEqual(error,3,"\(canvas) \(range) frame \(frame) RGB mean error /255")
+                    let ms = Double(frame)*1000/60
+                    let raw = try RawCompositionFrames.frame(built.asset, video: built.video, ms: ms, hdr: range == .hdr)
+                    let previewRaw = try RawCompositionFrames.frame(previewBuilt.asset, video: previewBuilt.video, ms: built.map.source(fromTimeline: ms), hdr: range == .hdr)
+                    let lhs = RawCompositionFrames.codes(raw), rhs = RawCompositionFrames.codes(previewRaw)
+                    XCTAssertEqual(lhs.count, rhs.count)
+                    XCTAssertLessThanOrEqual(zip(lhs,rhs).map { abs($0-$1) }.max() ?? 0, 1, "raw preview/export frame \(frame)")
+                    let decoded = try RawCompositionFrames.frame(asset, ms: ms, hdr: range == .hdr)
+                    RawCompositionFrames.assertEncoding(raw, decoded)
                 }
-                // Lossy H.264/HEVC and 4:2:0 edges cannot promise a per-pixel 3/255 bound. Keep that literal
-                // acceptance check visible as an expected failure, alongside the bounded mean error above.
-                let options = XCTExpectedFailure.Options(); options.isStrict = false
-                XCTExpectFailure("Literal per-channel 3/255 acceptance exceeds lossy codec edge error", options: options) {
-                    XCTAssertLessThanOrEqual(maxChannel,3,"\(canvas) \(range) maximum sampled channel error /255")
-                }
-                print(String(format: "Timeline export %@ %@: duration %.6fs; strip %@; square %d -> %d; preview/export max mean RGB error %.3f/255; export %.3fs; cut seek %.3fs; max sampled channel error %.0f/255",canvas.rawValue,range.rawValue,duration.seconds,String(describing: codes),small,large,worst,elapsed,cutSeek,maxChannel))
+                print("Timeline export \(canvas) \(range): duration \(duration.seconds)s; strip \(codes); export \(elapsed)s; raw parity and encoding checks complete")
             }
         }
+    }
+    func testSnapshotIsIndependent() async throws {
+        try requireHardware()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Snapshot-"+UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let doc = try await FixtureProject.make(at: dir)
+        let built = try await CompositionBuilder.build(doc, canvas: .wide, resolution: .hd, range: .sdr)
+        let before = try RawCompositionFrames.codes(RawCompositionFrames.frame(built.asset, video: built.video, ms: 500, hdr: false))
+        doc.project.timeline.zooms = [ZoomBlock(startMs: 0, endMs: 2000, scale: 3, easeMs: 0)]
+        doc.project.scenes = [Scene(name: "Changed", wide: Composition(layers: [Layer(source: .game)]))]
+        let after = try RawCompositionFrames.codes(RawCompositionFrames.frame(built.asset, video: built.video, ms: 500, hdr: false))
+        XCTAssertEqual(before, after)
+        let changed = CompositionBuilder.videoComposition(doc.project, canvas: .wide, size: Canvas.wide.size(.hd), built: built)
+        let changedCodes = try RawCompositionFrames.codes(RawCompositionFrames.frame(built.asset, video: changed, ms: 500, hdr: false))
+        XCTAssertNotEqual(before, changedCodes)
     }
     func testOffsetsAndCutAudioRamps() async throws {
         try requireHardware()
@@ -148,6 +160,8 @@ final class TimelineExportTests: XCTestCase {
             let filled = camera.segments.filter { !$0.isEmpty }
             XCTAssertFalse(filled.isEmpty)
             for s in filled {
+                let timelineMs = s.timeMapping.target.start.seconds * 1000
+                XCTAssertEqual(s.timeMapping.source.start.seconds * 1000 + offset, b.map.source(fromTimeline: timelineMs), accuracy: 0.02)
                 XCTAssertGreaterThanOrEqual(s.timeMapping.source.start.seconds,0)
                 XCTAssertLessThanOrEqual(s.timeMapping.target.end.seconds,1.5 + 1/60000)
             }

@@ -13,7 +13,7 @@ struct RenderPlan {
         guard let i = spans.lastIndex(where: { $0.startMs <= s }) else { return (nil, scenes.first, SceneTransition(style: .cut), 1) }
         let span = spans[i]
         let to = scenes.first { $0.id == span.sceneID }
-        let from = i > 0 ? scenes.first { $0.id == spans[i-1].sceneID } : scenes.first
+        let from = i > 0 ? scenes.first { $0.id == spans[i-1].sceneID } : nil
         let done = span.transition.durationMs <= 0 || map.crossedCut(from: span.startMs, through: s)
         let progress = done ? 1 : min(1, max(0, (s - span.startMs) / span.transition.durationMs))
         return (from, to, span.transition, progress)

@@ -177,13 +177,17 @@ final class EditorModel {
         if redoTitle != rt { redoTitle = rt }
     }
 
-    /// Layout controls edit the project's default scene; camera mirroring applies to every scene.
+    /// Layout controls edit the scene active at the playhead; camera mirroring applies to every scene.
     private func syncDerived(_ p: inout Project, from old: Project) {
+        if p.timeline.segments == old.timeline.segments && (p.trimStartMs != old.trimStartMs || p.trimEndMs != old.trimEndMs) {
+            p.timeline = old.timeline.trimming(startMs: p.trimStartMs, endMs: p.trimmedRange.1, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
+        }
+        if let first = p.timeline.segments.first, let last = p.timeline.segments.last { p.trimStartMs = first.startMs; p.trimEndMs = last.endMs }
         if p.wide != old.wide || p.vertical != old.vertical {
-            if !p.scenes.isEmpty {
+            if let index = p.scenes.firstIndex(where: { $0.id == (p.timeline.activeSceneID(atSourceMs: time * 1000) ?? p.scenes.first?.id) }) {
                 let template = p.defaultScene
-                if p.wide != old.wide { p.scenes[0].wide = template.wide }
-                if p.vertical != old.vertical { p.scenes[0].vertical = template.vertical }
+                if p.wide != old.wide { p.scenes[index].wide = template.wide }
+                if p.vertical != old.vertical { p.scenes[index].vertical = template.vertical }
             }
         }
         if p.cameraMirror != old.cameraMirror {

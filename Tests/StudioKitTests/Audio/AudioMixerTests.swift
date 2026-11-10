@@ -254,8 +254,9 @@ final class AudioMixerTests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.15)
         lock.lock(); XCTAssertEqual(starts.count, stoppedCount); lock.unlock()
         let restart = nowNs(); mixer.start(); Thread.sleep(forTimeInterval: 0.04); mixer.stop()
+        let elapsed = Double(nowNs() - restart) / 1_000_000_000
         lock.lock(); let resumed = Array(starts.dropFirst(stoppedCount)); lock.unlock()
-        XCTAssertFalse(resumed.isEmpty); XCTAssertLessThanOrEqual(resumed.count, 5)
+        XCTAssertFalse(resumed.isEmpty); XCTAssertLessThanOrEqual(resumed.count, Int(ceil(elapsed / 0.01)) + 1)
         XCTAssertTrue(resumed.allSatisfy { $0 >= restart })
     }
     func testRealtimeDriver() throws {

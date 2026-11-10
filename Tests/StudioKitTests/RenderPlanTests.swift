@@ -45,9 +45,14 @@ final class RenderPlanTests: XCTestCase {
             XCTAssertEqual(p.layers(atTimelineMs: 500)[0].src, crop)
         }
     }
-    func testSnapshotIsIndependent() {
-        var p = plan(); let snapshot = p
-        p.timeline.zooms.append(ZoomBlock(startMs: 0, endMs: 1000))
-        XCTAssertNotEqual(p.layers(atTimelineMs: 500), snapshot.layers(atTimelineMs: 500))
+    func testFirstSpanStartsImmediatelyAndMissingCameraFillsFrame() {
+        var p = plan()
+        p.timeline.sceneSpans = [SceneSpan(startMs: 0, sceneID: p.scenes[1].id)]
+        XCTAssertEqual(p.layers(atTimelineMs: 0).map(\.key), [.camera])
+        var project = Project(name: "Missing camera", createdAt: Date())
+        project.wide.kind = .stacked
+        p.scenes = [project.defaultScene]; p.timeline.sceneSpans = []
+        p.sources.removeValue(forKey: .camera)
+        XCTAssertEqual(p.layers(atTimelineMs: 0).first?.dst, CGRect(origin: .zero, size: p.canvasSize))
     }
 }
