@@ -219,7 +219,10 @@ final class EditorModel {
     }
 
     var layout: CanvasLayout {
-        get { project.layout(canvas) }
+        get {
+            let id = project.timeline.activeSceneID(atSourceMs: playheadMs) ?? project.scenes.first?.id
+            return project.scenes.first { $0.id == id }?.composition(canvas).legacyLayout ?? project.layout(canvas)
+        }
         set { let c = canvas; update("Layout") { $0.setLayout(c, newValue) } }
     }
     func binding<T>(_ kp: WritableKeyPath<CanvasLayout, T>) -> Binding<T> {

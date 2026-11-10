@@ -20,7 +20,11 @@ final class ProjectDoc: Identifiable, Hashable {
         guard let d = try? Data(contentsOf: dir.appendingPathComponent("project.json")) else { return nil }
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         guard let p = try? dec.decode(Project.self, from: d) else { return nil }
-        return ProjectDoc(dir: dir, project: p)
+        let doc = ProjectDoc(dir: dir, project: p)
+        let raw = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        if (raw?["scenes"] as? [Any])?.isEmpty != false || (raw?["version"] as? Int ?? 1) < 2 ||
+            (p.eventsImported && raw?["eventsImported"] as? Bool != true) { doc.save() }
+        return doc
     }
 
     func save() {
@@ -51,6 +55,7 @@ final class ProjectDoc: Identifiable, Hashable {
             // Thumbnail first: the library reloads a card's image when its state changes, so it must exist by then.
             await writeThumbnail()
             project.state = "complete"
+            project.importEvents()
             save()
             await MainActor.run { completion() }
         }

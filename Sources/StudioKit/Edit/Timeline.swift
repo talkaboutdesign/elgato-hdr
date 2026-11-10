@@ -59,25 +59,29 @@ extension SessionEvent {
     }
 }
 struct Timeline: Codable, Equatable {
+    var splitPoints: [Double] = []
     var segments: [Segment] = []; var sceneSpans: [SceneSpan] = []; var zooms: [ZoomBlock] = []; var markers: [Marker] = []
 }
 extension Timeline {
-    enum CodingKeys: String, CodingKey { case segments, sceneSpans, zooms, markers }
+    enum CodingKeys: String, CodingKey { case segments, sceneSpans, zooms, markers, splitPoints }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
-        self.init(segments: c.v(.segments, []), sceneSpans: c.v(.sceneSpans, []), zooms: c.v(.zooms, []), markers: c.v(.markers, []))
+        self.init(splitPoints: c.v(.splitPoints, []), segments: c.v(.segments, []), sceneSpans: c.v(.sceneSpans, []), zooms: c.v(.zooms, []), markers: c.v(.markers, []))
     }
 }
 
 /// Half-open ranges; a boundary belongs to the next kept segment. The final endpoint maps to the final source end.
 struct TimeMap {
     private(set) var segments: [Segment]
+    private(set) var splitPoints: [Double]
     let sourceDurationMs: Double
     let frameMs: Double
-    init(segments: [Segment], sourceDurationMs: Double, frameMs: Double = 1000/60) {
+    init(segments: [Segment], sourceDurationMs: Double, frameMs: Double = 1000/60, splitPoints: [Double] = []) {
+        self.splitPoints = splitPoints
         self.sourceDurationMs = sourceDurationMs.isFinite ? max(0, sourceDurationMs) : 0
         self.frameMs = frameMs > 0 && frameMs.isFinite ? frameMs : 1000/60
         self.segments = segments.isEmpty ? [Segment(startMs: 0, endMs: self.sourceDurationMs)] : segments
+        for pair in zip(segments, segments.dropFirst()) where pair.0.endMs == pair.1.startMs && pair.0.endMs - pair.0.startMs >= self.frameMs && pair.1.endMs - pair.1.startMs >= self.frameMs { self.splitPoints.append(pair.0.endMs) }
         sanitize(mergeTouching: false, dropShort: false)
     }
     var durationMs: Double { segments.reduce(0) { $0 + $1.endMs - $1.startMs } }
@@ -108,6 +112,7 @@ struct TimeMap {
     }
     mutating func split(atSourceMs s: Double) {
         guard let i = segments.firstIndex(where: { s - $0.startMs >= frameMs && $0.endMs - s >= frameMs }) else { return }
+        splitPoints.append(s)
         let r = segments[i]; segments.replaceSubrange(i...i, with: [Segment(startMs: r.startMs, endMs: s), Segment(startMs: s, endMs: r.endMs)])
     }
     @discardableResult mutating func remove(sourceRange r: Segment) -> Bool {
@@ -133,6 +138,11 @@ struct TimeMap {
                 result[result.count-1].endMs = max(last.endMs, s.endMs)
             } else { result.append(s) }
         }
+        splitPoints = Array(Set(splitPoints.filter { $0.isFinite && $0 > 0 && $0 < sourceDurationMs })).sorted()
+        result = result.flatMap { s -> [Segment] in
+            let edges = [s.startMs] + splitPoints.filter { $0 > s.startMs && $0 < s.endMs } + [s.endMs]
+            return zip(edges, edges.dropFirst()).map { Segment(startMs: $0.0, endMs: $0.1) }
+        }
         segments = dropShort ? result.filter { $0.endMs - $0.startMs >= frameMs - 0.000001 } : result
     }
 }
@@ -145,16 +155,16 @@ extension Timeline {
         let start = max(0, (startMs / frameMs).rounded() * frameMs)
         let end = min(sourceDurationMs, (endMs / frameMs).rounded() * frameMs)
         guard end - start >= frameMs - 0.000001 else { return self }
-        var map = TimeMap(segments: segments, sourceDurationMs: sourceDurationMs, frameMs: frameMs)
+        var map = TimeMap(segments: segments, sourceDurationMs: sourceDurationMs, frameMs: frameMs, splitPoints: splitPoints)
         guard !map.segments.isEmpty else { return self }
         var kept = map.segments
         kept[0].startMs = min(start, kept[0].startMs)
         kept[kept.count-1].endMs = max(end, kept[kept.count-1].endMs)
         kept = kept.map { Segment(startMs: max(start, $0.startMs), endMs: min(end, $0.endMs)) }
-        map = TimeMap(segments: kept, sourceDurationMs: sourceDurationMs, frameMs: frameMs)
+        map = TimeMap(segments: kept, sourceDurationMs: sourceDurationMs, frameMs: frameMs, splitPoints: map.splitPoints)
         map.normalize()
         guard map.durationMs >= frameMs - 0.000001 else { return self }
-        var result = self; result.segments = map.segments; return result
+        var result = self; result.segments = map.segments; result.splitPoints = map.splitPoints; return result
     }
     func activeSceneID(atSourceMs time: Double) -> UUID? {
         sceneSpans.filter { $0.startMs <= time }.max { $0.startMs < $1.startMs }?.sceneID

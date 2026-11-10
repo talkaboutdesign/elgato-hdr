@@ -46,16 +46,16 @@ enum TimelineEdits {
 
     /// Kept ranges as stored, split points between touching ranges included. A legacy trim counts as one range.
     static func kept(_ p: Project) -> [Segment] {
-        TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: frameMs(p)).segments
+        TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: frameMs(p), splitPoints: p.timeline.splitPoints).segments
     }
 
-    /// Writes kept ranges back. Everything kept and unsplit is stored as `[]`; nothing kept as the explicit empty
-    /// range. The trim fields follow the bounds, as project.json writes them.
+    /// Everything kept and unsplit is stored as `[]`; trim fields follow the kept bounds.
     static func store(_ segments: [Segment], in p: inout Project) {
         let d = p.durationMs
-        let map = TimeMap(segments: segments.isEmpty ? [Segment(startMs: 0, endMs: 0)] : segments, sourceDurationMs: d, frameMs: frameMs(p))
+        let map = TimeMap(segments: segments.isEmpty ? [Segment(startMs: 0, endMs: 0)] : segments, sourceDurationMs: d, frameMs: frameMs(p), splitPoints: p.timeline.splitPoints)
         let clean = map.storedSegments
         let whole = clean.count == 1 && clean[0].startMs <= 0 && clean[0].endMs >= d
+        p.timeline.splitPoints = map.splitPoints
         p.timeline.segments = whole ? [] : clean
         p.trimStartMs = p.timeline.segments.first?.startMs ?? 0
         p.trimEndMs = p.timeline.segments.last?.endMs ?? 0
@@ -81,56 +81,35 @@ enum TimelineEdits {
 
     @discardableResult
     static func split(_ p: inout Project, atMs ms: Double) -> Bool {
-        var map = TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: frameMs(p))
+        var map = TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: frameMs(p), splitPoints: p.timeline.splitPoints)
         let before = map.segments
         map.split(atSourceMs: snapToFrame(ms, p))
         guard map.segments != before else { return false }
+        p.timeline.splitPoints = map.splitPoints
         store(map.segments, in: &p)
         return true
     }
 
-    /// Removes a range from the kept list without merging other touching ranges, so other split points survive
-    /// (`TimeMap.remove` normalizes, which would erase them).
-    static func subtract(_ segs: [Segment], _ r: Segment) -> [Segment] {
-        segs.flatMap { s -> [Segment] in
-            if r.endMs <= s.startMs || r.startMs >= s.endMs { return [s] }
-            var out: [Segment] = []
-            if s.startMs < r.startMs { out.append(Segment(startMs: s.startMs, endMs: r.startMs)) }
-            if r.endMs < s.endMs { out.append(Segment(startMs: r.endMs, endMs: s.endMs)) }
-            return out
-        }
+    static func remove(_ p: inout Project, section s: CutSection) {
+        var map = TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: frameMs(p), splitPoints: p.timeline.splitPoints)
+        guard map.remove(sourceRange: s.range) else { return }
+        p.timeline.splitPoints = map.splitPoints
+        store(map.storedSegments, in: &p)
     }
-    static func remove(_ p: inout Project, section s: CutSection) { store(subtract(kept(p), s.range), in: &p) }
     static func restore(_ p: inout Project, section s: CutSection) {
-        let segs = (subtract(kept(p), s.range) + [s.range]).sorted { $0.startMs < $1.startMs }
-        store(segs, in: &p)
+        var map = TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: frameMs(p), splitPoints: p.timeline.splitPoints)
+        map.restore(sourceRange: s.range)
+        p.timeline.splitPoints = map.splitPoints
+        store(map.storedSegments, in: &p)
     }
-
-    /// I: nothing before `ms` is exported. Earlier than the current first frame, the first range grows back to it.
-    static func setIn(_ p: inout Project, atMs ms: Double) {
-        let t = snapToFrame(ms, p)
-        var segs = kept(p)
-        if segs.isEmpty { segs = [Segment(startMs: t, endMs: p.durationMs)] }
-        else if t < segs[0].startMs { segs[0].startMs = t }
-        else { segs = subtract(segs, Segment(startMs: 0, endMs: t)) }
-        store(segs, in: &p)
+    static func trim(_ p: inout Project, start: Double, end: Double) {
+        p.timeline.segments = p.editSegments
+        p.timeline = p.timeline.trimming(startMs: start, endMs: end, sourceDurationMs: p.durationMs, frameMs: frameMs(p))
+        store(p.timeline.segments, in: &p)
     }
-    /// O: nothing after `ms` is exported.
-    static func setOut(_ p: inout Project, atMs ms: Double) {
-        let t = snapToFrame(ms, p)
-        var segs = kept(p)
-        if segs.isEmpty { segs = [Segment(startMs: 0, endMs: t)] }
-        else if t > segs[segs.count - 1].endMs { segs[segs.count - 1].endMs = t }
-        else { segs = subtract(segs, Segment(startMs: t, endMs: p.durationMs)) }
-        store(segs, in: &p)
-    }
-    /// Brings back what I and O removed at the ends; cuts in between stay.
-    static func clearInOut(_ p: inout Project) {
-        var segs = kept(p)
-        guard !segs.isEmpty else { store([Segment(startMs: 0, endMs: p.durationMs)], in: &p); return }
-        segs[0].startMs = 0; segs[segs.count - 1].endMs = p.durationMs
-        store(segs, in: &p)
-    }
+    static func setIn(_ p: inout Project, atMs ms: Double) { trim(&p, start: ms, end: kept(p).last?.endMs ?? p.durationMs) }
+    static func setOut(_ p: inout Project, atMs ms: Double) { trim(&p, start: kept(p).first?.startMs ?? 0, end: ms) }
+    static func clearInOut(_ p: inout Project) { trim(&p, start: 0, end: p.durationMs) }
 
     static func boundaries(_ p: Project) -> [CutBoundary] {
         let segs = kept(p), d = p.durationMs
@@ -158,6 +137,8 @@ enum TimelineEdits {
         let t = min(hi, max(lo, snapToFrame(ms, p)))
         if let l = b.left { segs[l].endMs = t }
         if let r = b.right { segs[r].startMs = t }
+        p.timeline.splitPoints.removeAll { abs($0 - b.ms) < 0.001 }
+        if b.left != nil && b.right != nil { p.timeline.splitPoints.append(t) }
         store(segs, in: &p)
     }
 
@@ -201,12 +182,8 @@ enum TimelineEdits {
         return out
     }
 
-    /// The project's implicit default scene becomes a stored one before anything can point at it.
-    static func ensureScenes(_ p: inout Project) { if p.scenes.isEmpty { p.scenes = [p.defaultScene] } }
-
     /// A template becomes a project scene built from the project's own layouts (framing, camera placement).
     static func materialize(_ c: SceneChoice, in p: inout Project, hasCamera: Bool) -> UUID {
-        ensureScenes(&p)
         if let id = c.sceneID { return id }
         guard let kind = c.template else { return p.scenes[0].id }
         if let existing = p.scenes.first(where: { $0.name == c.name }) { return existing.id }
@@ -222,7 +199,6 @@ enum TimelineEdits {
     /// A scene change at `ms`. Replaces a change already there; does nothing if that scene is already showing.
     @discardableResult
     static func insertSceneChange(_ p: inout Project, sceneID: UUID, atMs ms: Double) -> UUID? {
-        ensureScenes(&p)
         let t = snapToFrame(ms, p), f = frameMs(p)
         if p.timeline.sceneSpans.isEmpty || sortedSpans(p).isEmpty {
             p.timeline.sceneSpans = [SceneSpan(startMs: 0, sceneID: p.scenes[0].id)]
@@ -240,7 +216,6 @@ enum TimelineEdits {
 
     /// Sets the scene of a run; the leading run gets a span of its own at zero.
     static func setScene(_ p: inout Project, run: SceneRun, sceneID: UUID) {
-        ensureScenes(&p)
         if let span = run.span, let i = p.timeline.sceneSpans.firstIndex(where: { $0.id == span.id }) {
             p.timeline.sceneSpans[i].sceneID = sceneID
         } else {

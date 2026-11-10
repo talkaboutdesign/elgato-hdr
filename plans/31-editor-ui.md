@@ -139,3 +139,9 @@ context menu.
 
 Reordering clips, multiple recordings in one project, transitions between cuts, speed ramps, text-based editing
 from a transcript, captions, music, direct upload to platforms (plan 90).
+
+## Known limitations
+
+Recordings retain a two-second GOP with B-frames. Exact preview seeks can take about 200 ms.
+Dragging uses keyframe-tolerant seeks, keeps one seek in flight and coalesces pending targets;
+release requests the exact frame. Recorder settings are unchanged by this integration.

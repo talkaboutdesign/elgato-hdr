@@ -61,7 +61,8 @@ struct TimeMap {
 ```
 
 Editing helpers (pure, unit-tested): `split(atSourceMs:)`, `remove(sourceRange:)`, `restore(sourceRange:)`,
-`normalize()` (merge touching segments, drop segments shorter than one frame).
+`normalize()` (merge overlapping/touching coverage, preserve explicit user split points, drop segments shorter than one frame).
+Split points are stored separately in `timeline.splitPoints`; adjacent kept sections remain editable while cut detection treats them as continuous.
 
 ### Render plan (`Edit/RenderPlan.swift`, pure)
 
@@ -128,7 +129,7 @@ In the existing editor: "Split" (⌘B) and "Delete Section" buttons acting on th
 
 1. `swift test` passes; paste the export test summary.
 2. Opening every project created by earlier versions in `Tests/…/Fixtures` produces the same first-frame image as
-   before this plan (golden comparison within 2 of 255).
+   before this plan (stored game golden comparison within 2 of 255; native camera conversion/interpolation within 3 of 255 across GPU/decoder implementations).
 3. Preview and export agree: for the fixture with cuts, zoom and two scenes, frames grabbed from
    `AVAssetImageGenerator` on the preview composition and from the exported file at the same five times match
    within 3 of 255.

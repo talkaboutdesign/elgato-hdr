@@ -22,7 +22,7 @@ final class TimelineTests: XCTestCase {
         map.remove(sourceRange: Segment(startMs: 400, endMs: 600))
         XCTAssertEqual(map.segments, [Segment(startMs: 0, endMs: 200), Segment(startMs: 600, endMs: 1000)])
         map.restore(sourceRange: Segment(startMs: 200, endMs: 600)); XCTAssertEqual(map.durationMs, 1000)
-        XCTAssertEqual(map.segments.count, 1)
+        XCTAssertEqual(map.segments.count, 2)
         XCTAssertFalse(map.remove(sourceRange: Segment(startMs: 0, endMs: 1000))); XCTAssertEqual(map.durationMs, 1000)
         XCTAssertEqual(TimeMap(segments: map.storedSegments, sourceDurationMs: 1000).durationMs, 1000)
         map.restore(sourceRange: Segment(startMs: 10, endMs: 20)); XCTAssertEqual(map.durationMs, 1000)

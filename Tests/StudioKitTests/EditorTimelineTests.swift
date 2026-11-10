@@ -80,7 +80,7 @@ final class TimelineEditsTests: XCTestCase {
         XCTAssertEqual(TimelineEdits.boundaries(p).filter { $0.left != nil && $0.right != nil }.map(\.ms), [8000], "removing one section keeps other splits")
         XCTAssertEqual(TimelineEdits.sections(p).map(\.kept), [false, true, true], "adjacent removed sections read as one")
         TimelineEdits.restore(&p, section: TimelineEdits.section(at: 4500, in: p)!)
-        XCTAssertEqual(TimelineEdits.sections(p).map { $0.startMs }, [0, 6000, 8000], "restoring brings the range back; its edge stays a split point")
+        XCTAssertEqual(TimelineEdits.sections(p).map { $0.startMs }, [0, 3000, 6000, 8000], "restoring brings back explicit split points inside the removed range")
         XCTAssertEqual(p.trimStartMs, 0); XCTAssertEqual(p.trimEndMs, 10_000)
         var q = project()
         TimelineEdits.split(&q, atMs: 3000); TimelineEdits.split(&q, atMs: 6000)
@@ -89,14 +89,11 @@ final class TimelineEditsTests: XCTestCase {
         XCTAssertEqual(TimelineEdits.sections(q).map { $0.startMs }, [0, 3000, 6000], "remove then restore keeps both split points")
     }
 
-    func testRemovingEverythingStoresExplicitEmptyRange() {
+    func testRemovingEverythingIsRejected() {
         var p = project()
+        let original = p
         TimelineEdits.remove(&p, section: TimelineEdits.sections(p)[0])
-        XCTAssertEqual(p.timeline.segments, [Segment(startMs: 0, endMs: 0)])
-        XCTAssertTrue(TimelineEdits.kept(p).isEmpty)
-        XCTAssertEqual(TimelineEdits.sections(p), [CutSection(startMs: 0, endMs: 10_000, kept: false)])
-        TimelineEdits.restore(&p, section: TimelineEdits.sections(p)[0])
-        XCTAssertEqual(p.timeline.segments, [], "everything kept and unsplit is stored as []")
+        XCTAssertEqual(p, original)
     }
 
     func testInOutAndClear() {

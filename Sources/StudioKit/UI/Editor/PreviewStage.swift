@@ -3,7 +3,7 @@ import AVFoundation
 import SwiftUI
 
 /// The aspect-fitted canvas preview. On top: the zoom focus target while a zoom block is selected, otherwise the
-/// camera and game direct manipulation of the default scene (the one the layout controls edit).
+/// camera and game direct manipulation of the active legacy-layout scene.
 struct PreviewStage: View {
     let model: EditorModel
 
@@ -40,14 +40,14 @@ struct StageOverlay: View {
     var body: some View {
         if case .zoom(let id) = model.selection {
             FocusTargetOverlay(model: model, id: id)
-        } else if defaultSceneShowing && !model.editsLocked {
+        } else if editableSceneShowing && !model.editsLocked {
             StageInteraction(model: model)
         }
     }
-    private var defaultSceneShowing: Bool {
+    private var editableSceneShowing: Bool {
         let p = model.project
-        guard let first = p.scenes.first else { return true }
-        return TimelineEdits.sceneRun(at: model.time * 1000, in: p)?.sceneID == first.id
+        let id = p.timeline.activeSceneID(atSourceMs: model.playheadMs) ?? p.scenes.first?.id
+        return p.scenes.first { $0.id == id }?.composition(model.canvas).legacyLayout != nil
     }
 }
 

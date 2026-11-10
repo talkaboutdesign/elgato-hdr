@@ -11,6 +11,7 @@
   "events" : [
 
   ],
+  "eventsImported" : false,
   "fps" : 60,
   "game" : {
     "file" : "game.mov",
@@ -85,7 +86,24 @@
             "visible" : true,
             "zoom" : 1
           }
-        ]
+        ],
+        "legacyLayout" : {
+          "camera" : {
+            "aspect" : "1:1",
+            "border" : false,
+            "roundness" : 0.5,
+            "shadow" : true,
+            "size" : 0.5,
+            "x" : 0.5,
+            "y" : 0.17
+          },
+          "fit" : false,
+          "kind" : "stacked",
+          "panX" : 0.5,
+          "panY" : 0.5,
+          "split" : 0.36,
+          "zoom" : 1
+        }
       },
       "wide" : {
         "background" : [
@@ -141,7 +159,24 @@
             "visible" : true,
             "zoom" : 1
           }
-        ]
+        ],
+        "legacyLayout" : {
+          "camera" : {
+            "aspect" : "1:1",
+            "border" : false,
+            "roundness" : 0.16,
+            "shadow" : true,
+            "size" : 0.34,
+            "x" : 0.85,
+            "y" : 0.76
+          },
+          "fit" : false,
+          "kind" : "pip",
+          "panX" : 0.5,
+          "panY" : 0.5,
+          "split" : 0.36,
+          "zoom" : 1
+        }
       }
     },
     {
@@ -249,6 +284,10 @@
         "endMs" : 2000,
         "startMs" : 1000.0000000000001
       }
+    ],
+    "splitPoints" : [
+      500.00000000000006,
+      1000.0000000000001
     ],
     "zooms" : [
       {
