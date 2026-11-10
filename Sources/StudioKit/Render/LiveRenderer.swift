@@ -45,6 +45,9 @@ final class Renderer: NSObject {
     private var _scene = LiveSceneState(scene: SceneTemplate.gameOnly.scene())
     private var _viewCanvas = Canvas.wide
     private var _lastGame: LiveGameFrame?
+    private var _gameSnapshot: GameSnapshot?
+    /// Where drawn frames are copied for the scene thumbnails (twice a second; see `GameSnapshot`).
+    var gameSnapshot: GameSnapshot? { get { lock.lock(); defer { lock.unlock() }; return _gameSnapshot } set { lock.lock(); _gameSnapshot = newValue; lock.unlock() } }
     var scene: LiveSceneState { get { lock.lock(); defer { lock.unlock() }; return _scene } set { lock.lock(); _scene = newValue; lock.unlock() } }
     /// Which canvas the window shows (and the user edits).
     var viewCanvas: Canvas { get { lock.lock(); defer { lock.unlock() }; return _viewCanvas } set { lock.lock(); _viewCanvas = newValue; lock.unlock() } }
@@ -206,7 +209,10 @@ final class Renderer: NSObject {
 
     @discardableResult
     func drawNow(y yT: MTLTexture, c cT: MTLTexture, w gw: Int, h gh: Int, arrival: Double, onPresented: (() -> Void)? = nil) -> Bool {
-        let live = drawState(y: yT, c: cT, w: gw, h: gh)   // before the drawable: thumbnails need the frame even if it is not shown
+        let live = drawState(y: yT, c: cT, w: gw, h: gh)
+        // After this frame's commands on the same queue, so the copy reads what was drawn; also when nothing could be
+        // drawn (no drawable), so the thumbnails keep up while the window is hidden.
+        defer { live.snapshot?.capture(y: yT, c: cT, transfer: colorMode.transfer, on: queue, atNs: nowNs()) }
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return false }
         let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
         let (w, h) = live.canvas == .wide ? (16, 9) : (9, 16)   // the letterbox fits the canvas, not the game
@@ -248,10 +254,10 @@ final class Renderer: NSObject {
     }
 
     /// One lock for everything a frame reads; also remembers the frame for scene thumbnails.
-    private func drawState(y: MTLTexture, c: MTLTexture, w: Int, h: Int) -> (overlay: LiveOverlay, scene: LiveSceneState, canvas: Canvas) {
+    private func drawState(y: MTLTexture, c: MTLTexture, w: Int, h: Int) -> (overlay: LiveOverlay, scene: LiveSceneState, canvas: Canvas, snapshot: GameSnapshot?) {
         lock.lock(); defer { lock.unlock() }
         _lastGame = LiveGameFrame(y: y, c: c, size: CGSize(width: w, height: h), transfer: colorMode.transfer)
-        return (_overlay, _scene, _viewCanvas)
+        return (_overlay, _scene, _viewCanvas, _gameSnapshot)
     }
 
     /// The live scene's picture for any canvas at host time `atNs`. Program outputs (plan 20) call this from their own
@@ -262,8 +268,9 @@ final class Renderer: NSObject {
         scene.frame(canvas: canvas, size: size, sources: sources, atNs: atNs)
     }
 
-    /// The game frame drawn (or dropped) last, for thumbnails. In Smooth mode it is a ring texture and otherwise shared memory, so
-    /// a later frame may overwrite it while a thumbnail reads it; that only ever tears a 160-pixel thumbnail.
+    /// The game frame drawn (or dropped) last. In Smooth mode it is a ring texture and otherwise shared memory, so a
+    /// later frame may overwrite it while it is read: the thumbnails use `gameSnapshot` instead; this is for knowing
+    /// whether there is a game at all and for debug renders.
     var latestGameFrame: LiveGameFrame? { lock.lock(); defer { lock.unlock() }; return _lastGame }
 
     func takeStats() -> (avgMs: Double, maxMs: Double, n: Int) {

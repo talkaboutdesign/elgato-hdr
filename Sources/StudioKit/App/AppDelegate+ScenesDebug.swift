@@ -34,9 +34,10 @@ extension AppDelegate {
 
     // MARK: Offscreen rendering
 
+    /// The thumbnails' copy of the game frame (call `endRead` on the snapshot after the GPU is done) and the camera.
     func liveTextures() -> (sources: [SourceKey: SourceInfo], textures: [SourceKey: LayerTextures.Kind], keep: [CVMetalTexture]) {
         var sources: [SourceKey: SourceInfo] = [:], textures: [SourceKey: LayerTextures.Kind] = [:], keep: [CVMetalTexture] = []
-        if let g = renderer?.latestGameFrame {
+        if let g = sceneRuntime.thumbnailer.snapshot.beginRead() {
             sources[.game] = SourceInfo(size: g.size)
             textures[.game] = .biplanar(y: g.y, c: g.c, bits: 10, transfer: g.transfer, bt709: g.transfer == 2)
         }
@@ -51,6 +52,7 @@ extension AppDelegate {
     /// One SDR picture of `frame` at `size`.
     func renderOffscreen(_ make: ([SourceKey: SourceInfo]) -> SceneFrame, size: CGSize) -> CGImage? {
         let core = MetalCore.shared, live = liveTextures()
+        defer { if live.sources[.game] != nil { sceneRuntime.thumbnailer.snapshot.endRead() } }
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: Int(size.width), height: Int(size.height), mipmapped: false)
         d.usage = [.renderTarget, .shaderRead]; d.storageMode = .shared
         guard let t = core.device.makeTexture(descriptor: d), let cb = core.queue.makeCommandBuffer() else { return nil }

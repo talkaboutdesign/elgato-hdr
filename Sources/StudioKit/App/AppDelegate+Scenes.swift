@@ -96,6 +96,7 @@ extension AppDelegate {
 
     func pushScene() {
         guard let r = renderer else { return }
+        if r.gameSnapshot !== sceneRuntime.thumbnailer.snapshot { r.gameSnapshot = sceneRuntime.thumbnailer.snapshot }
         r.scene = sceneRuntime.live
         r.viewCanvas = scenes.canvas
     }
@@ -619,7 +620,7 @@ extension AppDelegate {
         var list = m.collection.scenes
         if m.galleryOpen { list += m.templates.map(\.scene) }
         let canvas = m.canvas
-        sceneRuntime.thumbnailer.render(scenes: list, canvas: canvas, game: renderer?.latestGameFrame,
+        sceneRuntime.thumbnailer.render(scenes: list, canvas: canvas, hasGame: renderer?.latestGameFrame != nil,
                                         camera: camera.cameraOn ? camera.latest : nil) { [weak self] images in
             guard let self = self else { return }
             let th = self.scenes.thumbnails

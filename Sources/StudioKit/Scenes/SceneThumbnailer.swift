@@ -2,10 +2,12 @@ import AppKit
 import CoreVideo
 import Metal
 
-/// Renders small pictures of scenes for the strip through the one compositor, from the latest game and camera
-/// frames. Works on its own low-priority queue and command queue so it never delays the reader thread or a
-/// presentation; a pass is skipped while the previous one is still running.
+/// Renders small pictures of scenes for the strip through the one compositor, from the game frame the renderer copies
+/// into `snapshot` and the latest camera buffer (retained, so it cannot change). Works on its own low-priority queue
+/// and command queue so it never delays the reader thread or a presentation; a pass is skipped while the previous one
+/// is still running, and while there is a game but no finished copy of it.
 final class SceneThumbnailer {
+    let snapshot = GameSnapshot()
     static let size = CGSize(width: 160, height: 90)
     private let queue = DispatchQueue(label: "scene-thumbnails", qos: .utility)
     private let commands: MTLCommandQueue?
@@ -17,11 +19,15 @@ final class SceneThumbnailer {
     init() { commands = MetalCore.shared.device.makeCommandQueue() }
 
     /// `done` runs on the main thread with an image per scene id (SDR, BT.709).
-    func render(scenes: [Scene], canvas: Canvas, game: LiveGameFrame?, camera: CVPixelBuffer?, done: @escaping ([UUID: CGImage]) -> Void) {
+    /// `hasGame`: the renderer has drawn game frames, so a pass without the snapshot would show none.
+    func render(scenes: [Scene], canvas: Canvas, hasGame: Bool, camera: CVPixelBuffer?, done: @escaping ([UUID: CGImage]) -> Void) {
         lock.lock()
         if busy { lock.unlock(); return }
         busy = true; lock.unlock()
         queue.async { [self] in
+            let game = snapshot.beginRead()
+            defer { if game != nil { snapshot.endRead() } }
+            guard game != nil || !hasGame else { lock.lock(); busy = false; lock.unlock(); return }
             let images = draw(scenes, canvas, game, camera)
             lock.lock(); busy = false; lock.unlock()
             DispatchQueue.main.async { done(images) }
