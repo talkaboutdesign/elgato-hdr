@@ -1,4 +1,5 @@
 import XCTest
+import QuartzCore
 @testable import StudioKit
 
 /// The Go Live controller against fake RTMP servers and a fake session (no Metal, no encoder): destination health,
@@ -333,6 +334,34 @@ extension StreamControllerTests {
         XCTAssertEqual(sessions.count, 1)
     }
 
+    /// Reviewer request: a destination toggled off and on repeatedly while live, with and without waiting.
+    func testTogglingADestinationRepeatedlyWhileLive() throws {
+        let a = try FakeRTMPServer(), b = try FakeRTMPServer(); defer { a.stop(); b.stop() }
+        let one = local("One", a), two = local("Two", b, .vertical)
+        let c = try controller([one, two])
+        c.goLive()
+        XCTAssertTrue(spin(5) { c.state.health(one.id).status == .live && c.state.health(two.id).status == .live })
+        let session = try XCTUnwrap(sessions.first)
+        for round in 1...4 {
+            c.setEnabled(two.id, false)
+            XCTAssertEqual(c.state.health(two.id).status, .off)
+            XCTAssertEqual(session.activeCanvases, [.wide], "round \(round)")
+            c.setEnabled(two.id, true)
+            XCTAssertTrue(spin(5) { c.state.health(two.id).status == .live }, "round \(round)")
+            XCTAssertEqual(session.publishers(.vertical).count, 1, "round \(round)")
+        }
+        for _ in 1...5 { c.setEnabled(two.id, false); c.setEnabled(two.id, true) }
+        XCTAssertTrue(spin(5) { c.state.health(two.id).status == .live })
+        spin(0.5) { false }
+        XCTAssertEqual(session.publishers(.vertical).count, 1, "no duplicate publishers")
+        XCTAssertEqual(session.publishers(.wide).count, 1)
+        XCTAssertEqual(c.state.health(one.id).status, .live, "the other destination stays live throughout")
+        XCTAssertEqual(c.state.health(one.id).reconnects, 0)
+        XCTAssertEqual(connections(a), 1)
+        XCTAssertEqual(connections(b), 6, "Go Live, four rounds, and only the last of five quick switches")
+        XCTAssertFalse(session.stopped)
+    }
+
     /// A vertical lane that cannot start while wide is live fails that destination only.
     func testALaneThatCannotStartFailsOnlyItsDestination() throws {
         let a = try FakeRTMPServer(), b = try FakeRTMPServer(); defer { a.stop(); b.stop() }
@@ -379,5 +408,69 @@ extension StreamControllerTests {
         session.onLaneError?(.wide, "H.264 recovery failed")
         XCTAssertEqual(c.state.health(wide.id).status, .failed("H.264 recovery failed"))
         XCTAssertFalse(c.isActive)
+    }
+}
+
+/// The controller with the real StreamSession (Metal render and hardware encoders) against fake RTMP servers.
+final class StreamControllerSessionTests: XCTestCase {
+    private func spin(_ seconds: TimeInterval, until done: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end { if done() { return true }; RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        return done()
+    }
+
+    /// Acceptance 4 automated: the card reads "Stream key rejected" and the server sees no retry, while a good
+    /// destination keeps streaming. Then a vertical lane whose encoder cannot be created fails alone.
+    func testRejectedKeyAndFailedLaneWithTheRealSession() throws {
+        let good = try FakeRTMPServer(), bad = try FakeRTMPServer(), tall = try FakeRTMPServer()
+        bad.reject = true
+        defer { good.stop(); bad.stop(); tall.stop() }
+        var frames = 0
+        let lock = NSLock()
+        good.onMessage = { _, m in if m.type == 9 { lock.lock(); frames += 1; lock.unlock() } }
+        let goodFrames = { () -> Int in lock.lock(); defer { lock.unlock() }; return frames }
+        let g = Destination(service: .custom, name: "Good", url: "rtmp://127.0.0.1:\(good.port)/live")
+        let r = Destination(service: .custom, name: "Rejecting", url: "rtmp://127.0.0.1:\(bad.port)/live")
+        let v = Destination(service: .custom, name: "Tall", url: "rtmp://127.0.0.1:\(tall.port)/live", canvas: .vertical, enabled: false)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ehdr-session-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = DestinationStore(url: dir.appendingPathComponent("streaming.json"))
+        try store.save(StreamingConfig(destinations: [g, r, v], settings: { var s = StreamSettings(); s.resolution = 720; s.fps = 30; s.videoKbps = 2500; return s }()))
+        let c = StreamController(state: StreamingState(), store: store, keychain: MemoryKeyStore())
+        c.keyOverride = "secret-test-key"
+        let demo = DemoSource(width: 64, height: 36, fps: 30)
+        let renderer = try XCTUnwrap(Renderer(layer: CAMetalLayer(), shm: demo.memory, demoSource: demo))
+        var session: StreamSession?
+        c.makeSession = { outputs, settings in
+            let s = StreamSession(outputs: outputs, audioBitrate: settings.audioKbps * 1000, renderer: renderer, mixer: AudioMixer())
+            session = s; return s
+        }
+        var toasts: [String] = []
+        c.toast = { text, _, _ in toasts.append(text) }
+        c.goLive(); defer { c.endStream() }
+        XCTAssertTrue(spin(8) { c.state.health(g.id).status == .live && c.state.health(r.id).status != .connecting })
+        XCTAssertEqual(StreamFormat.statusTitle(c.state.health(r.id).status), "Stream key rejected")
+        XCTAssertTrue(toasts.contains("Rejecting: stream key rejected"), "\(toasts)")
+        _ = spin(2.5) { false }
+        XCTAssertEqual(c.state.health(r.id).status, .failed("Stream key rejected"), "a rejected key is not retried")
+        XCTAssertEqual(Set(bad.messages.map(\.0)).count, 1, "one connection to the rejecting server")
+        XCTAssertFalse((c.state.health(r.id).detail ?? "").contains("secret-test-key"))
+        XCTAssertTrue(goodFrames() > 0)
+
+        let live = try XCTUnwrap(session)
+        var sessionErrors: [String] = []
+        let forward = live.onError
+        live.onError = { sessionErrors.append($0); forward?($0) }
+        live.makeEncoder = { _ in nil }
+        c.setEnabled(v.id, true)
+        XCTAssertTrue(spin(5) { c.state.health(v.id).status != .connecting })
+        XCTAssertEqual(c.state.health(v.id).status, .failed("Hardware H.264 encoder unavailable"))
+        XCTAssertTrue(sessionErrors.isEmpty, "\(sessionErrors)")
+        XCTAssertEqual(c.state.health(g.id).status, .live)
+        XCTAssertEqual(live.activeCanvases, [.wide])
+        let before = goodFrames()
+        XCTAssertTrue(spin(4) { goodFrames() > before + 20 }, "the wide destination keeps streaming")
+        XCTAssertEqual(Set(tall.messages.map(\.0)).count, 0)
+        print("Real session: rejected=\(c.state.health(r.id).status) vertical=\(c.state.health(v.id).status) good frames=\(goodFrames())")
     }
 }
