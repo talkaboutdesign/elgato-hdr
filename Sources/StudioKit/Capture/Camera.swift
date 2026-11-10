@@ -49,8 +49,10 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
     }
 
-    var cameraOn: Bool { videoInput != nil }
-    var micOn: Bool { audioInput != nil }
+    private var demo = false
+    private var demoTimer: DispatchSourceTimer?
+    var cameraOn: Bool { demo || videoInput != nil }
+    var micOn: Bool { demo || audioInput != nil }
     var cameraName: String? { videoInput?.device.localizedName }
     var micName: String? { audioInput?.device.localizedName }
 
@@ -169,87 +171,68 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func attach(camera: LayerWriter?, mic: LayerWriter?) { lock.lock(); cameraRecorder = camera; micRecorder = mic; lock.unlock() }
+
+    func injectDemo() {
+        guard !demo else { return }
+        demo = true
+        if DemoSource.epoch == 0 { DemoSource.epoch = nowNs() }
+        let timer = DispatchSource.makeTimerSource(queue: videoQueue)
+        var frame = 0
+        timer.schedule(deadline: .now(), repeating: 1.0 / 30, leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            let ns = nowNs()
+            let pb = Self.demoPixelBuffer(frame: frame)
+            self.lock.lock(); self._latest = pb; let cw = self.cameraRecorder, mw = self.micRecorder; self.lock.unlock()
+            cw?.appendVideo(pb, ns: ns)
+            let epoch = DemoSource.epoch
+            let start = ns > epoch ? Int((ns - epoch) * 48000 / 1_000_000_000) : 0
+            if let sb = Self.demoAudio(sample: start, count: 1600) { mw?.appendAudio(sb, ns: ns); self.meter(sb) }
+            frame += 1
+        }
+        demoTimer = timer; timer.resume()
+    }
+
+    static func demoPixelBuffer(frame: Int) -> CVPixelBuffer {
+        var out: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary, &out)
+        let pb = out!
+        CVPixelBufferLockBaseAddress(pb, [])
+        let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!, ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let c = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!, cs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        var row = (0..<1280).map { UInt8(16 + ($0 + frame * 8) % 220) }
+        row.withUnsafeMutableBytes { r in for i in 0..<720 { memcpy(y + i * ys, r.baseAddress!, 1280) } }
+        memset(c, 128, cs * 360)
+        CVPixelBufferUnlockBaseAddress(pb, [])
+        for (key,value) in [(kCVImageBufferColorPrimariesKey,kCVImageBufferColorPrimaries_ITU_R_709_2),
+                            (kCVImageBufferTransferFunctionKey,kCVImageBufferTransferFunction_ITU_R_709_2),
+                            (kCVImageBufferYCbCrMatrixKey,kCVImageBufferYCbCrMatrix_ITU_R_709_2)] {
+            CVBufferSetAttachment(pb, key, value, .shouldPropagate)
+        }
+        return pb
+    }
+
+    static func demoAudio(sample: Int, count: Int) -> CMSampleBuffer? {
+        var samples = (0..<count).map { i -> Float in
+            let p = (sample + i) % 48000
+            return p < 2400 ? Float(sin(Double(p) * 2 * .pi / 48) * 0.24) : 0
+        }
+        var block: CMBlockBuffer?
+        CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: count*4, blockAllocator: nil,
+            customBlockSource: nil, offsetToData: 0, dataLength: count*4, flags: 0, blockBufferOut: &block)
+        guard let block = block else { return nil }
+        samples.withUnsafeMutableBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: count*4) }
+        var asbd = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked, mBytesPerPacket: 4, mFramesPerPacket: 1,
+            mBytesPerFrame: 4, mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0,
+            magicCookie: nil, extensions: nil, formatDescriptionOut: &format)
+        var sb: CMSampleBuffer?
+        CMAudioSampleBufferCreateReadyWithPacketDescriptions(allocator: nil, dataBuffer: block, formatDescription: format!,
+            sampleCount: count, presentationTimeStamp: CMTime(value: Int64(sample), timescale: 48000), packetDescriptions: nil, sampleBufferOut: &sb)
+        return sb
+    }
 }
 
-/// Records one layer (camera video or microphone audio) to its own file, timed from the shared recording zero.
-final class LayerWriter {
-    let url: URL
-    let writer: AVAssetWriter
-    let input: AVAssetWriterInput
-    let adaptor: AVAssetWriterInputPixelBufferAdaptor?
-    let startNs: UInt64
-    let queue: DispatchQueue
-    var finished = false
-    var count = 0, dropped = 0
-    var lastPts = CMTime.negativeInfinity
-    var size: CGSize = .zero
-
-    /// Camera layer: H.264 High at the camera's native size.
-    init(cameraURL url: URL, width: Int, height: Int, startNs: UInt64) throws {
-        self.url = url; self.startNs = startNs; queue = DispatchQueue(label: "layer-camera")
-        size = CGSize(width: width, height: height)
-        writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height,
-            AVVideoColorPropertiesKey: [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                                        AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                                        AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2],
-            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: max(6_000_000, width * height * 6),
-                                              AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                                              AVVideoAllowFrameReorderingKey: false],
-        ])
-        input.expectsMediaDataInRealTime = true
-        adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: nil)
-        try start()
-    }
-
-    /// Microphone layer: mono AAC.
-    init(micURL url: URL, startNs: UInt64) throws {
-        self.url = url; self.startNs = startNs; queue = DispatchQueue(label: "layer-mic")
-        writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
-        input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 160_000])
-        input.expectsMediaDataInRealTime = true
-        adaptor = nil
-        try start()
-    }
-
-    private func start() throws {
-        guard writer.canAdd(input) else { throw NSError(domain: "LayerWriter", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot add input"]) }
-        writer.add(input)
-        guard writer.startWriting() else { throw writer.error ?? NSError(domain: "LayerWriter", code: 2) }
-        writer.startSession(atSourceTime: .zero)
-    }
-
-    private func pts(_ ns: UInt64) -> CMTime? { ns > startNs ? CMTime(value: CMTimeValue(ns - startNs), timescale: 1_000_000_000) : nil }
-
-    func appendVideo(_ pb: CVPixelBuffer, ns: UInt64) {
-        guard let t = pts(ns) else { return }
-        queue.async { [self] in
-            guard !finished, writer.status == .writing, let adaptor = adaptor, t > lastPts else { return }
-            guard input.isReadyForMoreMediaData else { dropped += 1; return }
-            if adaptor.append(pb, withPresentationTime: t) { count += 1; lastPts = t } else { dropped += 1 }
-        }
-    }
-
-    func appendAudio(_ sb: CMSampleBuffer, ns: UInt64) {
-        guard let t = pts(ns) else { return }
-        var timing = CMSampleTimingInfo(duration: CMSampleBufferGetDuration(sb), presentationTimeStamp: t, decodeTimeStamp: .invalid)
-        var out: CMSampleBuffer?
-        guard CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sb, sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleBufferOut: &out) == noErr, let s = out else { return }
-        queue.async { [self] in
-            guard !finished, writer.status == .writing, t > lastPts else { return }
-            guard input.isReadyForMoreMediaData else { dropped += 1; return }
-            if input.append(s) { count += 1; lastPts = t } else { dropped += 1 }
-        }
-    }
-
-    func finish(_ done: @escaping (Bool) -> Void) {
-        queue.async { [self] in
-            finished = true
-            guard writer.status == .writing, count > 0 else { writer.cancelWriting(); try? FileManager.default.removeItem(at: url); done(false); return }
-            input.markAsFinished()
-            writer.finishWriting { done(self.writer.status == .completed) }
-        }
-    }
-}

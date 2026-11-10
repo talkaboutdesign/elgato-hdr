@@ -56,7 +56,10 @@ git clone <this-repo-url> elgato-hdr
 cd elgato-hdr
 brew install libusb          # the helper links against libusb
 xcode-select --install       # if you don't already have the CLT
-./build.sh                   # produces dist/Elgato HDR.app
+swift build                  # compile StudioKit and the executable (Swift 5 mode)
+swift test                   # unit, compositor golden and export tests
+./build.sh                   # release bundle: dist/Elgato HDR.app
+./build.sh debug             # debug bundle, includes --make-fixture
 open "dist/Elgato HDR.app"
 ```
 
@@ -130,9 +133,9 @@ Four moving parts:
 
 2. **Shared-memory hand-off.** The helper writes each frame straight into a shared-memory ring the app reads with zero copies. Only tiny header messages travel over a Unix socket. This keeps 4K frames off the CPU's memory-copy path entirely.
 
-3. **`app/main.swift` — the AppKit app.** A Metal shader converts the 10-bit `P010` planes to RGB directly from shared memory and draws into a PQ / HLG / BT.709 layer with the right EDR metadata, so macOS lights it up as HDR. A display-link scheduler paces frames onto the refresh grid for even motion. Audio plays through AVAudioEngine on a dedicated thread. Recording uses the hardware HEVC `Main 10` encoder via AVAssetWriter, stamping video on a fixed frame grid and gently slewing audio to keep A/V sync locked.
+3. **`Sources/StudioKit/` — the AppKit app.** A Metal shader converts the 10-bit `P010` planes to RGB directly from shared memory and draws into a PQ / HLG / BT.709 layer with the right EDR metadata, so macOS lights it up as HDR. A display-link scheduler paces frames onto the refresh grid for even motion. Audio plays through AVAudioEngine on a dedicated thread. Recording uses the hardware HEVC `Main 10` encoder via AVAssetWriter, stamping video on a fixed frame grid and gently slewing audio to keep A/V sync locked.
 
-4. **`app/Compositor.swift`, `app/Project.swift`, `app/LibraryUI.swift` — layers, editor and export.** The camera and microphone are captured with AVCaptureSession and written to their own files on the same host clock as the game, so the layers line up without any baked-in mix. Each recording's `project.json` stores the 16:9 and 9:16 layouts, trim, volumes and sync offsets. One Metal compositor draws the camera over the game for the live view, the editor preview and the export, decoding each layer by its own color tags and outputting PQ, HLG or tone-mapped SDR, so what you see in the editor is what gets exported.
+4. **`Sources/StudioKit/Render/`, `Model/`, `Edit/`, `UI/` — layers, editor and export.** The camera and microphone are captured with AVCaptureSession and written to their own files on the same host clock as the game, so the layers line up without any baked-in mix. Each recording's `project.json` stores the 16:9 and 9:16 layouts, trim, volumes and sync offsets. One Metal compositor draws the camera over the game for the live view, the editor preview and the export, decoding each layer by its own color tags and outputting PQ, HLG or tone-mapped SDR, so what you see in the editor is what gets exported.
 
 Measured latency from a frame arriving over USB to it appearing on screen is a few milliseconds of app work on top of the card's own processing; the app favors smooth, in-sync output over shaving off the last milliseconds.
 
@@ -150,12 +153,19 @@ The recorded files carry standard HDR10 mastering metadata (1000-nit peak, P3 pr
 ## Project layout
 
 ```
-app/main.swift        The macOS app: capture client, live renderer, audio, game recorder, menus
-app/Camera.swift      Camera + microphone capture and their layer writers (shared host clock)
-app/Compositor.swift  Metal compositor shared by the live view, editor preview and export (PQ/HLG/SDR)
-app/Project.swift     Project model, layout math, AVComposition builder, exporter, library store
-app/LibraryUI.swift   Recordings library and editor (SwiftUI)
-app/Info.plist        App bundle metadata
+Package.swift                 Swift 5.9 package; one StudioKit library, executable and tests
+Sources/ElgatoHDR/main.swift   Three-line executable entry point
+Sources/StudioKit/App/        App delegate extensions, demo source, debug fixture writer
+Sources/StudioKit/Capture/    Helper protocol, sessions, camera + microphone capture
+Sources/StudioKit/Render/     Shared Metal compositor and live renderer
+Sources/StudioKit/Audio/      Audio playback
+Sources/StudioKit/Record/     Game and layer writers
+Sources/StudioKit/Model/      Project, layout math and library
+Sources/StudioKit/Edit/       Composition builder and exporter
+Sources/StudioKit/UI/         Library, editor and Metal view
+Sources/StudioKit/Support/    Logging and socket reads
+Tests/StudioKitTests/         Layout, coding, protocol, golden and export tests
+Resources/Info.plist          App bundle metadata
 tools/uvc_capture.c   Root helper: libusb UVC bypass, P010 capture, USB audio, shm server
 tools/*.c             USB descriptor dumps used while reverse-engineering the card
 tools/modetest.py     Test client that sweeps every capture mode
@@ -178,3 +188,25 @@ Contributions are welcome. Bug reports, new capture-device support, and improvem
 ## License
 
 [MIT](LICENSE). This is an independent project and is not affiliated with or endorsed by Elgato or Corsair.
+
+
+### Development without capture hardware
+
+Always launch the bundle (its Info.plist supplies the privacy declarations):
+
+```sh
+"dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" --demo-source --demo-camera -presentation game --record 5
+# Optional game format, default 2560x1440@60:
+"dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" --demo-source 1920x1080@60 --demo-camera
+# Debug bundle only; a relative name creates a project inside the recordings library:
+"dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" --demo-source --demo-camera --make-fixture "Demo Fixture"
+```
+
+Demo mode uses synthetic P010 game video, game audio, a 720p camera and mono mic without helper privileges or
+camera/microphone access. Use both flags to bypass saved real-device selections. The moving picture flashes with
+a 50 ms 1 kHz beep each second. Recordings and exports use the normal code paths.
+Logs are in `~/Library/Logs/Elgato HDR.log` and stderr.
+
+`RECORD_GOLDENS=1 swift test --filter CompositorGoldenTests` regenerates the twelve PQ/HLG/SDR layout goldens;
+review changes before committing. Metal tests skip without a Metal device; export tests skip without hardware HEVC.
+CI runs build, tests and release bundling on macOS 15. No ffmpeg runtime dependency is used.
