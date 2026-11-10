@@ -9,7 +9,7 @@ enum FixtureProject {
         let zero: UInt64 = 1_000_000_000
         let recorder = try Recorder(url: dir.appendingPathComponent("game.mov"), width: 1920, height: 1080, fps: 60, colorMode: .pq, startNs: zero)
         let camera = try LayerWriter(cameraURL: dir.appendingPathComponent("camera.mov"), width: 1280, height: 720, startNs: zero)
-        let mic = try LayerWriter(micURL: dir.appendingPathComponent("mic.m4a"), startNs: zero)
+        let mic = try LayerWriter(micURL: dir.appendingPathComponent("mic.mov"), startNs: zero)
         let source = DemoSource(width: 1920, height: 1080, fps: 60)
         for frame in 0..<120 {
             var out: CVPixelBuffer?
@@ -48,7 +48,7 @@ enum FixtureProject {
         guard recorder.writer.status == .completed, camOK, micOK else { throw CompositionBuilder.err("fixture writing failed: \(msg)") }
         var p = Project(name: dir.lastPathComponent, createdAt: Date())
         p.width = 1920; p.height = 1080; p.fps = 60
-        p.camera = LayerInfo(file: "camera.mov"); p.mic = LayerInfo(file: "mic.m4a")
+        p.camera = LayerInfo(file: "camera.mov"); p.mic = LayerInfo(file: "mic.mov")
         let doc = ProjectDoc(dir: dir, project: p)
         await withCheckedContinuation { c in doc.finalize { c.resume() } }
         return doc

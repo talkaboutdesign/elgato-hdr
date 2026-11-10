@@ -27,6 +27,9 @@ final class Recorder {
     var lastIndex: Int64 = -1
     var slewSamples = 0
 
+    /// Below one second the per-fragment index writes start to cost the recorder queue real time.
+    static let fragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
+
     static func hdr10Metadata() -> (Data, Data) {
         // Mastering display (SEI order G,B,R then white point; 0.00002 units), luminance 1000 / 0.005 nits (0.0001 units)
         var m = Data()
@@ -81,6 +84,9 @@ final class Recorder {
         audioFormat = fd!
         guard writer.canAdd(video), writer.canAdd(audio) else { throw NSError(domain: "Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot add inputs"]) }
         writer.add(video); writer.add(audio)
+        // Fragmented movie: the index is written every 2 s instead of only at finishWriting, so a crash or power cut
+        // loses the last fragment, not the whole file. Must be set before startWriting.
+        writer.movieFragmentInterval = Recorder.fragmentInterval
         guard writer.startWriting() else { throw writer.error ?? NSError(domain: "Recorder", code: 2) }
         writer.startSession(atSourceTime: .zero)
         sessionStarted = true

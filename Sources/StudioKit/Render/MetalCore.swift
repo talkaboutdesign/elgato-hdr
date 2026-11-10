@@ -77,7 +77,7 @@ struct LayerU {
     float4 shape;       // corner radius px, border px, shadow px, opacity
     float4 color;       // color layers: SDR BT.709 code values and alpha
     int4 fmt;           // kind (0 biplanar YCbCr, 1 premultiplied RGBA, 2 color), source transfer, output transfer, bits
-    int4 flags;         // source uses BT.709 matrix, mirror, -, -
+    int4 flags;         // source uses BT.709 matrix, mirror, hard edge, -
 };
 
 // Returns non-premultiplied colour and alpha for source-over blending. With coverage a and shadow s the result over
@@ -89,7 +89,9 @@ fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]],
     float2 h = u.dst.zw * 0.5, c = u.dst.xy + h;
     float r = min(u.shape.x, min(h.x, h.y)), border = u.shape.y, shadow = u.shape.z, opacity = u.shape.w;
     float d = sdRoundRect(p, c, h, r);
-    float a = clamp(0.5 - d, 0.0, 1.0) * opacity;
+    // Hard edge: the former shader's inclusive clip of the game to its rectangle, so no row is half covered.
+    float2 e = (p - u.dst.xy) / u.dst.zw;
+    float a = (u.flags.z != 0 ? (all(e >= 0.0) && all(e <= 1.0) ? 1.0 : 0.0) : clamp(0.5 - d, 0.0, 1.0)) * opacity;
     float s = 0.0;
     if (shadow > 0.0) s = 0.45 * (1.0 - smoothstep(-shadow * 0.5, shadow, sdRoundRect(p - float2(0.0, shadow * 0.35), c, h, r))) * opacity;
     float3 cc = float3(0.0);
@@ -309,7 +311,7 @@ final class MetalCore {
             var u = base, t0 = blank8, t1 = blank8c
             u.dst = SIMD4(r.dst); u.src = SIMD4(r.src)
             u.shape = SIMD4(Float(r.radius), Float(r.border), Float(r.shadow), Float(r.opacity))
-            u.flags.y = r.mirror ? 1 : 0
+            u.flags.y = r.mirror ? 1 : 0; u.flags.z = r.hardEdge ? 1 : 0
             switch l.textures {
             case let .biplanar(y, c, bits, transfer, bt709):
                 u.fmt.x = 0; u.fmt.y = transfer; u.fmt.w = bits; u.flags.x = bt709 ? 1 : 0; t0 = y; t1 = c
