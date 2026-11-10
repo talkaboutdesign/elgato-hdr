@@ -56,7 +56,7 @@ private struct LayerListSection: View {
                         .onDrop(of: [UTType.text], delegate: LayerDropDelegate(target: l.id, model: model, dragging: $dragging))
                 }
                 if layers.isEmpty {
-                    Text("No layers. Add the game or the camera with +.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("No layers. Add the game, the camera, an image or text with +.").font(.system(size: 11)).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, DS.Space.xs)
                 }
             }
@@ -146,15 +146,84 @@ private struct LayerRow: View {
 private struct AddLayerMenu: View {
     let model: SceneModel
     var body: some View {
-        Menu {
-            Button("Game") { model.actions.addLayer("game") }
-            Button("Camera") { model.actions.addLayer("camera") }
-            Button("Color Backdrop") { model.actions.addLayer("color") }
-            Divider()
-            Button("Image and Text (coming soon)") {}.disabled(true)
-        } label: { Image(systemName: "plus").font(.system(size: 11, weight: .semibold)) }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        Button { model.addLayerOpen.toggle() } label: {
+            Image(systemName: "plus").font(.system(size: 11, weight: .semibold)).frame(width: 20, height: 16).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).foregroundStyle(model.addLayerOpen ? Color.accentColor : Color.secondary)
         .help("Add a layer to this scene")
+        .accessibilityLabel("Add layer")
+        .popover(isPresented: Binding(get: { model.addLayerOpen }, set: { model.addLayerOpen = $0 }), arrowEdge: .bottom) {
+            AddLayerPalette(model: model)
+        }
+    }
+}
+
+/// What can be added to the scene being edited, grouped: overlays first (what this menu is mostly for), then the
+/// capture sources, then ready-made presets.
+struct AddLayerPalette: View {
+    let model: SceneModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Space.m) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Add to “\(model.active.name)”").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text("\(model.canvas.label) canvas").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            group("Overlays") {
+                AddLayerTile(title: "Image…", symbol: "photo", help: "Choose an image file (PNG, JPEG, HEIC, TIFF, GIF)") { later { model.actions.addImage(nil, nil) } }
+                AddLayerTile(title: "Text", symbol: "textformat", help: "A line of text; {timer} and {time} update live") { model.actions.addLayer("text") }
+                AddLayerTile(title: "Color", symbol: "paintpalette", help: "A solid colour behind everything") { model.actions.addLayer("color") }
+            }
+            group("Sources") {
+                AddLayerTile(title: "Game", symbol: "gamecontroller", help: "The capture card picture") { model.actions.addLayer("game") }
+                AddLayerTile(title: "Camera", symbol: "person.crop.rectangle", help: "Your camera in a window") { model.actions.addLayer("camera") }
+            }
+            group("Presets") {
+                ForEach(LayerPreset.allCases) { p in AddLayerTile(title: p.name, symbol: p.symbol, help: p.summary) { model.actions.addPreset(p) } }
+            }
+            Divider().opacity(0.5)
+            Label("Or drag an image file onto the picture", systemImage: "arrow.down.doc")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+        .padding(DS.Space.l)
+        .frame(width: 304)
+        .environment(\.colorScheme, .dark)
+    }
+
+    private func group<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).kerning(0.6).foregroundStyle(.secondary)
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(84), spacing: DS.Space.s), count: 3), alignment: .leading, spacing: DS.Space.s) { content() }
+        }
+    }
+    /// The open panel is a sheet on the window: let the popover close first.
+    private func later(_ f: @escaping () -> Void) { model.addLayerOpen = false; DispatchQueue.main.async(execute: f) }
+}
+
+private struct AddLayerTile: View {
+    let title: String
+    let symbol: String
+    let help: String
+    let action: () -> Void
+    @State private var hover = false
+    @State private var pressed = false
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 17, weight: .regular)).frame(height: 20)
+                Text(title).font(.system(size: 11, weight: .medium)).lineLimit(1).minimumScaleFactor(0.85)
+            }
+            .foregroundStyle(hover ? Color.primary : Color.primary.opacity(0.85))
+            .frame(width: 84, height: 62)
+            .background(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous).fill(Color.white.opacity(hover ? 0.11 : 0.05)))
+            .overlay(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous).strokeBorder(hover ? Color.accentColor.opacity(0.7) : DS.Color.stroke))
+            .contentShape(Rectangle())
+            .scaleEffect(DS.Motion.pressScale(pressed))
+        }
+        .buttonStyle(PressTracking(pressed: $pressed))
+        .onHover { hover = $0 }
+        .animation(DS.Motion.snappy, value: hover)
+        .help(help)
+        .accessibilityLabel("Add \(title)")
     }
 }
 
@@ -162,7 +231,7 @@ private struct NoSelectionHint: View {
     var body: some View {
         HStack(alignment: .top, spacing: DS.Space.s) {
             Image(systemName: "cursorarrow.click.2").foregroundStyle(.secondary)
-            Text("Click a layer on the picture or in the list to arrange it. Drag to move, drag a handle to resize, double-click the game or camera to crop.")
+            Text("Click a layer on the picture or in the list to arrange it. Drag to move, drag a handle to resize, double-click the game or camera to crop, double-click text to edit it. Drop an image file on the picture to add it.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, DS.Space.xs)
@@ -218,11 +287,16 @@ private struct LayerInspector: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if layer.source.type == "color" { ColorRow(model: model, layer: layer) }
-            slider("Corners", \.roundness, 0...0.5, 0)
+            if layer.source.type == "text" { TextControls(model: model, layer: layer) }
+            if layer.source.type == "image" { ImageControls(model: model, layer: layer) }
+            if layer.source.type != "text" { slider("Corners", \.roundness, 0...0.5, 0) }
             slider("Opacity", \.opacity, 0...1, 1)
-            Divider().opacity(0.4)
-            ToggleRow(label: "Border", isOn: layer.border, help: "Thin white border") { on in model.actions.editLayer(id) { $0.border = on } }
-            ToggleRow(label: "Shadow", isOn: layer.shadow, help: "Soft shadow under the layer") { on in model.actions.editLayer(id) { $0.shadow = on } }
+            if layer.source.type != "text" {
+                // Text has its own shadow (around the letters) and plate; a frame border or box shadow would not fit it.
+                Divider().opacity(0.4)
+                ToggleRow(label: "Border", isOn: layer.border, help: "Thin white border") { on in model.actions.editLayer(id) { $0.border = on } }
+                ToggleRow(label: "Shadow", isOn: layer.shadow, help: "Soft shadow under the layer") { on in model.actions.editLayer(id) { $0.shadow = on } }
+            }
             if layer.isGameOrCamera {
                 ToggleRow(label: "Mirror", isOn: layer.mirror, help: isCamera ? "Flip the camera horizontally, in every scene" : "Flip horizontally") { on in
                     if isCamera { state.actions.setMirror(on) } else { model.actions.editLayer(id) { $0.mirror = on } }
@@ -335,19 +409,140 @@ private struct ColorRow: View {
     let model: SceneModel
     let layer: Layer
     var body: some View {
-        let current = Color(.sRGB, red: component(0, 0), green: component(1, 0), blue: component(2, 0), opacity: component(3, 1))
-        InspectorRow(label: "Color") {
-            ColorPicker("Color", selection: Binding(get: { current }, set: { new in
+        ColorWellRow(label: "Color", value: layer.source.color ?? [0, 0, 0, 1]) { v in model.actions.editLayer(layer.id) { $0.source.color = v } }
+    }
+}
+
+/// A colour as SDR sRGB code values r, g, b, a, edited with the system colour panel.
+private struct ColorWellRow: View {
+    let label: String
+    let value: [Double]
+    let set: ([Double]) -> Void
+    var body: some View {
+        let c = { (i: Int, d: Double) -> Double in i < value.count ? value[i] : d }
+        InspectorRow(label: label) {
+            ColorPicker(label, selection: Binding(get: { Color(.sRGB, red: c(0, 0), green: c(1, 0), blue: c(2, 0), opacity: c(3, 1)) }, set: { new in
                 guard let s = NSColor(new).usingColorSpace(.sRGB) else { return }
-                let v: [Double] = [Double(s.redComponent), Double(s.greenComponent), Double(s.blueComponent), Double(s.alphaComponent)]
-                model.actions.editLayer(layer.id) { $0.source.color = v }
+                set([Double(s.redComponent), Double(s.greenComponent), Double(s.blueComponent), Double(s.alphaComponent)])
             }))
             .labelsHidden()
         }
     }
-    private func component(_ i: Int, _ fallback: Double) -> Double {
-        guard let c = layer.source.color, i < c.count else { return fallback }
-        return c[i]
+}
+
+/// Text layer: the words (live as you type; one undo step per edit), tokens, font, weight, alignment, colour, plate
+/// and shadow.
+private struct TextControls: View {
+    let model: SceneModel
+    let layer: Layer
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+    static let weights: [(String, String)] = [("regular", "Regular"), ("medium", "Medium"), ("semibold", "Semibold"), ("bold", "Bold"), ("heavy", "Heavy")]
+
+    private var spec: TextSpec { layer.source.text ?? TextSpec() }
+    private func set(_ name: String = "Change Text", _ f: @escaping (inout TextSpec) -> Void) {
+        model.actions.editLayer(layer.id) { l in var t = l.source.text ?? TextSpec(); f(&t); l.source.text = t }
+    }
+
+    var body: some View {
+        let t = spec
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Text").font(.system(size: 12)).foregroundStyle(.secondary)
+                Spacer()
+                Menu {
+                    Button("Stream or Recording Time  {timer}") { insert("{timer}") }
+                    Button("Clock  {time}") { insert("{time}") }
+                } label: { Text("Insert").font(.system(size: 11, weight: .medium)) }
+                .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
+                .help("Live values that update while you stream or record")
+            }
+            TextField("Text", text: $draft, axis: .vertical)
+                .lineLimit(1...4).textFieldStyle(.plain).font(.system(size: 13))
+                .focused($focused)
+                .padding(.horizontal, DS.Space.s).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous).fill(Color.white.opacity(focused ? 0.1 : 0.06)))
+                .overlay(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous).strokeBorder(focused ? Color.accentColor.opacity(0.8) : .clear))
+                .onChange(of: draft) { _, v in if v != spec.string { set { $0.string = v } } }
+                .onChange(of: focused) { _, f in if f { model.actions.beginGesture() } else { model.actions.endGesture("Edit Text") } }
+                .accessibilityLabel("Text")
+            Text("{timer} counts the stream while live, else the recording. {time} is the clock. ⌥↩ adds a line.")
+                .font(.system(size: 10)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { draft = t.string; takeFocusIfAsked() }
+        .onChange(of: layer.id) { _, _ in draft = spec.string }
+        // Undo, or an edit from elsewhere; typing round-trips to the same string.
+        .onChange(of: t.string) { _, v in if v != draft { draft = v } }
+        .onChange(of: model.focusTextLayerID) { _, _ in takeFocusIfAsked() }
+        InspectorRow(label: "Font") {
+            Picker("Font", selection: Binding(get: { t.fontName }, set: { n in set { $0.fontName = n } })) {
+                Text("System").tag("")
+                Divider()
+                ForEach(TextRasterizer.families, id: \.self) { Text($0).tag($0) }
+                if !t.fontName.isEmpty && !TextRasterizer.families.contains(t.fontName) { Text(t.fontName).tag(t.fontName) }
+            }
+            .labelsHidden().pickerStyle(.menu).fixedSize()
+        }
+        InspectorRow(label: "Weight") {
+            Picker("Weight", selection: Binding(get: { t.weight }, set: { w in set { $0.weight = w } })) {
+                ForEach(Self.weights, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .labelsHidden().pickerStyle(.menu).fixedSize()
+        }
+        InspectorRow(label: "Alignment") {
+            SegmentedSwitch(selection: Binding(get: { t.alignment }, set: { a in set { $0.alignment = a } }), options: [
+                .init(value: "left", label: "Left", systemImage: "text.alignleft"),
+                .init(value: "center", label: "Centre", systemImage: "text.aligncenter"),
+                .init(value: "right", label: "Right", systemImage: "text.alignright"),
+            ], iconOnly: true)
+            .frame(width: 132)
+        }
+        ColorWellRow(label: "Color", value: t.color) { v in set { $0.color = v } }
+        Divider().opacity(0.4)
+        ToggleRow(label: "Plate", isOn: t.plate != nil, help: "A rounded background behind the text") { on in set { $0.plate = on ? ScreenStyle.plate : nil } }
+        if let plate = t.plate {
+            ColorWellRow(label: "Plate color", value: plate) { v in set { $0.plate = v } }
+            LabeledSlider(label: "Plate corners", value: Binding(get: { t.plateRadius }, set: { v in set { $0.plateRadius = v } }),
+                          range: 0...0.5, defaultValue: TextSpec().plateRadius,
+                          onEditingChanged: { e in if e { model.actions.beginGesture() } else { model.actions.endGesture("Change Plate") } })
+        }
+        ToggleRow(label: "Shadow", isOn: t.shadow, help: "A soft shadow behind the letters, for text over the game") { on in set { $0.shadow = on } }
+    }
+
+    private func insert(_ token: String) {
+        let s = draft.isEmpty ? token : draft + (draft.hasSuffix(" ") ? "" : " ") + token
+        draft = s
+        set { $0.string = s }
+    }
+    private func takeFocusIfAsked() {
+        guard model.focusTextLayerID == layer.id else { return }
+        model.focusTextLayerID = nil
+        DispatchQueue.main.async { focused = true }
+    }
+}
+
+/// Image layer: which file (and replacing it) and how it fills its frame.
+private struct ImageControls: View {
+    let model: SceneModel
+    let layer: Layer
+    var body: some View {
+        let file = layer.source.file ?? ""
+        let missing = AssetStore.locate(file, in: AssetStore.searchPaths(project: nil)) == nil
+        InspectorRow(label: "File") {
+            HStack(spacing: DS.Space.s) {
+                if missing { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(DS.Color.warn).help("The image file is missing") }
+                Text(layer.name.isEmpty ? file : layer.name).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: 110, alignment: .trailing)
+                Button("Replace…") { model.actions.replaceImage(layer.id) }.controlSize(.small)
+            }
+        }
+        InspectorRow(label: "Picture") {
+            SegmentedSwitch(selection: Binding(get: { layer.fit }, set: { f in model.actions.editLayer(layer.id) { $0.fit = f } }), options: [
+                .init(value: false, label: "Fill", help: "Crop the image to fill the frame"),
+                .init(value: true, label: "Fit", help: "Show the whole image inside the frame"),
+            ])
+            .frame(width: 132)
+        }
     }
 }
 

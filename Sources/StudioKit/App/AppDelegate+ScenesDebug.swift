@@ -7,13 +7,17 @@ import Metal
 /// `screencapture` fails):
 /// `EHDR_MORPH_DUMP=<dir>` renders transitions offscreen through the compositor, frame by frame, as PNGs;
 /// `EHDR_SCENE_DEMO=<dir>` drives the picture editor with synthetic mouse events and writes the studio window with
-/// the picture (rendered offscreen, SDR) and its editing overlay composited in.
+/// the picture (rendered offscreen, SDR) and its editing overlay composited in;
+/// `EHDR_OVERLAY_DEMO=<dir>` (with `EHDR_OVERLAY_DEMO_IMAGE=<png>`) does the same for image and text layers, the
+/// presets and the screen templates, and renders each template offscreen in both canvases.
 extension AppDelegate {
     func startSceneDebug() {
         let env = ProcessInfo.processInfo.environment
         if let dir = env["EHDR_MORPH_DUMP"] { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.dumpTransitions(to: dir) } }
         if let dir = env["EHDR_SCENE_DEMO"] { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.runSceneDemo(dir) } }
         if env["EHDR_EVENT_DEMO"] != nil { runEventDemo() }
+        if let dir = env["EHDR_LIVE_DEMO"] { runLiveDemo(dir) }
+        if let dir = env["EHDR_OVERLAY_DEMO"] { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.runOverlayDemo(dir, image: env["EHDR_OVERLAY_DEMO_IMAGE"]) } }
     }
 
     /// With `--record 15` (recording from 4 s to 19 s): three switches, one punch-in and a marker while recording.
@@ -49,15 +53,18 @@ extension AppDelegate {
         return (sources, textures, keep)
     }
 
-    /// One SDR picture of `frame` at `size`.
-    func renderOffscreen(_ make: ([SourceKey: SourceInfo]) -> SceneFrame, size: CGSize) -> CGImage? {
+    /// One SDR picture of `frame` at `size`. `overlays`: the image and text layers it may draw, waited for (this is a
+    /// debug render on the main thread, not a live one).
+    func renderOffscreen(_ make: ([SourceKey: SourceInfo]) -> SceneFrame, size: CGSize, overlays: [Layer] = []) -> CGImage? {
         let core = MetalCore.shared, live = liveTextures()
         defer { if live.sources[.game] != nil { sceneRuntime.thumbnailer.snapshot.endRead() } }
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: Int(size.width), height: Int(size.height), mipmapped: false)
         d.usage = [.renderTarget, .shaderRead]; d.storageMode = .shared
         guard let t = core.device.makeTexture(descriptor: d), let cb = core.queue.makeCommandBuffer() else { return nil }
-        let f = make(live.sources)
-        core.encodeLayers(cb, target: t, canvas: size, background: f.background, outTransfer: 2, layers: DrawLayer.pair(f.layers, live.textures))
+        let ctx = sceneRuntime.overlayContext
+        let o = OverlayTextureCache.shared.overlays(for: Composition(layers: overlays), canvas: size, assets: ctx.assets, tokens: ctx.tokens(atNs: nowNs()), wait: true)
+        let f = make(live.sources.merging(o.sources) { a, _ in a })
+        core.encodeLayers(cb, target: t, canvas: size, background: f.background, outTransfer: 2, layers: DrawLayer.pair(f.layers, live.textures.merging(o.textures) { a, _ in a }))
         cb.commit(); cb.waitUntilCompleted()
         _ = live.keep
         return SceneThumbnailer.image(t)
@@ -127,7 +134,7 @@ extension AppDelegate {
         ctx.scaleBy(x: scale, y: scale)
         ctx.translateBy(x: vf.minX, y: vf.minY)
         ctx.setFillColor(NSColor.black.cgColor); ctx.fill(view.bounds)
-        if let pic = renderOffscreen({ st.frame(canvas: m.canvas, size: px, sources: $0, atNs: t) }, size: px) { ctx.draw(pic, in: v) }
+        if let pic = renderOffscreen({ st.frame(canvas: m.canvas, size: px, sources: $0, atNs: t) }, size: px, overlays: st.overlayLayers(canvas: m.canvas, atNs: t)) { ctx.draw(pic, in: v) }
         for l in view.metalLayer.sublayers ?? [] where !l.isHidden {
             ctx.saveGState(); ctx.translateBy(x: l.frame.minX, y: l.frame.minY); l.render(in: ctx); ctx.restoreGState()
         }
@@ -232,6 +239,130 @@ extension AppDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + steps[i].0) { steps[i].1(); run(i + 1) }
         }
         run(0)
+    }
+
+    // MARK: Overlay demo
+
+    func runOverlayDemo(_ path: String, image: String?) {
+        let dir = URL(fileURLWithPath: path), m = scenes
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        UserDefaults.standard.set("scene", forKey: "sidebarTab")
+        var steps: [(Double, () -> Void)] = []
+        func step(_ wait: Double, _ f: @escaping () -> Void) { steps.append((wait, f)) }
+        func layer(_ type: String) -> Layer? { m.composition.layers.last { $0.source.type == type } }
+        func count() -> String { m.composition.layers.map(\.displayName).joined(separator: ", ") }
+        step(1.0) { m.actions.selectLayer(nil); self.snapshotAll(dir, "20-scene-tab") }
+        step(0.1) { m.addLayerOpen = true }
+        step(1.2) { self.snapshotAll(dir, "21-add-layer") }
+        step(0.1) { m.addLayerOpen = false; m.actions.addLayer("text") }
+        step(0.6) {
+            guard let t = layer("text") else { return }
+            log("overlay-demo: text layer added, inspector field asked for focus: \(m.focusTextLayerID == nil ? "taken" : "pending"), first responder \(String(describing: self.window.firstResponder.map { type(of: $0) }))")
+            m.actions.editLayer(t.id) { $0.source.text?.string = "Welcome to the stream" }
+        }
+        step(1.0) { self.snapshotAll(dir, "22-text-inspector") }
+        step(0.1) {
+            guard let t = layer("text") else { return }
+            m.actions.editLayer(t.id) { l in l.source.text?.weight = "heavy"; l.source.text?.fontName = "Avenir Next"; l.source.text?.plate = [0.42, 0.49, 1, 0.92] }
+        }
+        step(1.0) { self.snapshotAll(dir, "23-text-styled") }
+        step(0.1) {
+            guard let img = image else { log("overlay-demo: no EHDR_OVERLAY_DEMO_IMAGE, skipping the drop"); return }
+            let v = self.view.videoRect, ref = m.canvasSize, p = CGPoint(x: 420, y: 260)
+            self.view.dropImages([URL(fileURLWithPath: img)], at: CGPoint(x: v.minX + p.x / ref.width * v.width, y: v.maxY - p.y / ref.height * v.height), actions: m.actions)
+        }
+        step(1.5) { log("overlay-demo: after the drop: \(count())"); self.snapshotAll(dir, "24-image-dropped") }
+        // Move the image like any layer, then resize it from its corner.
+        step(0.1) {
+            guard let r = layer("image")?.frame.rect(in: m.canvasSize) else { return }
+            self.pictureMouse(.leftMouseDown, CGPoint(x: r.midX, y: r.midY))
+            for i in 1...8 { self.pictureMouse(.leftMouseDragged, CGPoint(x: r.midX + CGFloat(i) * 12, y: r.midY + CGFloat(i) * 6)) }
+            self.pictureMouse(.leftMouseUp, CGPoint(x: r.midX + 96, y: r.midY + 48))
+            guard let q = layer("image")?.frame.rect(in: m.canvasSize) else { return }
+            self.pictureMouse(.leftMouseDown, CGPoint(x: q.maxX, y: q.maxY))
+            for i in 1...6 { self.pictureMouse(.leftMouseDragged, CGPoint(x: q.maxX + CGFloat(i) * 15, y: q.maxY + CGFloat(i) * 5)) }
+        }
+        step(1.0) { self.snapshotAll(dir, "25-image-resizing") }
+        step(0.1) {
+            guard let q = layer("image")?.frame.rect(in: m.canvasSize) else { return }
+            self.pictureMouse(.leftMouseUp, CGPoint(x: q.maxX, y: q.maxY))
+            log("overlay-demo: image moved and resized to \(NSStringFromRect(q))")
+        }
+        step(0.3) { m.actions.addPreset(.nameTag) }
+        step(1.0) { self.snapshotAll(dir, "26-name-tag") }
+        step(0.1) { m.actions.addPreset(.cameraFrame) }
+        step(1.0) { self.snapshotAll(dir, "27-camera-frame"); log("overlay-demo: layers \(count())") }
+        // ⌫ on the picture deletes the selected overlay (the camera frame).
+        step(0.1) {
+            self.window.makeFirstResponder(self.view)
+            let before = m.composition.layers.count
+            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: self.window.windowNumber,
+                                        context: nil, characters: "\u{8}", charactersIgnoringModifiers: "\u{8}", isARepeat: false, keyCode: 51) { self.view.keyDown(with: e) }
+            log("overlay-demo: delete key: \(before) -> \(m.composition.layers.count) layers")
+        }
+        // Double-click the text on the picture: its inspector field takes the focus.
+        step(0.5) {
+            guard let r = m.composition.layers.first(where: { $0.source.type == "text" })?.frame.rect(in: m.canvasSize) else { return }
+            self.pictureMouse(.leftMouseDown, CGPoint(x: r.midX, y: r.midY)); self.pictureMouse(.leftMouseUp, CGPoint(x: r.midX, y: r.midY))
+            self.pictureMouse(.leftMouseDown, CGPoint(x: r.midX, y: r.midY), clicks: 2); self.pictureMouse(.leftMouseUp, CGPoint(x: r.midX, y: r.midY), clicks: 2)
+        }
+        step(0.8) {
+            log("overlay-demo: double-click on text: selected \(m.selectedLayer?.displayName ?? "-"), first responder \(String(describing: self.window.firstResponder.map { type(of: $0) }))")
+            self.snapshotAll(dir, "28-text-double-click")
+        }
+        step(0.1) { m.actions.selectLayer(nil); m.galleryOpen = true }
+        step(1.6) { self.snapshotAll(dir, "29-gallery") }
+        step(0.1) { m.galleryOpen = false }
+        for t in SceneTemplate.allCases where t.isScreen {
+            step(0.3) { m.actions.add(t) }
+            step(1.2) { m.actions.selectLayer(nil); self.snapshotAll(dir, "30-\(t.rawValue)-wide") }
+            step(0.1) { m.actions.setCanvas(.vertical) }
+            step(1.2) { m.actions.selectLayer(nil); self.snapshotAll(dir, "31-\(t.rawValue)-vertical") }
+            step(0.1) { m.actions.setCanvas(.wide) }
+        }
+        // Each template on its own, offscreen at 1280×720 and 720×1280.
+        step(0.3) {
+            let t0 = nowNs()
+            for t in SceneTemplate.allCases {
+                let sc = t.scene(mirror: self.cameraMirror)
+                for c in Canvas.allCases {
+                    let size = c == .wide ? CGSize(width: 1280, height: 720) : CGSize(width: 720, height: 1280)
+                    let st = LiveSceneState(scene: sc)
+                    if let img = self.renderOffscreen({ st.frame(canvas: c, size: size, sources: $0, atNs: t0) }, size: size, overlays: st.overlayLayers(canvas: c, atNs: t0)) {
+                        AppDelegate.writePNG(img, dir.appendingPathComponent("template-\(t.rawValue)-\(c.rawValue).png"))
+                    }
+                }
+            }
+            log("overlay-demo: templates rendered")
+        }
+        step(0.5) { m.actions.switchTo(m.collection.scenes[0].id) }
+        step(1.0) { log("overlay-demo: done") }
+        func run(_ i: Int) {
+            guard i < steps.count else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + steps[i].0) { steps[i].1(); run(i + 1) }
+        }
+        run(0)
+    }
+
+    /// With `--go-live-for` (live from 3 s): the window while live, the health popover, a recording started while
+    /// live, a scene switch and the live zoom while live. Seconds after launch.
+    func runLiveDemo(_ path: String) {
+        let dir = URL(fileURLWithPath: path), m = scenes
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let script: [(Double, () -> Void)] = [
+            (10, { self.snapshotAll(dir, "40-live-window") }),
+            (10.5, { self.state.streaming.showGoLivePopover = true }),
+            (12, { self.snapshotAll(dir, "41-live-health-popover") }),
+            (12.5, { self.state.streaming.showGoLivePopover = false; self.startRecording() }),
+            (15, { self.snapshotAll(dir, "42-live-and-recording") }),
+            (15.5, { m.actions.switchTo(m.collection.scenes[min(2, m.collection.scenes.count - 1)].id) }),
+            (15.62, { self.snapshotAll(dir, "43-switching-while-live") }),
+            (17, { self.setPunchIn(true) }),
+            (18.5, { self.snapshotAll(dir, "44-zoom-while-live") }),
+            (19, { self.setPunchIn(false); self.stopRecording() }),
+            (21, { self.snapshotAll(dir, "45-recording-saved-toast") }),
+        ]
+        for (t, f) in script { DispatchQueue.main.asyncAfter(deadline: .now() + t) { f() } }
     }
 }
 #endif

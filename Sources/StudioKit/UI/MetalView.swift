@@ -1,15 +1,18 @@
 import AppKit
 import Metal
 import QuartzCore
+import UniformTypeIdentifiers
 
 /// The live view. Besides hosting the Metal layer it lets you arrange the active scene's layers directly on the
 /// picture: click selects the topmost layer, drag moves it (snapping to the canvas, its margins and other layers,
 /// with guides; ⌥ turns snapping off), handles resize it, scroll or pinch resizes about the centre, arrow keys nudge,
-/// ⌫ deletes (game and camera are hidden), double-click crops. Geometry is worked out in pixels of the 1080p canvas,
-/// so a 1 px nudge is a pixel of the output.
+/// ⌫ deletes (game and camera are hidden), double-click crops (or, on text, edits it in the inspector). Image files
+/// dropped on the picture become image layers at the drop point. Geometry is worked out in pixels of the 1080p
+/// canvas, so a 1 px nudge is a pixel of the output.
 final class MetalView: NSView {
     let metalLayer = CAMetalLayer()
     private let hover = CAShapeLayer(), selection = CAShapeLayer(), handles = CAShapeLayer(), guides = CAShapeLayer(), cropExtent = CAShapeLayer()
+    private let dropTarget = CAShapeLayer()
     private let readout = CATextLayer()
     /// Aspect of the canvas the window shows: 16:9 or 9:16, letterboxed in the view.
     var canvasAspect = CGSize(width: 16, height: 9) { didSet { if canvasAspect != oldValue { refreshOverlay() } } }
@@ -51,6 +54,11 @@ final class MetalView: NSView {
         readout.cornerRadius = 5; readout.alignmentMode = .center; readout.isHidden = true
         readout.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull()]
         metalLayer.addSublayer(readout)
+        dropTarget.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor; dropTarget.strokeColor = accent
+        dropTarget.lineWidth = 2; dropTarget.lineDashPattern = [8, 5]; dropTarget.isHidden = true
+        dropTarget.actions = ["position": NSNull(), "bounds": NSNull(), "path": NSNull()]
+        metalLayer.addSublayer(dropTarget)
+        registerForDraggedTypes([.fileURL])
     }
     required init?(coder: NSCoder) { fatalError() }
     override var acceptsFirstResponder: Bool { true }
@@ -207,6 +215,7 @@ final class MetalView: NSView {
         }
         guard let l = hit(p) else { m.actions.selectLayer(nil); return }
         if e.clickCount == 2, l.isGameOrCamera { m.actions.setCrop(l.id); return }
+        if e.clickCount == 2, l.source.type == "text" { m.actions.editText(l.id); return }
         m.actions.selectLayer(l.id)
         let r = rect(l)
         m.actions.beginGesture()
@@ -338,5 +347,40 @@ final class MetalView: NSView {
             m.actions.editLayer(l.id) { $0.frame = NRect(r, in: self.ref) }
         }
         refreshOverlay()
+    }
+
+    // MARK: Dropping image files
+
+    /// Image files among the dragged items, in the formats the asset store takes.
+    private func imageURLs(_ info: NSDraggingInfo) -> [URL] {
+        let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return urls.filter { u in UTType(filenameExtension: u.pathExtension).map { t in AssetStore.supportedTypes.contains { t.conforms(to: $0) } } ?? false }
+    }
+    private func showDropTarget(_ on: Bool) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        dropTarget.frame = bounds
+        dropTarget.path = CGPath(rect: videoRect.insetBy(dx: 3, dy: 3), transform: nil)
+        dropTarget.isHidden = !on
+        CATransaction.commit()
+    }
+    override func draggingEntered(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard editingEnabled, scenes != nil, !imageURLs(info).isEmpty else { return [] }
+        showDropTarget(true); return .copy
+    }
+    override func draggingUpdated(_ info: NSDraggingInfo) -> NSDragOperation { editingEnabled && !dropTarget.isHidden ? .copy : [] }
+    override func draggingExited(_ info: NSDraggingInfo?) { showDropTarget(false) }
+    override func draggingEnded(_ info: NSDraggingInfo) { showDropTarget(false) }
+    override func performDragOperation(_ info: NSDraggingInfo) -> Bool {
+        showDropTarget(false)
+        let urls = imageURLs(info)
+        guard editingEnabled, let m = scenes, !urls.isEmpty else { return false }
+        dropImages(urls, at: convert(info.draggingLocation, from: nil), actions: m.actions)
+        return true
+    }
+    /// Each file becomes a layer at the drop point (view coordinates); several are fanned out a little.
+    func dropImages(_ urls: [URL], at viewPoint: CGPoint, actions: SceneActions) {
+        let v = videoRect
+        let p = CGPoint(x: (viewPoint.x - v.minX) / v.width * ref.width, y: (v.maxY - viewPoint.y) / v.height * ref.height)
+        for (i, u) in urls.prefix(8).enumerated() { actions.addImage(u, CGPoint(x: p.x + CGFloat(i) * 40, y: p.y + CGFloat(i) * 40)) }
     }
 }

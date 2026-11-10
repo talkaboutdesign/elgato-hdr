@@ -171,18 +171,29 @@ struct SceneTemplateGallery: View {
     let done: () -> Void
 
     var body: some View {
+        let columns = Array(repeating: GridItem(.fixed(150), spacing: DS.Space.m, alignment: .top), count: 3)
         VStack(alignment: .leading, spacing: DS.Space.m) {
             Text("Add a Scene").font(.system(size: 13, weight: .semibold))
-            LazyVGrid(columns: [GridItem(.fixed(150), spacing: DS.Space.m, alignment: .top), GridItem(.fixed(150), spacing: DS.Space.m, alignment: .top)],
-                      alignment: .leading, spacing: DS.Space.l) {
-                ForEach(model.templates, id: \.template) { t in
+            section("Layouts")
+            LazyVGrid(columns: columns, alignment: .leading, spacing: DS.Space.l) {
+                ForEach(model.templates.filter { !$0.template.isScreen }, id: \.template) { t in
                     TemplateCard(model: model, template: t.template, previewID: t.scene.id) { model.actions.add(t.template); done() }
                 }
                 TemplateCard(model: model, template: nil, previewID: model.active.id) { model.actions.duplicate(model.active.id); done() }
             }
+            section("Screens")
+            LazyVGrid(columns: columns, alignment: .leading, spacing: DS.Space.l) {
+                ForEach(model.templates.filter { $0.template.isScreen }, id: \.template) { t in
+                    TemplateCard(model: model, template: t.template, previewID: t.scene.id) { model.actions.add(t.template); done() }
+                }
+            }
         }
         .padding(DS.Space.l)
         .environment(\.colorScheme, .dark)
+    }
+
+    private func section(_ title: String) -> some View {
+        Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).kerning(0.6).foregroundStyle(.secondary).padding(.top, 2)
     }
 }
 

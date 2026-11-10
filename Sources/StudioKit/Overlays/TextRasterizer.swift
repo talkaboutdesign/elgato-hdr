@@ -47,10 +47,27 @@ enum TextRasterizer {
         switch name { case "regular": .regular; case "medium": .medium; case "bold": .bold; case "heavy": .heavy; default: .semibold }
     }
     /// The named font, or the system font at the spec's weight when the name is empty or not installed on this Mac.
+    /// A family name (what the inspector stores) gets the face nearest the spec's weight; a PostScript or full face
+    /// name is used as it is. CoreText rather than NSFontManager: this runs on the overlay queue.
     static func font(_ spec: TextSpec, size: CGFloat) -> CTFont {
-        if !spec.fontName.isEmpty, let f = NSFont(name: spec.fontName, size: size) { return f as CTFont }
+        if !spec.fontName.isEmpty {
+            let attrs: [CFString: Any] = [kCTFontFamilyNameAttribute: spec.fontName,
+                                          kCTFontTraitsAttribute: [kCTFontWeightTrait: weight(spec.weight).rawValue]]
+            let wanted = CTFontDescriptorCreateWithAttributes(attrs as CFDictionary)
+            if let match = CTFontDescriptorCreateMatchingFontDescriptor(wanted, Set([kCTFontFamilyNameAttribute as String]) as CFSet) {
+                return CTFontCreateWithFontDescriptor(match, size, nil)
+            }
+            if let f = NSFont(name: spec.fontName, size: size) { return f as CTFont }
+        }
         return NSFont.systemFont(ofSize: size, weight: weight(spec.weight)) as CTFont
     }
+
+    /// Font families the inspector offers, those of a short list that this Mac has (all ship with macOS).
+    static let families: [String] = {
+        let wanted = ["Avenir Next", "Helvetica Neue", "Futura", "Gill Sans", "Rockwell", "Georgia", "Didot", "American Typewriter", "Menlo", "Marker Felt", "Impact"]
+        let installed = Set((CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? [])
+        return wanted.filter(installed.contains)
+    }()
     static func cgColor(_ v: [Double]?) -> CGColor? {
         guard let v = v, v.count >= 3, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         return CGColor(colorSpace: space, components: [v[0], v[1], v[2], v.count > 3 ? v[3] : 1].map { CGFloat(min(1, max(0, $0))) })

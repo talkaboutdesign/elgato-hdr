@@ -78,6 +78,10 @@ extension AppDelegate {
         a.moveLayer = { [weak self] in self?.moveLayer($0, to: $1) }
         a.addLayer = { [weak self] in self?.addLayer($0) }
         a.deleteLayer = { [weak self] in self?.deleteLayer($0) }
+        a.addImage = { [weak self] url, point in self?.addImageLayer(from: url, at: point) }
+        a.replaceImage = { [weak self] in self?.replaceImage($0) }
+        a.addPreset = { [weak self] in self?.addPreset($0) }
+        a.editText = { [weak self] in self?.editText($0) }
         a.copyLayoutToOtherCanvas = { [weak self] in self?.copyLayoutToOtherCanvas() }
         a.setCrop = { [weak self] in self?.setCrop($0) }
         a.beginGesture = { [weak self] in self?.beginSceneGesture() }
@@ -280,11 +284,17 @@ extension AppDelegate {
             if has { l.roundness = 0.06; l.shadow = true }
         case "color":
             l = Layer(name: "Backdrop", source: LayerSource(type: "color", color: [0.11, 0.12, 0.16, 1]))
+        case "text":
+            // Unnamed, so the layer list shows what it says.
+            let v = scenes.canvas == .vertical
+            l = Layer(source: LayerSource(type: "text", text: TextSpec(string: "Your text", weight: "bold")),
+                      frame: v ? NRect(x: 0.1, y: 0.45, w: 0.8, h: 0.06) : NRect(x: 0.25, y: 0.43, w: 0.5, h: 0.12))
         default: return
         }
         let id = l.id
         editComposition(undo: "Add Layer") { c in if type == "color" { c.layers.insert(l, at: 0) } else { c.layers.append(l) } }
         selectLayer(id)
+        if type == "text" { editText(id) }
     }
 
     /// Game and camera are hidden rather than deleted: scenes keep their place in the stack.

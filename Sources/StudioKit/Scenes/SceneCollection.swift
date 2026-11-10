@@ -60,12 +60,13 @@ extension SceneCollection {
 // MARK: - Defaults and templates
 
 enum SceneTemplate: String, CaseIterable, Identifiable {
-    case gameplay, gameOnly, cameraFocus, justCamera, sideBySide
+    case gameplay, gameOnly, cameraFocus, justCamera, sideBySide, startingSoon, beRightBack, ending
     var id: String { rawValue }
     var name: String {
         switch self {
         case .gameplay: "Gameplay"; case .gameOnly: "Game Only"; case .cameraFocus: "Camera Focus"
         case .justCamera: "Just Camera"; case .sideBySide: "Side by Side"
+        case .startingSoon: "Starting Soon"; case .beRightBack: "Be Right Back"; case .ending: "Ending"
         }
     }
     var summary: String {
@@ -75,6 +76,9 @@ enum SceneTemplate: String, CaseIterable, Identifiable {
         case .cameraFocus: "You, with the game in a window"
         case .justCamera: "Camera only, for intros and breaks"
         case .sideBySide: "Game and camera next to each other"
+        case .startingSoon: "Title and the time, before you go live"
+        case .beRightBack: "A break screen with the live timer"
+        case .ending: "Thanks for watching, with your camera"
         }
     }
 
@@ -93,6 +97,8 @@ enum SceneTemplate: String, CaseIterable, Identifiable {
             return l
         }
         switch self {
+        case .startingSoon, .beRightBack, .ending:
+            return screen(mirror: mirror)
         case .gameplay:
             return Scene(name: name, wide: .from(layout: CanvasLayout(kind: .pip, camera: placement), canvas: wide, hasCamera: true, mirror: mirror),
                          vertical: .from(layout: .verticalDefault, canvas: tall, hasCamera: true, mirror: mirror))

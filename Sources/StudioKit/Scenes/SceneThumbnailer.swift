@@ -8,7 +8,8 @@ import Metal
 /// is still running, and while there is a game but no finished copy of it.
 final class SceneThumbnailer {
     let snapshot = GameSnapshot()
-    static let size = CGSize(width: 160, height: 90)
+    /// Twice the size the cards show, so text layers stay legible on Retina screens.
+    static let size = CGSize(width: 320, height: 180)
     private let queue = DispatchQueue(label: "scene-thumbnails", qos: .utility)
     private let commands: MTLCommandQueue?
     private let lock = NSLock()
