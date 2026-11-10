@@ -1,58 +1,135 @@
-// Recordings library and project editor (SwiftUI hosted in AppKit windows).
-// Library: a grid of recordings with search and quick actions. Editor: live preview of the layered composite in the
-// chosen canvas (16:9 or 9:16), direct manipulation of the facecam and game framing, a layer timeline with trim, and
-// multi-format export.
+// Recordings library and the windows around the editor. The library window shows either the grid of recordings or
+// one project's editor (opening a project navigates inside the window, "‹ Library" goes back); a project can also
+// open in a window of its own from the context menu.
 import AppKit
 import AVFoundation
+import ImageIO
+import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Windows
 
 extension AppDelegate {
     func makeLibraryWindow() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
                          styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = "Recordings"
         w.isReleasedWhenClosed = false
-        let host = NSHostingController(rootView: LibraryView())
+        w.toolbarStyle = .unified
+        let host = NSHostingController(rootView: LibraryRoot())
         host.sizingOptions = []   // keep the window size we choose instead of shrinking to the SwiftUI minimum
         w.contentViewController = host
-        w.setContentSize(NSSize(width: 1040, height: 680))
-        w.minSize = NSSize(width: 560, height: 400)
+        w.setContentSize(NSSize(width: 1180, height: 760))
+        w.minSize = NSSize(width: 640, height: 440)
         w.center()
         w.setFrameAutosaveName("RecordingsLibrary")
+        LibraryNavigation.shared.attach(w)
         return w
     }
 }
 
-/// One editor window per project folder.
+/// What the library window shows. Main thread only.
+@Observable
+final class LibraryNavigation {
+    static let shared = LibraryNavigation()
+    private(set) var editor: EditorModel?
+    @ObservationIgnored private(set) weak var window: NSWindow?
+    @ObservationIgnored private let delegate = LibraryWindowDelegate()
+    @ObservationIgnored private var frameBeforeEditor: NSRect?
+
+    func attach(_ w: NSWindow) { window = w; w.delegate = delegate }
+
+    func open(_ doc: ProjectDoc) {
+        if let (w, _) = EditorWindows.shared.entry(for: doc.dir) { w.makeKeyAndOrderFront(nil); return }
+        if editor?.doc.dir == doc.dir { return }
+        editor?.close()
+        let m = EditorModel(doc: doc)
+        growWindowForEditor()
+        withAnimation(DS.Motion.gentle) { editor = m }
+    }
+
+    func back() {
+        guard let m = editor else { return }
+        m.close()
+        withAnimation(DS.Motion.gentle) { editor = nil }
+        if let w = window {
+            w.minSize = NSSize(width: 640, height: 440)
+            if let f = frameBeforeEditor { w.setFrame(f, display: true, animate: !DS.Motion.reduceMotion) }
+            w.subtitle = ""
+        }
+        frameBeforeEditor = nil
+        Library.shared.reload()
+    }
+
+    /// The editor wants room for preview, inspector and timeline; a small library window grows and shrinks back.
+    private func growWindowForEditor() {
+        guard let w = window, let screen = w.screen?.visibleFrame else { return }
+        w.minSize = NSSize(width: 960, height: 640)
+        let want = NSSize(width: min(screen.width, max(w.frame.width, 1280)), height: min(screen.height, max(w.frame.height, 820)))
+        guard want.width > w.frame.width + 1 || want.height > w.frame.height + 1 else { return }
+        frameBeforeEditor = w.frame
+        var f = NSRect(x: w.frame.minX, y: w.frame.maxY - want.height, width: want.width, height: want.height)
+        f.origin.x = min(max(screen.minX, f.minX), screen.maxX - f.width)
+        f.origin.y = min(max(screen.minY, f.minY), screen.maxY - f.height)
+        w.setFrame(f, display: true, animate: !DS.Motion.reduceMotion)
+    }
+
+    fileprivate func windowWillClose() {
+        editor?.close(); editor = nil; frameBeforeEditor = nil
+    }
+}
+
+private final class LibraryWindowDelegate: NSObject, NSWindowDelegate {
+    /// ⌘Z and ⇧⌘Z reach the window, which asks here: the open project's history, none while it exports.
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        guard let m = LibraryNavigation.shared.editor, !m.editsLocked else { return nil }
+        return m.undoManager
+    }
+    func windowWillClose(_ notification: Notification) { LibraryNavigation.shared.windowWillClose() }
+}
+
+/// Projects opened in windows of their own.
 final class EditorWindows: NSObject, NSWindowDelegate {
     static let shared = EditorWindows()
     private var windows: [URL: (NSWindow, EditorModel)] = [:]
 
     func open(_ doc: ProjectDoc) {
         if let (w, _) = windows[doc.dir] { w.makeKeyAndOrderFront(nil); return }
+        // One editor per project: if it is open in the library window, it moves out.
+        if LibraryNavigation.shared.editor?.doc.dir == doc.dir { LibraryNavigation.shared.back() }
         let model = EditorModel(doc: doc)
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
                          styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = doc.project.name
         w.isReleasedWhenClosed = false
+        w.toolbarStyle = .unified
         let host = NSHostingController(rootView: EditorView(model: model))
         host.sizingOptions = []
         w.contentViewController = host
-        w.setContentSize(NSSize(width: 1280, height: 800))
-        w.minSize = NSSize(width: 900, height: 600)
+        w.setContentSize(NSSize(width: 1280, height: 820))
+        w.minSize = NSSize(width: 960, height: 640)
         w.delegate = self
         w.center()
         windows[doc.dir] = (w, model)
         w.makeKeyAndOrderFront(nil)
     }
 
+    func entry(for dir: URL) -> (NSWindow, EditorModel)? { windows[dir] }
+    func window(for model: EditorModel) -> NSWindow? { windows.values.first { $0.1 === model }?.0 }
+
     /// The editor that owns a project's state while it is open, so library actions go through it.
-    func model(for dir: URL) -> EditorModel? { windows[dir]?.1 }
+    func model(for dir: URL) -> EditorModel? {
+        if let m = windows[dir]?.1 { return m }
+        if let m = LibraryNavigation.shared.editor, m.doc.dir == dir { return m }
+        return nil
+    }
 
     /// ⌘Z and ⇧⌘Z in the Edit menu reach the window, which asks its delegate: the project's own history.
-    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { windows.values.first { $0.0 === window }?.1.undoManager }
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        guard let m = windows.values.first(where: { $0.0 === window })?.1, !m.editsLocked else { return nil }
+        return m.undoManager
+    }
 
     func windowWillClose(_ n: Notification) {
         guard let w = n.object as? NSWindow, let (key, (_, model)) = windows.first(where: { $0.value.0 === w }) else { return }
@@ -61,52 +138,92 @@ final class EditorWindows: NSObject, NSWindowDelegate {
     }
 }
 
+// MARK: - Root
+
+struct LibraryRoot: View {
+    let nav = LibraryNavigation.shared
+    var body: some View {
+        ZStack {
+            if let m = nav.editor {
+                EditorView(model: m, onBack: { nav.back() })
+                    .id(m.doc.dir)
+                    .transition(DS.Motion.transition(.asymmetric(insertion: .scale(scale: 1.025).combined(with: .opacity), removal: .opacity)))
+                    .zIndex(1)
+            } else {
+                LibraryView { nav.open($0) }
+                    .transition(DS.Motion.transition(.asymmetric(insertion: .opacity, removal: .scale(scale: 0.975).combined(with: .opacity))))
+            }
+        }
+        .background(DS.Color.panel)
+    }
+}
+
 // MARK: - Library
 
+enum LibraryFilter: Hashable { case all, live }
+
 struct LibraryView: View {
+    var open: (ProjectDoc) -> Void
     @ObservedObject var lib = Library.shared
     @State private var search = ""
+    @State private var filter = LibraryFilter.all
     @State private var selection: URL?
     @State private var renaming: ProjectDoc?
     @State private var newName = ""
 
     var filtered: [ProjectDoc] {
         let q = search.trimmingCharacters(in: .whitespaces)
-        return q.isEmpty ? lib.docs : lib.docs.filter { $0.project.name.localizedCaseInsensitiveContains(q) }
+        return lib.docs.filter { d in
+            (filter == .all || !d.project.events.isEmpty) && (q.isEmpty || d.project.name.localizedCaseInsensitiveContains(q))
+        }
     }
 
     var body: some View {
         Group {
             if lib.docs.isEmpty {
-                ContentUnavailableView {
-                    Label("No recordings yet", systemImage: "rectangle.stack.badge.play")
-                } description: {
-                    Text("Press ⌘R in the live window to record. The game, your camera and your microphone are saved as separate layers you can lay out and export here.")
-                }
+                EmptyState(systemImage: "rectangle.stack.badge.play", title: "No recordings yet",
+                           message: "Press ⌘R in the live window to record. The game, your camera and your microphone are saved as separate layers you can cut, zoom and export here.")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filtered.isEmpty {
-                ContentUnavailableView.search(text: search)
+                if !search.isEmpty { ContentUnavailableView.search(text: search) }
+                else {
+                    EmptyState(systemImage: "dot.radiowaves.left.and.right", title: "No live sessions yet",
+                               message: "Recordings made while streaming keep their scene switches, zooms and markers, and show up here.")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 340), spacing: 20, alignment: .top)], alignment: .leading, spacing: 24) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 420), spacing: DS.Space.xl, alignment: .top)], alignment: .leading, spacing: 28) {
                         ForEach(filtered) { doc in
                             ProjectCard(doc: doc, project: doc.project, selected: selection == doc.dir)
-                                .onTapGesture(count: 2) { EditorWindows.shared.open(doc) }
+                                .onTapGesture(count: 2) { open(doc) }
                                 .simultaneousGesture(TapGesture().onEnded { selection = doc.dir })
                                 .contextMenu { menu(for: doc) }
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityAction { open(doc) }
                         }
                     }
-                    .padding(24)
+                    .padding(DS.Space.xl)
                 }
-                .background(Color(nsColor: .windowBackgroundColor))
                 .onTapGesture { selection = nil }
             }
         }
         .frame(minWidth: 560, minHeight: 400)
+        .background(DS.Color.panel)
+        .background(WindowTitle(title: "Recordings", subtitle: lib.docs.isEmpty ? "" : "\(lib.docs.count) recording\(lib.docs.count == 1 ? "" : "s")"))
         .searchable(text: $search, placement: .toolbar, prompt: "Search recordings")
         .toolbar {
-            ToolbarItemGroup {
-                Button { lib.reload() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
-                Button { NSWorkspace.shared.open(lib.root) } label: { Label("Show in Finder", systemImage: "folder") }
+            ToolbarItem(placement: .principal) {
+                SegmentedSwitch(selection: $filter, options: [
+                    .init(value: .all, label: "All", help: "Every recording"),
+                    .init(value: .live, label: "Live Sessions", help: "Recordings with scene switches, zooms or markers from a live session"),
+                ], height: 26)
+                .frame(width: 200)
+                .accessibilityLabel("Filter")
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                IconButton(systemImage: "arrow.clockwise", help: "Refresh") { lib.reload() }
+                IconButton(systemImage: "folder", help: "Show recordings in Finder") { NSWorkspace.shared.open(lib.root) }
             }
         }
         .alert("Rename Recording", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -116,12 +233,13 @@ struct LibraryView: View {
         }
         .onAppear { lib.reload() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { n in
-            if (n.object as? NSWindow)?.title == "Recordings" { lib.reload() }
+            if (n.object as? NSWindow) === LibraryNavigation.shared.window, LibraryNavigation.shared.editor == nil { lib.reload() }
         }
     }
 
     @ViewBuilder func menu(for doc: ProjectDoc) -> some View {
-        Button("Open") { EditorWindows.shared.open(doc) }
+        Button("Open") { open(doc) }
+        Button("Open in New Window") { EditorWindows.shared.open(doc) }
         Divider()
         Button("Rename…") { newName = doc.project.name; renaming = doc }
         Button("Duplicate") { lib.duplicate(doc) }
@@ -140,47 +258,151 @@ struct ProjectCard: View {
     let selected: Bool
     @State private var thumb: NSImage?
     @State private var hover = false
+    @State private var scrub: Int?
+    @State private var frames: [CGImage] = []
+    @State private var loadingFrames = false
 
     var body: some View {
         let p = project
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                Rectangle().fill(Color.black.opacity(0.85))
-                if let t = thumb { Image(nsImage: t).resizable().aspectRatio(contentMode: .fill) }
-                else { Image(systemName: "gamecontroller").font(.system(size: 30)).foregroundStyle(.white.opacity(0.3)) }
+        let edited = !p.timeline.segments.isEmpty
+        let kept = TimelineEdits.kept(p).reduce(0.0) { $0 + $1.endMs - $1.startMs } / 1000
+        VStack(alignment: .leading, spacing: 10) {
+            GeometryReader { geo in
+                ZStack {
+                    Rectangle().fill(Color.black.opacity(0.88))
+                    if let i = scrub, i < frames.count {
+                        Image(decorative: frames[i], scale: 1).resizable().aspectRatio(contentMode: .fill)
+                    } else if let t = thumb {
+                        Image(nsImage: t).resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Image(systemName: "gamecontroller").font(.system(size: 30)).foregroundStyle(.white.opacity(0.3))
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+                .clipped()
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let pt):
+                        let i = min(4, max(0, Int(pt.x / max(1, geo.size.width) * 5)))
+                        if scrub != i { scrub = i }
+                        loadFrames()
+                    case .ended: scrub = nil
+                    }
+                }
             }
             .aspectRatio(16 / 9, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(alignment: .topLeading) {
                 HStack(spacing: 4) {
+                    if !p.events.isEmpty { Badge(text: "LIVE", tint: DS.Color.live) }
                     if p.color != .sdr { Badge(text: p.color == .pq ? "HDR" : "HLG") }
                     if p.state == "recording" { Badge(text: "RECOVERING", tint: .orange) }
                     if p.state == "damaged" { Badge(text: "DAMAGED", tint: .red) }
-                    if !p.lastExport.isEmpty { Badge(text: "EXPORTED", tint: .green) }
-                }.padding(8)
+                    if !p.lastExport.isEmpty { Badge(text: "EXPORTED", tint: DS.Color.ok) }
+                }.padding(10)
             }
-            .overlay(alignment: .bottomTrailing) { Badge(text: formatTime(p.durationMs / 1000)).padding(8) }
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(hover ? 0.25 : 0.08), lineWidth: selected ? 3 : 1))
-            .shadow(color: .black.opacity(hover ? 0.25 : 0.12), radius: hover ? 10 : 4, y: hover ? 4 : 2)
+            .overlay(alignment: .bottomLeading) {
+                LayerIcons(camera: doc.hasCamera, mic: doc.hasMic)
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 7).padding(.vertical, 4)
+                    .background(Capsule().fill(Color.black.opacity(0.6)))
+                    .foregroundStyle(.white)
+                    .padding(10)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Badge(text: edited ? "\(formatTime(kept)) of \(formatTime(p.durationMs / 1000))" : formatTime(p.durationMs / 1000)).padding(10)
+            }
+            .overlay(alignment: .bottom) {
+                if scrub != nil {
+                    HStack(spacing: 3) {
+                        ForEach(0..<5, id: \.self) { i in
+                            Capsule().fill(Color.white.opacity(i == scrub ? 0.95 : 0.35)).frame(height: 3)
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.bottom, 4)
+                    .transition(.opacity)
+                }
+            }
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(hover ? 0.22 : 0.08), lineWidth: selected ? 3 : 1))
+            .shadow(color: .black.opacity(hover ? 0.28 : 0.12), radius: hover ? 12 : 4, y: hover ? 5 : 2)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(p.name).font(.headline).lineLimit(1).truncationMode(.middle)
+                Text(p.name).font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                 HStack(spacing: 6) {
                     Text(p.createdAt.formatted(date: .abbreviated, time: .shortened)).lineLimit(1)
                     if p.height > 0 { Text(verbatim: "· \(p.height)p\(Int(p.fps.rounded()))").lineLimit(1).layoutPriority(-1) }
-                    Spacer(minLength: 4)
-                    LayerIcons(camera: doc.hasCamera, mic: doc.hasMic)
+                    if edited { Text("· edited").lineLimit(1).layoutPriority(-2) }
                 }
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 2)
         }
-        .scaleEffect(hover ? 1.012 : 1)
-        .animation(.easeOut(duration: 0.15), value: hover)
+        .scaleEffect(hover && !DS.Motion.reduceMotion ? 1.01 : 1)
+        .animation(DS.Motion.snappy, value: hover)
+        .animation(.easeOut(duration: 0.12), value: scrub)
         .onHover { hover = $0 }
         .contentShape(Rectangle())
-.task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+        .task(id: "\(doc.dir.path)/\(p.durationMs)/\(p.state)") { thumb = NSImage(contentsOf: doc.thumbnailURL) }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(p.name), \(formatTime(p.durationMs / 1000))")
+        .accessibilityHint("Double-click to open")
+    }
+
+    private func loadFrames() {
+        guard frames.isEmpty, !loadingFrames, project.state == "complete" else { return }
+        loadingFrames = true
+        let doc = self.doc, p = project
+        Task {
+            let f = await ScrubFrames.load(doc, project: p)
+            await MainActor.run { frames = f; loadingFrames = false }
+        }
+    }
+}
+
+/// Five frames evenly spaced over what the project exports (its kept ranges), from the 16:9 composite, generated on
+/// first hover and kept in memory and in the project's `.cache/scrub` folder.
+enum ScrubFrames {
+    private static let memory = NSCache<NSString, NSArray>()
+
+    static func times(_ p: Project) -> [Double] {
+        let kept = TimelineEdits.kept(p)
+        let total = kept.reduce(0.0) { $0 + $1.endMs - $1.startMs }
+        guard total > 0 else { return [] }
+        let map = TimeMap(segments: kept, sourceDurationMs: p.durationMs)
+        return (0..<5).map { i in (map.source(fromTimeline: total * (Double(i) + 0.5) / 5) / 100).rounded() * 100 }
+    }
+
+    static func load(_ doc: ProjectDoc, project p: Project) async -> [CGImage] {
+        let ts = times(p)
+        let key = "\(doc.dir.path)|\(ts.map { Int($0) })" as NSString
+        if let hit = memory.object(forKey: key) as? [CGImage] { return hit }
+        let dir = doc.dir.appendingPathComponent(".cache/scrub", isDirectory: true)
+        var images: [CGImage] = []
+        var generator: AVAssetImageGenerator?
+        for t in ts {
+            let file = dir.appendingPathComponent("\(Int(t)).jpg")
+            if let src = CGImageSourceCreateWithURL(file as CFURL, nil), let img = CGImageSourceCreateImageAtIndex(src, 0, nil) { images.append(img); continue }
+            if generator == nil {
+                let snapshot = ProjectDoc(dir: doc.dir, project: p)
+                guard let built = try? await CompositionBuilder.build(snapshot, canvas: .wide, resolution: .hd, range: .sdr, ignoreCuts: true) else { break }
+                let g = AVAssetImageGenerator(asset: built.asset)
+                g.videoComposition = built.video
+                g.maximumSize = CGSize(width: 640, height: 360)
+                g.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 4); g.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 4)
+                generator = g
+            }
+            guard let g = generator, let img = try? await g.image(at: CMTime(seconds: t / 1000, preferredTimescale: 600)).image else { continue }
+            images.append(img)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let dst = CGImageDestinationCreateWithURL(file as CFURL, UTType.jpeg.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImage(dst, img, [kCGImageDestinationLossyCompressionQuality: 0.75] as CFDictionary)
+                CGImageDestinationFinalize(dst)
+            }
+        }
+        if images.count == ts.count { memory.setObject(images as NSArray, forKey: key) }
+        return images
     }
 }
 
@@ -192,6 +414,8 @@ struct LayerIcons: View {
             if camera { Image(systemName: "video.fill").help("Camera layer") }
             if mic { Image(systemName: "mic.fill").help("Microphone layer") }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(["Game", camera ? "camera" : nil, mic ? "microphone" : nil].compactMap { $0 }.joined(separator: ", ") + " layers")
     }
 }
 
@@ -215,4 +439,3 @@ func formatTimePrecise(_ s: Double) -> String {
     guard s.isFinite, s >= 0 else { return "0:00.0" }
     return String(format: "%d:%04.1f", Int(s) / 60, s.truncatingRemainder(dividingBy: 60))
 }
-

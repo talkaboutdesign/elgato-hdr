@@ -1,105 +1,279 @@
 import AppKit
-import AVFoundation
 import SwiftUI
 
-// MARK: - Timeline
+// The bottom panel: transport and edit tools, then the lanes. Each lane is its own view reading only what it draws,
+// so the 60 Hz playhead and a scroll each redraw the least they can.
 
 struct TimelinePanel: View {
-    @Bindable var model: EditorModel
+    let model: EditorModel
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                Button { model.togglePlay() } label: {
-                    Image(systemName: model.playing ? "pause.fill" : "play.fill").frame(width: 18)
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                .buttonStyle(.borderless).font(.title3)
-                Text("\(formatTimePrecise(model.time)) / \(formatTime(model.duration))").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                Spacer()
-                Text("Trimmed: \(formatTime(max(0, model.trimEnd - model.trimStart)))").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                Button("Set In") { model.setIn() }.keyboardShortcut("i", modifiers: [])
-                Button("Set Out") { model.setOut() }.keyboardShortcut("o", modifiers: [])
-                Button("Reset") { model.update("Reset In and Out") { $0.trimStartMs = 0; $0.trimEndMs = 0 } }
-                    .disabled(model.project.trimStartMs == 0 && model.project.trimEndMs == 0)
+        let layout = TimelineLayout.make(hasMic: model.hasMic)
+        VStack(spacing: 0) {
+            TransportBar(model: model)
+            Rectangle().fill(DS.Color.stroke).frame(height: 1)
+            HStack(alignment: .top, spacing: 0) {
+                TrackHeaders(layout: layout).frame(width: TrackHeaders.width)
+                TimelineTracks(model: model, layout: layout)
             }
-            HStack(spacing: 12) {
-                Button("Split") { model.split() }.keyboardShortcut("b", modifiers: .command)
-                Button("Delete Section") { model.deleteSection() }
-                Button("Add Zoom Here") { model.addZoom() }
-                Spacer()
-            }
-            LayerLanes(model: model).frame(height: 24 + 22 * CGFloat(1 + (model.hasCamera ? 1 : 0) + (model.hasMic ? 1 : 0)))
+            .padding(.top, 6).padding(.trailing, DS.Space.m)
+            Minimap(model: model).padding(.leading, TrackHeaders.width).padding(.trailing, DS.Space.m).padding(.vertical, 6)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(.bar)
+        .background(DS.Color.panel)
     }
 }
 
-/// Ruler, one lane per layer (shifted by its sync offset), trim handles and the playhead.
-struct LayerLanes: View {
-    @Bindable var model: EditorModel
-    @State private var draggingTrim: Int?   // 0 in, 1 out
+// MARK: - Transport
+
+struct TransportBar: View {
+    let model: EditorModel
 
     var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width, d = max(model.duration, 0.001)
-            let x = { (t: Double) -> CGFloat in CGFloat(t / d) * w }
-            let lanes: [(String, String, Color, Double)] = [("Game", "gamecontroller.fill", .blue, 0)]
-                + (model.hasCamera ? [("Camera", "video.fill", .green, (model.project.camera?.offsetMs ?? 0) / 1000)] : [])
-                + (model.hasMic ? [("Mic", "mic.fill", .orange, (model.project.mic?.offsetMs ?? 0) / 1000)] : [])
-            ZStack(alignment: .topLeading) {
-                // Ruler / scrub area
-                Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 18)
-                    .overlay(alignment: .leading) {
-                        ForEach(Array(stride(from: 0.0, through: d, by: tick(d))), id: \.self) { t in
-                            Text(formatTime(t)).font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
-                                .position(x: x(t) + 14, y: 9)
-                        }
+        HStack(spacing: DS.Space.s) {
+            PlayButton(model: model)
+            TimeReadout(model: model).frame(minWidth: 168, alignment: .leading)
+            Rectangle().fill(DS.Color.stroke).frame(width: 1, height: 20)
+            EditToolbar(model: model)
+            Spacer(minLength: DS.Space.s)
+            TimelineZoomControl(model: model)
+        }
+        .padding(.horizontal, DS.Space.m)
+        .frame(height: 42)
+    }
+}
+
+struct PlayButton: View {
+    let model: EditorModel
+    var body: some View {
+        let playing = model.playing
+        let rate = model.shuttleRate
+        Button { model.togglePlay() } label: {
+            ZStack {
+                Circle().fill(Color.primary.opacity(0.08))
+                Image(systemName: playing ? "pause.fill" : "play.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .offset(x: playing ? 0 : 1)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .frame(width: 30, height: 30)
+            .overlay(alignment: .bottomTrailing) {
+                if abs(rate) > 1 || rate < 0 {
+                    Text(rate < 0 ? "◀\(Int(-rate))×" : "\(Int(rate))×").font(.system(size: 8, weight: .bold).monospacedDigit())
+                        .padding(.horizontal, 3).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.accentColor)).foregroundStyle(.white)
+                        .offset(x: 8, y: 4)
+                }
+            }
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(playing ? "Pause (Space)" : "Play (Space) · J K L shuttle")
+        .accessibilityLabel(playing ? "Pause" : "Play")
+    }
+}
+
+struct TimeReadout: View {
+    let model: EditorModel
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(formatTimecode(model.time, fps: model.project.fps)).font(.system(size: 13, weight: .semibold).monospacedDigit())
+            Text("/ " + formatTime(model.duration)).font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
+            let kept = model.keptDuration
+            if abs(kept - model.duration) > 0.05 {
+                Text("· \(formatTime(kept)) kept").font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                    .help("Length after cuts")
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Playhead")
+    }
+}
+
+struct EditToolbar: View {
+    let model: EditorModel
+    var body: some View {
+        let locked = model.editsLocked
+        HStack(spacing: 2) {
+            ToolButton(title: "Split", systemImage: "scissors", help: "Split at the playhead (S or ⌘B)") { model.split() }
+            ToolButton(title: deleteTitle, systemImage: deleteSymbol, help: deleteHelp) { model.deleteSelection() }
+            ToolButton(title: "Zoom", systemImage: "plus.magnifyingglass", help: "Add a zoom at the playhead (Z)") { model.addZoom() }
+            ToolButton(title: "Marker", systemImage: "flag", help: "Add a marker at the playhead (M)") { model.addMarker() }
+            SceneChangeMenu(model: model)
+        }
+        .disabled(locked)
+    }
+
+    private var deleteTitle: String {
+        if case .section(let s) = model.selection, !s.kept { return "Restore" }
+        return "Delete"
+    }
+    private var deleteSymbol: String { deleteTitle == "Restore" ? "arrow.uturn.backward.circle" : "delete.left" }
+    private var deleteHelp: String {
+        switch model.selection {
+        case .section(let s): return s.kept ? "Remove the selected section (⌫)" : "Bring the removed section back (⌫)"
+        case .scene: return "Delete the selected scene change (⌫)"
+        case .zoom: return "Delete the selected zoom (⌫)"
+        case .marker: return "Delete the selected marker (⌫)"
+        case .none: return "Remove the section under the playhead (⌫)"
+        }
+    }
+}
+
+/// Compact icon-and-title button for the transport row.
+struct ToolButton: View {
+    let title: String
+    let systemImage: String
+    let help: String
+    let action: () -> Void
+    @Environment(\.isEnabled) private var enabled
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.titleAndIcon)
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 8).frame(height: 26)
+                .foregroundStyle(enabled ? Color.primary.opacity(0.85) : Color.secondary.opacity(0.6))
+                .background(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous).fill(Color.primary.opacity(hover && enabled ? 0.08 : 0)))
+                .contentShape(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .animation(DS.Motion.snappy, value: hover)
+        .help(help)
+        .accessibilityLabel(title)
+        .accessibilityHint(help)
+    }
+}
+
+struct SceneChangeMenu: View {
+    let model: EditorModel
+    var body: some View {
+        Menu {
+            Section("Change scene at the playhead") {
+                ForEach(Array(model.sceneChoices.enumerated()), id: \.element.id) { i, c in
+                    Button { model.addSceneChange(c) } label: {
+                        Text(c.sceneID == nil && c.template != nil ? "\(c.name) (new)" : c.name)
                     }
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { g in model.seek(Double(g.location.x / w) * d) })
-                ForEach(Array(lanes.enumerated()), id: \.offset) { i, lane in
-                    let y = 24 + CGFloat(i) * 22
-                    let start = max(0, lane.3)
-                    RoundedRectangle(cornerRadius: 4).fill(lane.2.opacity(0.75))
-                        .frame(width: max(0, x(d) - x(start)), height: 18)
-                        .overlay(alignment: .leading) {
-                            Label(lane.0, systemImage: lane.1).font(.system(size: 10, weight: .medium)).foregroundStyle(.white).padding(.leading, 6)
-                        }
-                        .offset(x: x(start), y: y)
+                    .shortcutLabel(i < 9 ? KeyEquivalent(Character("\(i + 1)")) : nil, modifiers: .control)
                 }
-                // Dim what's trimmed away
-                Rectangle().fill(Color.black.opacity(0.45)).frame(width: x(model.trimStart), height: geo.size.height).allowsHitTesting(false)
-                Rectangle().fill(Color.black.opacity(0.45)).frame(width: max(0, w - x(model.trimEnd)), height: geo.size.height)
-                    .offset(x: x(model.trimEnd)).allowsHitTesting(false)
-                trimHandle(at: x(model.trimStart), height: geo.size.height, leading: true)
-                    .gesture(DragGesture().onChanged { g in
-                        model.beginGesture()
-                        let t = min(max(0, Double(g.location.x / w) * d), model.trimEnd - 0.5)
-                        model.update("Trim") { $0.trimStartMs = t * 1000 }; model.seek(t)
-                    }.onEnded { _ in model.endGesture() })
-                trimHandle(at: x(model.trimEnd), height: geo.size.height, leading: false)
-                    .gesture(DragGesture().onChanged { g in
-                        model.beginGesture()
-                        let t = max(min(d, Double(g.location.x / w) * d), model.trimStart + 0.5)
-                        model.update("Trim") { $0.trimEndMs = t >= d - 0.01 ? 0 : t * 1000 }; model.seek(t)
-                    }.onEnded { _ in model.endGesture() })
-                // Playhead
-                Rectangle().fill(Color.red).frame(width: 2, height: geo.size.height).offset(x: x(model.time) - 1).allowsHitTesting(false)
             }
+        } label: {
+            Label("Scene", systemImage: "rectangle.3.group").labelStyle(.titleAndIcon).font(.system(size: 12, weight: .medium))
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .help("Change to another scene at the playhead (⌃1…⌃9)")
+        .accessibilityLabel("Scene change")
     }
-
-    func trimHandle(at px: CGFloat, height: CGFloat, leading: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 2).fill(Color.yellow)
-            .frame(width: 6, height: height)
-            .frame(width: 16).contentShape(Rectangle())
-            .offset(x: px - 8)
-            .onHover { $0 ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }
-            .help(leading ? "Trim start (I)" : "Trim end (O)")
-    }
-
-    func tick(_ d: Double) -> Double { [1, 5, 10, 15, 30, 60, 120, 300, 600].first { d / $0 <= 10 } ?? 1200 }
 }
 
+extension View {
+    /// Shows a shortcut next to a menu item. The editor's key handler sees the key first, so it never fires twice.
+    @ViewBuilder func shortcutLabel(_ key: KeyEquivalent?, modifiers: EventModifiers) -> some View {
+        if let key = key { self.keyboardShortcut(key, modifiers: modifiers) } else { self }
+    }
+}
+
+struct TimelineZoomControl: View {
+    let model: EditorModel
+    var body: some View {
+        let fraction = model.axis.zoomFraction
+        HStack(spacing: 4) {
+            IconButton(systemImage: model.hideRemoved ? "eye.slash" : "eye", help: model.hideRemoved ? "Show removed sections (H)" : "Hide removed sections (H)", isOn: model.hideRemoved, size: 26) {
+                model.hideRemoved.toggle()
+            }
+            Rectangle().fill(DS.Color.stroke).frame(width: 1, height: 18).padding(.horizontal, 4)
+            IconButton(systemImage: "minus.magnifyingglass", help: "Zoom out (-)", size: 24) { model.zoomTimeline(in: false) }
+            Slider(value: Binding(get: { fraction }, set: { model.setZoomFraction($0) }), in: 0...1)
+                .controlSize(.mini)
+                .frame(width: 96)
+                .accessibilityLabel("Timeline zoom")
+            IconButton(systemImage: "plus.magnifyingglass", help: "Zoom in (=)", size: 24) { model.zoomTimeline(in: true) }
+            IconButton(systemImage: "arrow.left.and.right.square", help: "Show the whole recording (⇧Z)", size: 24) { model.fitTimeline() }
+        }
+    }
+}
+
+// MARK: - Headers and minimap
+
+struct TrackHeaders: View {
+    static let width = 88.0
+    let layout: TimelineLayout
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(layout.lanes.filter { $0.kind != .ruler }, id: \.kind) { lane in
+                HStack(spacing: 6) {
+                    Image(systemName: lane.symbol).font(.system(size: 10, weight: .medium)).frame(width: 14)
+                    Text(lane.title).font(.system(size: 11, weight: .medium))
+                }
+                .foregroundStyle(.secondary)
+                .frame(width: Self.width - DS.Space.m, height: lane.height, alignment: .leading)
+                .offset(x: DS.Space.m, y: lane.y)
+            }
+        }
+        .frame(height: layout.height, alignment: .topLeading)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The whole recording in a thin strip with the visible window; shown when zoomed in. Drag to scroll.
+struct Minimap: View {
+    let model: EditorModel
+    var body: some View {
+        let axis = model.axis
+        let sections = TimelineEdits.sections(model.project)
+        let markers = model.project.timeline.markers.map(\.tMs)
+        let d = max(axis.duration, 0.001)
+        GeometryReader { geo in
+            let w = geo.size.width
+            SwiftUI.Canvas { ctx, size in
+                let h = size.height
+                ctx.fill(Path(roundedRect: CGRect(x: 0, y: 3, width: w, height: h - 6), cornerRadius: 2), with: .color(.primary.opacity(0.10)))
+                for s in sections where !s.kept {
+                    let r = CGRect(x: s.startMs / 1000 / d * w, y: 3, width: (s.endMs - s.startMs) / 1000 / d * w, height: h - 6)
+                    ctx.fill(Path(r), with: .color(.primary.opacity(0.18)))
+                }
+                for m in markers { ctx.fill(Path(CGRect(x: m / 1000 / d * w - 0.5, y: 2, width: 1, height: h - 4)), with: .color(DS.Color.warn)) }
+                let x0 = axis.visibleStart / d * w, x1 = axis.visibleEnd / d * w
+                let win = CGRect(x: x0, y: 0.5, width: max(6, x1 - x0), height: h - 1)
+                ctx.fill(Path(roundedRect: win, cornerRadius: 3), with: .color(.accentColor.opacity(0.18)))
+                ctx.stroke(Path(roundedRect: win, cornerRadius: 3), with: .color(.accentColor.opacity(0.8)), lineWidth: 1)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                var a = model.axis
+                let center = Double(g.location.x / w) * d
+                a.offset = a.contentX(center) - a.width / 2
+                a.clampOffset()
+                model.axis = a
+            })
+        }
+        .frame(height: 12)
+        .opacity(axis.isZoomedIn ? 1 : 0)
+        .allowsHitTesting(axis.isZoomedIn)
+        .help("Drag to scroll the timeline")
+        .accessibilityLabel("Timeline overview")
+    }
+}
+
+// MARK: - Formatting
+
+func formatTimecode(_ s: Double, fps: Double) -> String {
+    guard s.isFinite, s >= 0 else { return "0:00.00" }
+    let f = max(1, fps.rounded())
+    let frames = Int((s * f).rounded())
+    let secs = frames / Int(f), frame = frames % Int(f)
+    let base = secs >= 3600 ? String(format: "%d:%02d:%02d", secs / 3600, secs / 60 % 60, secs % 60) : String(format: "%d:%02d", secs / 60, secs % 60)
+    return base + String(format: ".%02d", frame)
+}
+
+/// Ruler labels: whole seconds when the step allows, else tenths.
+func formatRuler(_ s: Double, step: Double) -> String {
+    if step >= 1 { return formatTime(s) }
+    let t = (s * 10).rounded() / 10
+    return String(format: "%d:%04.1f", Int(t) / 60, t.truncatingRemainder(dividingBy: 60))
+}

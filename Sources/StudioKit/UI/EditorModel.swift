@@ -1,16 +1,10 @@
 import AppKit
 import AVFoundation
 import Observation
+import QuartzCore
 import SwiftUI
 
 // MARK: - Editor model
-
-struct ExportState {
-    var progress = 0.0
-    var running = false
-    var url: URL?
-    var error: String?
-}
 
 /// One open project. `@Observable` tracks reads per property, so the 60 Hz playhead re-renders the playhead and the
 /// time read-out only, never the inspector or the timeline lanes. Main thread only.
@@ -19,19 +13,31 @@ final class EditorModel {
     @ObservationIgnored let doc: ProjectDoc
     private(set) var project: Project
     var canvas: Canvas = .wide { didSet { if canvas != oldValue { rebuild() } } }
+    /// Preview colour: HDR for HDR sources unless the user previews the SDR (Shorts) look.
     var range: ExportRange { didSet { if range != oldValue { rebuild() } } }
-    var time = 0.0
+    var time = 0.0                  // playhead, source seconds (the preview is untrimmed: player time is source time)
     var duration = 0.0
     var playing = false
-    var exportCanvases: Set<Canvas> = [.wide, .vertical]
-    var resolution: ExportResolution = .hd
-    var fps: ExportFPS = .source
-    var exports: [Canvas: ExportState] = [:]
+    var shuttleRate: Float = 0
     var loadError: String?
     var canUndo = false
     var canRedo = false
     var undoTitle = "Undo"
     var redoTitle = "Redo"
+    // timeline
+    var selection: TimelineSelection = .none
+    var axis = TimelineAxis()
+    var hideRemoved = false { didSet { if hideRemoved != oldValue { updateCollapsed() } } }
+    var hover: TimelineHit?
+    var snapGuide: Double?          // seconds; shown while a drag sits on a snap point
+    var focusEditing = false        // the zoom focus target is being dragged
+    var toast: EditorToast?
+    var timelineReady = false
+    var previewRevision = 0         // bumped when the preview's composition changes
+    // export
+    var exportCanvases: Set<Canvas> = [.wide, .vertical]
+    var resolution: ExportResolution = .hd
+    var fps: ExportFPS = .source
 
     @ObservationIgnored let player = AVPlayer()
     /// Owned by the model rather than the window, so the history goes away with the project and the same editor can
@@ -39,46 +45,78 @@ final class EditorModel {
     @ObservationIgnored let undoManager: UndoManager = {
         let u = UndoManager(); u.groupsByEvent = false; u.levelsOfUndo = 200; return u
     }()
+    @ObservationIgnored let filmstrip: FilmstripCache
+    @ObservationIgnored let waveforms: WaveformCache
+    @ObservationIgnored var exportQueue: ExportQueue!
+    @ObservationIgnored let openedAt = CACurrentMediaTime()
     @ObservationIgnored private var built: BuiltComposition?
     @ObservationIgnored private var timeObserver: Any?
+    @ObservationIgnored var boundaryObserver: Any?
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     @ObservationIgnored private var buildGen = 0
-    @ObservationIgnored private var exporters: [Exporter] = []
     @ObservationIgnored private var dirty = false
+    @ObservationIgnored private var restylePending = false
+    @ObservationIgnored private var closed = false
     /// The project as it was when a continuous gesture (drag, slider) began; the gesture becomes one undo step.
     @ObservationIgnored private var gestureBase: Project?
     @ObservationIgnored private var gestureName = ""
     @ObservationIgnored private var rebuildAfterGesture = false
+    // seeking: one seek in flight, only the latest target remembered
+    @ObservationIgnored var seekInFlight = false
+    @ObservationIgnored var pendingSeek: CMTime?
+    @ObservationIgnored var seekStats = SeekStats()
+    @ObservationIgnored var scrubStats = SeekStats()
+    @ObservationIgnored var scrubbing = false
+    @ObservationIgnored var reverseTimer: Timer?
 
     var hasCamera: Bool { doc.hasCamera }
     var hasMic: Bool { doc.hasMic }
     var isHDRSource: Bool { project.color != .sdr }
+    var editsLocked: Bool { exportQueue?.isRunning ?? false }
+    var frameDuration: Double { 1 / max(1, project.fps) }
 
     init(doc: ProjectDoc) {
         self.doc = doc
         project = doc.project
         range = doc.project.color == .sdr ? .sdr : .hdr
-        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { [weak self] t in
-            guard let self = self else { return }
-            self.time = t.seconds
-            self.playing = self.player.rate != 0
+        filmstrip = FilmstripCache(doc: doc)
+        waveforms = WaveformCache(doc: doc)
+        duration = doc.project.durationMs / 1000
+        axis.duration = duration
+        exportQueue = ExportQueue { [weak doc] job in
+            guard let doc = doc else { throw CompositionBuilder.err("project closed") }
+            return Exporter(doc: doc, job: job)
+        }
+        exportQueue.onFinished = { [weak self] item in self?.exportFinished(item) }
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 60), queue: .main) { [weak self] t in
+            self?.playerTimeChanged(t.seconds)
         }
         rebuild()
+        waveforms.load(game: true, mic: doc.hasMic)
     }
 
     func close() {
+        guard !closed else { return }
+        closed = true
         player.pause()
+        reverseTimer?.invalidate()
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
+        if let o = boundaryObserver { player.removeTimeObserver(o); boundaryObserver = nil }
+        exportQueue.cancelAll()
+        filmstrip.cancel(); waveforms.cancel()
         endGesture()
         saveNow()
         undoManager.removeAllActions()
+        if seekStats.count > 0 { log("editor: \(seekStats.summary) over the session") }
         if dirty { Task { await doc.writeThumbnail(); await MainActor.run { Library.shared.objectWillChange.send() } } }
     }
 
     // MARK: Edits and undo
 
     /// Every edit goes through here. Outside a gesture each call is one undo step; inside one, the whole gesture is.
+    /// While an export queue runs, the project is frozen: queued jobs export what was there when they were queued.
     func update(_ name: String = "Edit", _ f: (inout Project) -> Void) {
+        guard !editsLocked else { NSSound.beep(); return }
         let old = project
         var p = project; f(&p)
         syncDerived(&p, from: old)
@@ -95,11 +133,12 @@ final class EditorModel {
         if base != project { registerUndo(restoring: base, name: gestureName) }
         if rebuildAfterGesture { rebuildAfterGesture = false; rebuild() }
     }
+    var inGesture: Bool { gestureBase != nil }
     /// For `Slider(onEditingChanged:)`.
     func gesture(_ editing: Bool) { editing ? beginGesture() : endGesture() }
 
-    func undo() { endGesture(); if undoManager.canUndo { undoManager.undo() }; refreshUndoState() }
-    func redo() { endGesture(); if undoManager.canRedo { undoManager.redo() }; refreshUndoState() }
+    func undo() { guard !editsLocked else { return }; endGesture(); if undoManager.canUndo { undoManager.undo() }; refreshUndoState() }
+    func redo() { guard !editsLocked else { return }; endGesture(); if undoManager.canRedo { undoManager.redo() }; refreshUndoState() }
 
     private func registerUndo(restoring old: Project, name: String) {
         undoManager.beginUndoGrouping()
@@ -122,8 +161,9 @@ final class EditorModel {
 
     func refreshUndoState() {
         let u = undoManager
-        if canUndo != u.canUndo { canUndo = u.canUndo }
-        if canRedo != u.canRedo { canRedo = u.canRedo }
+        let can = u.canUndo && !editsLocked, canR = u.canRedo && !editsLocked
+        if canUndo != can { canUndo = can }
+        if canRedo != canR { canRedo = canR }
         let ut = u.canUndo ? u.undoMenuItemTitle : "Undo", rt = u.canRedo ? u.redoMenuItemTitle : "Redo"
         if undoTitle != ut { undoTitle = ut }
         if redoTitle != rt { redoTitle = rt }
@@ -151,12 +191,19 @@ final class EditorModel {
         doc.project = p
         dirty = true
         scheduleSave()
-        if p.game != old.game || p.camera != old.camera || p.mic != old.mic || p.timeline.segments != old.timeline.segments {
+        // The preview ignores cuts (it shows source time), so only layer changes reload the composition.
+        if p.game != old.game || p.camera != old.camera || p.mic != old.mic {
             // Reloading the layers mid-drag stalls the preview: the lanes follow live, the composition once at the end.
             if gestureBase != nil { rebuildAfterGesture = true } else { rebuild() }
+        } else if p.wide != old.wide || p.vertical != old.vertical || p.cameraMirror != old.cameraMirror || p.scenes != old.scenes
+                    || p.timeline.sceneSpans != old.timeline.sceneSpans || p.timeline.zooms != old.timeline.zooms {
+            restyle()
         }
-        else if p.wide != old.wide || p.vertical != old.vertical || p.cameraMirror != old.cameraMirror || p.scenes != old.scenes || p.timeline != old.timeline { restyle() }
-        if p.trimStartMs != old.trimStartMs || p.trimEndMs != old.trimEndMs { applyTrim() }
+        if p.editSegments != old.editSegments || p.durationMs != old.durationMs {
+            applyPlaybackBounds()
+            updateCollapsed()
+        }
+        validateSelection()
     }
 
     var layout: CanvasLayout {
@@ -178,29 +225,44 @@ final class EditorModel {
     }
     func saveNow() { saveWork?.cancel(); saveWork = nil; doc.project = project; doc.save() }
 
+    /// Bookkeeping that is not an edit (export history): no undo step, allowed while exporting.
+    func setSilently(_ f: (inout Project) -> Void) {
+        var p = project; f(&p)
+        guard p != project else { return }
+        project = p; doc.project = p; saveNow()
+    }
+
     // MARK: Preview
 
-    /// Rebuilds the composition (layers, offsets, volumes) for the current canvas. The preview is untrimmed so trim
-    /// handles can be dragged over the whole recording; playback is limited to the trim range.
+    /// Rebuilds the composition (layers, offsets, volumes) for the current canvas. The preview is untrimmed, so
+    /// player time is source time and removed sections can still be scrubbed; playback skips them.
     func rebuild() {
         buildGen += 1
         let gen = buildGen, canvas = canvas, range = range
         let keep = player.currentTime()
+        let started = CACurrentMediaTime()
         Task {
             do {
                 let b = try await CompositionBuilder.build(doc, canvas: canvas, resolution: .hd, range: range, ignoreCuts: true)
                 await MainActor.run {
-                    guard gen == self.buildGen else { return }
+                    guard gen == self.buildGen, !self.closed else { return }
                     self.built = b
                     let item = AVPlayerItem(asset: b.asset)
                     // A scene or zoom edit can arrive while track loading is suspended.
                     item.videoComposition = CompositionBuilder.videoComposition(self.project, canvas: canvas, size: canvas.size(.hd), built: b)
                     item.audioMix = b.audioMix
                     self.player.replaceCurrentItem(with: item)
-                    self.duration = b.duration.seconds
-                    self.applyTrim()
-                    self.player.seek(to: keep.isValid ? keep : CMTime(seconds: self.trimStart, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                    self.previewRevision += 1
+                    let d = b.duration.seconds
+                    if abs(d - self.duration) > 0.0005 { self.duration = d }
+                    if self.axis.duration != d { self.axis.duration = d; self.axis.clampOffset() }
+                    self.applyPlaybackBounds()
+                    let start = TimelineEdits.kept(self.project).first.map { $0.startMs / 1000 } ?? 0
+                    let target = keep.isValid && gen > 1 ? keep : CMTime(seconds: start, preferredTimescale: 60000)
+                    self.time = target.seconds
+                    self.requestSeek(target)
                     self.loadError = nil
+                    if gen == 1 { log(String(format: "editor: preview ready in %.0f ms (%@)", (CACurrentMediaTime() - started) * 1000, self.doc.dir.lastPathComponent)) }
                 }
             } catch {
                 await MainActor.run { self.loadError = error.localizedDescription }
@@ -208,86 +270,55 @@ final class EditorModel {
         }
     }
 
-    /// Layout-only change: swap the render instruction; the layers stay loaded.
+    /// Layout-only change: swap the render instruction, at most once per run-loop pass while dragging.
     private func restyle() {
-        guard let b = built, let item = player.currentItem else { return }
-        item.videoComposition = CompositionBuilder.videoComposition(project, canvas: canvas, size: canvas.size(.hd), built: b)
-        if player.rate == 0 { player.seek(to: player.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero) }
-    }
-
-    var trimStart: Double { project.trimStartMs / 1000 }
-    var trimEnd: Double { project.trimEndMs > project.trimStartMs ? project.trimEndMs / 1000 : duration }
-
-    private func applyTrim() {
-        player.currentItem?.forwardPlaybackEndTime = project.trimEndMs > 0 ? CMTime(seconds: trimEnd, preferredTimescale: 600) : .invalid
-    }
-
-    func togglePlay() {
-        if player.rate != 0 { player.pause(); playing = false; return }
-        if time < trimStart - 0.01 || time >= trimEnd - 0.05 { seek(trimStart) }
-        player.play(); playing = true
-    }
-    func seek(_ s: Double) {
-        let t = min(max(0, s), duration)
-        time = t
-        player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-    }
-    func setIn() { let t = time; update("Set In") { $0.trimStartMs = t * 1000; if $0.trimEndMs > 0 && $0.trimEndMs <= $0.trimStartMs { $0.trimEndMs = 0 } } }
-    func setOut() { let t = time; update("Set Out") { $0.trimEndMs = t * 1000; if $0.trimStartMs >= $0.trimEndMs { $0.trimStartMs = 0 } } }
-
-    func split() {
-        update("Split") { p in
-            var map = TimeMap(segments: p.editSegments, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
-            let frameMs = 1000 / max(1, p.fps)
-            map.split(atSourceMs: (time * 1000 / frameMs).rounded() * frameMs)
-            p.timeline.segments = map.storedSegments
+        guard !restylePending else { return }
+        restylePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.restylePending = false
+            guard let b = self.built, let item = self.player.currentItem else { return }
+            item.videoComposition = CompositionBuilder.videoComposition(self.project, canvas: self.canvas, size: self.canvas.size(.hd), built: b)
+            self.previewRevision += 1
+            if self.player.rate == 0 { self.requestSeek(CMTime(seconds: self.time, preferredTimescale: 60000)) }
         }
     }
-    func deleteSection() {
-        update("Delete Section") { p in
-            // In/Out selects the range to remove; it must not first restrict the kept ranges to that selection.
-            var map = TimeMap(segments: p.timeline.segments, sourceDurationMs: p.durationMs, frameMs: 1000 / max(1, p.fps))
-            map.remove(sourceRange: Segment(startMs: trimStart * 1000, endMs: trimEnd * 1000))
-            p.timeline.segments = map.storedSegments
-            p.trimStartMs = 0; p.trimEndMs = 0
+
+    /// A RenderPlan at the playhead's canvas, for overlays that must line up with the rendered picture.
+    func renderPlan(size: CGSize) -> RenderPlan {
+        var sources: [SourceKey: SourceInfo] = [.game: SourceInfo(size: gameSize)]
+        if let c = built?.cameraSize { sources[.camera] = SourceInfo(size: c) }
+        return RenderPlan(scenes: project.scenes.isEmpty ? [project.defaultScene] : project.scenes, timeline: project.timeline,
+                          map: TimeMap(segments: [], sourceDurationMs: project.durationMs), canvas: canvas, canvasSize: size,
+                          sources: sources, mirrorCamera: project.cameraMirror)
+    }
+    var gameSize: CGSize { built?.screenSize ?? (project.width > 0 ? CGSize(width: project.width, height: project.height) : CGSize(width: 1920, height: 1080)) }
+
+    // MARK: Messages
+
+    func showToast(_ t: EditorToast, seconds: Double = 4) {
+        withAnimation(DS.Motion.gentle) { toast = t }
+        guard seconds > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self = self, self.toast?.id == t.id else { return }
+            withAnimation(DS.Motion.gentle) { self.toast = nil }
         }
     }
-    func addZoom() { let s = time * 1000; update("Add Zoom") { $0.timeline.zooms.append(ZoomBlock(startMs: s, endMs: min($0.durationMs, s + 3000))) } }
+}
 
-    // MARK: Export
+/// Transient message at the bottom of the preview. An export result carries its file for Show in Finder and drag.
+struct EditorToast: Identifiable, Equatable {
+    let id = UUID()
+    var text: String
+    var detail: String? = nil
+    var style: Toast.Style = .info
+    var file: URL? = nil
+}
 
-    var anyExporting: Bool { exports.values.contains { $0.running } }
-
-    func export() {
-        saveNow()
-        let jobs = Canvas.allCases.filter { exportCanvases.contains($0) }
-            .map { ExportJob(canvas: $0, resolution: resolution, range: isHDRSource ? range : .sdr, fps: fps) }
-        guard !jobs.isEmpty else { return }
-        player.pause()
-        for j in jobs { exports[j.canvas] = ExportState(running: true) }
-        Task {
-            // One at a time: the media engines are shared, and sequential keeps each export at full speed.
-            for j in jobs {
-                let ex = Exporter(doc: doc, job: j)
-                await MainActor.run { self.exporters.append(ex) }
-                do {
-                    let url = try await ex.run { p in DispatchQueue.main.async { self.exports[j.canvas]?.progress = p } }
-                    await MainActor.run {
-                        self.exports[j.canvas] = ExportState(progress: 1, running: false, url: url)
-                        self.recordExport(j.canvas, url)
-                    }
-                } catch {
-                    await MainActor.run { self.exports[j.canvas] = ExportState(running: false, error: ex.cancelled ? "Cancelled" : error.localizedDescription) }
-                }
-            }
-            await MainActor.run { self.exporters.removeAll(); Library.shared.objectWillChange.send() }
-        }
-    }
-    func cancelExports() { exporters.forEach { $0.cancel() } }
-
-    /// Export history is bookkeeping, not an edit: it bypasses undo.
-    private func recordExport(_ canvas: Canvas, _ url: URL) {
-        var p = project; p.lastExport[canvas.rawValue] = url.lastPathComponent
-        project = p; doc.project = p; saveNow()
-    }
+/// Seek latency, logged so scrubbing responsiveness can be checked without a screen.
+struct SeekStats {
+    var count = 0, total = 0.0, worst = 0.0
+    mutating func add(_ s: Double) { count += 1; total += s; worst = max(worst, s) }
+    var average: Double { count > 0 ? total / Double(count) : 0 }
+    var summary: String { String(format: "%d seeks, average %.1f ms, worst %.1f ms", count, average * 1000, worst * 1000) }
 }
