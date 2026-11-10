@@ -107,7 +107,7 @@ Key decisions (already made; do not reopen inside a plan):
 
 ## 4. Plans and order
 
-Status as of 10 November 2026: every numbered plan is on `main`; plan 40 (the final integration) is in review.
+Status as of 10 November 2026: every numbered plan is on `main`; plan 40 (the final integration) is in review (#18).
 
 | Plan | What | Depends on | Status on `main` |
 |---|---|---|---|
@@ -123,7 +123,7 @@ Status as of 10 November 2026: every numbered plan is on `main`; plan 40 (the fi
 | [23](23-overlays.md) | Image and text layers, templates | 10 (UI parts after 22) | Done: engine #10, live UI and templates #15, editor and exports in plan 40 |
 | [30](30-editor-timeline-engine.md) | Project v2, cuts, scene and zoom tracks, render plan | 10 (events from 22) | Done (#11) |
 | [31](31-editor-ui.md) | Timeline UI, zoom blocks, undo, export presets | 13, 30 | Done (#14); step 7 (edit any layer in the preview) in plan 40 |
-| 40 | Final integration: the editor replays live transitions, overlays in the editor and exports, layer editing in the editor, docs | all of the above | In review |
+| 40 | Final integration: the editor replays live transitions, overlays in the editor and exports, layer editing in the editor, docs | all of the above | In review (#18) |
 | [90](90-later.md) | Briefs: daemon and notarization, more sources, HDR streaming, replay buffer, web overlays, captions | various | Not started |
 
 ### Done
