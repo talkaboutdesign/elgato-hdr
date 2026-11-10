@@ -13,7 +13,7 @@ extension AppDelegate {
     func installActions() {
         var a = StudioActions()
         a.toggleRecording = { [weak self] in self?.toggleRecording() }
-        a.goLive = {}
+        a.goLive = { [weak self] in self?.showGoLive() }
         a.selectMode = { [weak self] in self?.selectMode(index: $0) }
         a.selectColor = { [weak self] in self?.selectColor(mode: $0) }
         a.selectPresentation = { [weak self] in self?.selectPresentation(mode: $0) }
@@ -36,6 +36,7 @@ extension AppDelegate {
         a.toggleSidebar = { [weak self] in self?.toggleSidebar() }
         a.toggleFocus = { [weak self] in self?.toggleFocusMode() }
         state.actions = a
+        installStreamActions()
     }
 
     // MARK: Devices
@@ -66,9 +67,15 @@ extension AppDelegate {
 
     func observeDeviceChanges() {
         guard !demoCamera else { return }
-        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+        deviceObservers = [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification].map { name in
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.syncDevices() }
         }
+    }
+
+    /// Block-based observer tokens and repeating timers are not released with their owner; end them explicitly.
+    func stopStudioObservers() {
+        deviceObservers.forEach { NotificationCenter.default.removeObserver($0) }; deviceObservers = []
+        meterTimer?.invalidate(); meterTimer = nil
     }
 
     /// The mic level is sampled here at 20 Hz rather than published from the audio queue on every buffer.
@@ -97,7 +104,12 @@ extension AppDelegate {
 
     // MARK: Window chrome
 
-    @objc func toggleSidebar() { studio.toggleSidebar() }
+    /// The menu item and the toolbar's inspector button both land here (see `StudioSplitViewController`).
+    @objc func toggleSidebar() {
+        if !panels.focus { panels.sidebar = state.sidebarVisible }   // the divider can collapse it too
+        if panels.toggleSidebar() { log("focus mode: sidebar requested, leaving full screen"); toggleFocusMode() }
+        else { studio.setSidebar(visible: panels.sidebar, animated: true) }
+    }
     /// Always the studio window, whichever window is key: focus mode is about the live picture.
     @objc func toggleFocusMode() { window.makeKeyAndOrderFront(nil); window.toggleFullScreen(nil) }
 
@@ -114,9 +126,10 @@ extension AppDelegate {
     }
 
     func enterFocus() {
-        focusRestoreSidebar = state.sidebarVisible
+        panels.sidebar = state.sidebarVisible
+        panels.enterFocus()
         state.focusMode = true
-        studio.setSidebar(visible: false, animated: false)
+        studio.setSidebar(visible: panels.sidebar, animated: false)
         studio.stage.setFocus(true)
     }
     func windowWillExitFullScreen(_ n: Notification) {
@@ -131,9 +144,10 @@ extension AppDelegate {
 
     private func leaveFocus() {
         guard state.focusMode else { return }
+        panels.leaveFocus()
         state.focusMode = false
         studio.stage.setFocus(false)
-        studio.setSidebar(visible: focusRestoreSidebar, animated: false)
+        studio.setSidebar(visible: panels.sidebar, animated: false)
     }
 
     // MARK: First launch

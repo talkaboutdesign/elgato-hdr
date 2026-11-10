@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Observation
 
 /// User-visible app name; every UI string goes through it so a rename is one line.
@@ -10,7 +11,7 @@ enum Connection: Equatable {
     case connecting, live, noSignal(String), demo
 }
 
-/// Streaming is filled in by plans 20 and 21; until then the Go Live control is shown disabled.
+/// Phase of the stream as a whole; per-destination health is in `StreamingState`.
 enum StreamUIState: Equatable {
     case unavailable
     case idle
@@ -31,6 +32,44 @@ struct Toast: Identifiable, Equatable {
         case .success: "checkmark.circle.fill"
         case .warning: "exclamationmark.triangle.fill"
         case .error: "xmark.octagon.fill"
+        }
+    }
+}
+
+/// What a stopped recording reports to its caller (toast, log, quit), decided after `finalize` has run.
+enum RecordingOutcome: Equatable {
+    case saved(name: String, layers: [String])
+    case failed(reason: String)
+
+    /// `gameError` is the game writer's message when it did not complete. Fragments written before the failure can
+    /// still make the project readable, but the recording stopped short, so that is reported as a failure too.
+    init(project: Project, gameError: String?) {
+        if project.state == "damaged" {
+            self = .failed(reason: "\(project.name) could not be read and was marked damaged" + (gameError.map { " (\($0))" } ?? ""))
+        } else if let e = gameError {
+            self = .failed(reason: "The game video did not finish (\(e)); \(project.name) keeps what was written")
+        } else {
+            self = .saved(name: project.name, layers: ["game"] + (project.camera != nil ? ["camera"] : []) + (project.mic != nil ? ["mic"] : []))
+        }
+    }
+
+    /// Nil when the writer completed. `Recorder.finish` reports "saved …" even when `finishWriting` failed, so the
+    /// writer's own error comes first.
+    static func writerError(_ w: AVAssetWriter, message: String) -> String? {
+        w.status == .completed ? nil : (w.error?.localizedDescription ?? message)
+    }
+
+    var logLine: String {
+        switch self {
+        case .saved(let name, let layers): return "saved \(name) [\(layers.joined(separator: " + "))]"
+        case .failed(let reason): return "recording failed: \(reason)"
+        }
+    }
+
+    var toast: Toast {
+        switch self {
+        case .saved(let name, let layers): return Toast(text: "Recording saved", detail: "\(name) · \(layers.joined(separator: ", "))", style: .success)
+        case .failed(let reason): return Toast(text: "Recording failed", detail: reason, style: .error)
         }
     }
 }
@@ -101,29 +140,37 @@ final class StudioState {
     var recording = false
     var recordingElapsed: TimeInterval = 0
     var recordingLayers: [String] = []
-    // streaming (plans 20 and 21)
-    var streaming: StreamUIState = .unavailable
+    // streaming: destinations, settings and live health (plan 21)
+    let streaming = StreamingState()
     // transient messages
     var toast: Toast?
     // window chrome
     var sidebarVisible = true
     var focusMode = false
+    // scenes (plan 22)
+    let scenes = SceneModel()
 
     @ObservationIgnored var actions = StudioActions()
 
     var cameraOn: Bool { cameraID != nil }
     var micOn: Bool { micID != nil }
 
-    /// Applies one statistics report from the capture session (at most once a second).
+    /// Applies one statistics report from the capture session (at most once a second). Only these reports may mark
+    /// the connection live: a frame arrived.
     func applyStats(width: Int, height: Int, fps: Double, latencyMs: Double, demo: Bool) {
-        let s = StudioFormat.signal(width: width, height: height, fps: fps, color: colorMode)
-        let short = StudioFormat.shortSignal(width: width, height: height, fps: fps, color: colorMode)
-        if signal != s { signal = s }
-        if shortSignal != short { shortSignal = short }
+        formatSignal(width: width, height: height, fps: fps)
         let ms = latencyMs.rounded()
         if self.latencyMs != ms { self.latencyMs = ms }
         let c: Connection = demo ? .demo : .live
         if connection != c { connection = c }
+    }
+
+    /// Re-labels the signal (for example after a colour mode change) without touching the connection state.
+    func formatSignal(width: Int, height: Int, fps: Double) {
+        let s = StudioFormat.signal(width: width, height: height, fps: fps, color: colorMode)
+        let short = StudioFormat.shortSignal(width: width, height: height, fps: fps, color: colorMode)
+        if signal != s { signal = s }
+        if shortSignal != short { shortSignal = short }
     }
 
     /// Text for the status pill over the picture.
@@ -136,6 +183,24 @@ final class StudioState {
             guard !shortSignal.isEmpty else { return connection == .demo ? "Demo source" : "Starting…" }
             return prefix + shortSignal + (latencyMs > 0 ? " · \(Int(latencyMs)) ms" : "")
         }
+    }
+}
+
+/// Sidebar visibility across focus mode, kept free of AppKit so it can be tested. `sidebar` is what the window
+/// should show; `restoreSidebar` is the sidebar as it was before focus mode.
+struct PanelLayout: Equatable {
+    var focus = false, sidebar = true, restoreSidebar = true
+
+    mutating func enterFocus() { guard !focus else { return }; restoreSidebar = sidebar; focus = true; sidebar = false }
+    mutating func leaveFocus() { guard focus else { return }; focus = false; sidebar = restoreSidebar }
+
+    /// ⌥⌘S and the toolbar's inspector button. In focus mode a sidebar would shrink the full-screen picture, so the
+    /// toggle leaves focus mode instead (panels restored as before), then applies to what was on screen: the hidden
+    /// sidebar is shown, as the menu item ("Show Sidebar") promises. Returns true when focus mode must end; the
+    /// caller then leaves full screen, which calls `leaveFocus`.
+    mutating func toggleSidebar() -> Bool {
+        if focus { restoreSidebar = true; return true }
+        sidebar.toggle(); return false
     }
 }
 

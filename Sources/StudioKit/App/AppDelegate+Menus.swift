@@ -51,6 +51,7 @@ extension AppDelegate {
         let camItem = NSMenuItem(); main.addItem(camItem)
         cameraMenu.delegate = self   // rebuilt on open so device lists stay current
         camItem.submenu = cameraMenu
+        addScenesMenu(to: main)
 
         let recItem = NSMenuItem(); main.addItem(recItem)
         let recMenu = NSMenu(title: "Record")
@@ -61,10 +62,13 @@ extension AppDelegate {
         recMenu.addItem(withTitle: "Show Recordings in Finder", action: #selector(showRecordings), keyEquivalent: "")
         recItem.submenu = recMenu
 
+        addStreamMenu(to: main)
+
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Show Live View", action: #selector(showLiveView), keyEquivalent: "0")
         viewMenu.addItem(withTitle: "Focus Mode (Full Screen)", action: #selector(toggleFocusMode), keyEquivalent: "f")
+        viewMenu.addItem(makeCleanGameItem())
         sidebarItem = NSMenuItem(title: "Hide Sidebar", action: #selector(toggleSidebar), keyEquivalent: "s")
         sidebarItem.keyEquivalentModifierMask = [.command, .option]
         viewMenu.addItem(sidebarItem)
@@ -160,7 +164,7 @@ extension AppDelegate {
     func selectColor(mode: ColorMode) {
         colorMode = mode; UserDefaults.standard.set(colorMode.rawValue, forKey: "color")
         refreshChecks(); renderer?.colorMode = colorMode
-        if let s = session, s.w > 0 { state.applyStats(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: measuredFps, nominal: nominalFps), latencyMs: state.latencyMs, demo: demoSource != nil) }
+        if let s = session, s.w > 0 { state.formatSignal(width: s.w, height: s.h, fps: StudioFormat.nominalFps(measured: measuredFps, nominal: nominalFps)) }
     }
     @objc func toggleMute() {
         audio.muted.toggle(); state.muted = audio.muted; UserDefaults.standard.set(audio.muted, forKey: "muted"); refreshChecks()

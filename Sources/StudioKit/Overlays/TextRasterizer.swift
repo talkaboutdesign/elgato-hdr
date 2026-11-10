@@ -15,12 +15,19 @@ struct OverlayTokens: Equatable {
     /// `{time}`: local clock as HH:mm. `{timer}`: elapsed time as M:SS, or H:MM:SS from an hour on.
     func replace(_ s: String) -> String {
         guard Self.contains(s) else { return s }
-        var cal = Calendar(identifier: .gregorian); cal.timeZone = timeZone
-        let t = cal.dateComponents([.hour, .minute], from: now)
-        let e = max(0, Int((elapsed ?? 0).rounded(.down)))
-        let timer = e >= 3600 ? String(format: "%d:%02d:%02d", e / 3600, e / 60 % 60, e % 60) : String(format: "%d:%02d", e / 60, e % 60)
-        return s.replacingOccurrences(of: "{time}", with: String(format: "%02d:%02d", t.hour ?? 0, t.minute ?? 0))
-            .replacingOccurrences(of: "{timer}", with: timer)
+        // Render threads call this for every text layer on every frame: the calendar only when `{time}` is used.
+        var out = s
+        if out.contains("{timer}") {
+            let e = max(0, Int((elapsed ?? 0).rounded(.down)))
+            let timer = e >= 3600 ? String(format: "%d:%02d:%02d", e / 3600, e / 60 % 60, e % 60) : String(format: "%d:%02d", e / 60, e % 60)
+            out = out.replacingOccurrences(of: "{timer}", with: timer)
+        }
+        if out.contains("{time}") {
+            var cal = Calendar(identifier: .gregorian); cal.timeZone = timeZone
+            let t = cal.dateComponents([.hour, .minute], from: now)
+            out = out.replacingOccurrences(of: "{time}", with: String(format: "%02d:%02d", t.hour ?? 0, t.minute ?? 0))
+        }
+        return out
     }
 }
 
@@ -40,10 +47,27 @@ enum TextRasterizer {
         switch name { case "regular": .regular; case "medium": .medium; case "bold": .bold; case "heavy": .heavy; default: .semibold }
     }
     /// The named font, or the system font at the spec's weight when the name is empty or not installed on this Mac.
+    /// A family name (what the inspector stores) gets the face nearest the spec's weight; a PostScript or full face
+    /// name is used as it is. CoreText rather than NSFontManager: this runs on the overlay queue.
     static func font(_ spec: TextSpec, size: CGFloat) -> CTFont {
-        if !spec.fontName.isEmpty, let f = NSFont(name: spec.fontName, size: size) { return f as CTFont }
+        if !spec.fontName.isEmpty {
+            let attrs: [CFString: Any] = [kCTFontFamilyNameAttribute: spec.fontName,
+                                          kCTFontTraitsAttribute: [kCTFontWeightTrait: weight(spec.weight).rawValue]]
+            let wanted = CTFontDescriptorCreateWithAttributes(attrs as CFDictionary)
+            if let match = CTFontDescriptorCreateMatchingFontDescriptor(wanted, Set([kCTFontFamilyNameAttribute as String]) as CFSet) {
+                return CTFontCreateWithFontDescriptor(match, size, nil)
+            }
+            if let f = NSFont(name: spec.fontName, size: size) { return f as CTFont }
+        }
         return NSFont.systemFont(ofSize: size, weight: weight(spec.weight)) as CTFont
     }
+
+    /// Font families the inspector offers, those of a short list that this Mac has (all ship with macOS).
+    static let families: [String] = {
+        let wanted = ["Avenir Next", "Helvetica Neue", "Futura", "Gill Sans", "Rockwell", "Georgia", "Didot", "American Typewriter", "Menlo", "Marker Felt", "Impact"]
+        let installed = Set((CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? [])
+        return wanted.filter(installed.contains)
+    }()
     static func cgColor(_ v: [Double]?) -> CGColor? {
         guard let v = v, v.count >= 3, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         return CGColor(colorSpace: space, components: [v[0], v[1], v[2], v.count > 3 ? v[3] : 1].map { CGFloat(min(1, max(0, $0))) })
