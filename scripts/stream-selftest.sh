@@ -68,10 +68,12 @@ print(f"{canvas}: {v['codec_name']} {v['width']}x{v['height']} {fps:.3f} fps; {a
 assert v['codec_name']=='h264' and (v['width'],v['height'])==((1920,1080) if canvas=='wide' else (1080,1920))
 pts=[float(f['best_effort_timestamp_time']) for f in json.loads((p/'pts.json').read_text())['frames']]
 sys.path.insert(0, 'scripts')
-from stream_checks import check_timing, check_drops
-check_timing(pts, actual, fps=round(fps))
-check_drops((p/'app.log').read_text())
-assert abs(actual-round(fps))<=0.5 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
+from stream_checks import check_timing, check_drops, lane_frame_rate
+log = (p/'app.log').read_text()
+rate = lane_frame_rate(log, canvas)
+check_timing(pts, actual, fps=rate)
+check_drops(log)
+assert abs(actual-rate)<=0.5 and a['codec_name']=='aac' and a['sample_rate']=='48000' and a['channels']==2
 assert abs(duration-20)<1
 # The bottom strip also encodes a binary counter; identify the periodic flash from video alone.
 frames=[]; time=None

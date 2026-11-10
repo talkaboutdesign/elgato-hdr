@@ -2,6 +2,15 @@
 import re
 
 
+def lane_frame_rate(log, canvas, configured=60):
+    # SPS/stream metadata deliberately keep the configured rate when selection is reduced.
+    name = 'Vertical' if canvas == 'vertical' else 'Horizontal'
+    rate = configured
+    for match in re.finditer(r'^' + name + r' stream (?:at |restored to )([\d.]+) fps', log, re.MULTILINE):
+        rate = float(match[1])
+    return rate
+
+
 def check_timing(pts, decoded_fps, fps=60):
     gaps = [b - a for a, b in zip(pts, pts[1:]) if a >= pts[0] + 1]
     assert gaps, 'FAIL: no steady-state video timestamps'

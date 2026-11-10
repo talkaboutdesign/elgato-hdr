@@ -70,7 +70,7 @@ log = (out / 'app.log').read_text()
 base = {m[1]: int(m[2]) for m in re.finditer(r'RTMP 127\.0\.0\.1:(\d+): stream time 0 is host (\d+) ns', log)}
 actions = [(m[1], int(m[2])) for m in re.finditer(r'scene-script: (.+?) at host (\d+) ns', log)]
 sys.path.insert(0, 'scripts')
-from stream_checks import check_actions, check_drops, check_timing
+from stream_checks import check_actions, check_drops, check_timing, lane_frame_rate
 check_actions(sys.argv[5], [name for name, _ in actions])
 check_drops(log)
 print('actions:', ', '.join(a for a, _ in actions) or 'none')
@@ -91,7 +91,7 @@ for port, canvas in ports.items():
     print(f"{canvas} ({port}): {v['codec_name']} {v['width']}x{v['height']} frames={v['nb_read_frames']} duration={float(p['format']['duration']):.2f}s")
     pts_data = json.loads(subprocess.check_output([ffprobe, '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(f)]))
     pts = [float(x['best_effort_timestamp_time']) for x in pts_data['frames']]
-    check_timing(pts, int(v['nb_read_frames']) / float(p['format']['duration']))
+    check_timing(pts, int(v['nb_read_frames']) / float(p['format']['duration']), fps=lane_frame_rate(log, canvas))
     assert v['codec_name'] == 'h264'
     assert (v['width'], v['height']) == ((1920, 1080) if canvas == 'wide' else (1080, 1920))
     if port not in base: print(f'FAIL: no stream time 0 line for {port}'); ok = False; continue

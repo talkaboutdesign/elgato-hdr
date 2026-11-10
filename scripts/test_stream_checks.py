@@ -1,5 +1,5 @@
 import unittest
-from stream_checks import check_timing, check_drops, check_actions
+from stream_checks import check_timing, check_drops, check_actions, lane_frame_rate
 
 class StreamChecksTests(unittest.TestCase):
     def test_arrival_jitter_is_not_a_lost_frame(self):
@@ -11,6 +11,15 @@ class StreamChecksTests(unittest.TestCase):
         check_timing([0, 1, 1.034, 1.067], 30, fps=30)
         with self.assertRaises(AssertionError): check_timing([0, 1, 1.067], 30, fps=30)
         with self.assertRaises(AssertionError): check_timing([0, 1, 1.034, 1.067], 30, fps=60)
+    def test_lane_rate_ignores_unchanged_stream_headers(self):
+        log = 'metadata fps=60\nVertical stream at 30 fps — the video encoder is at capacity\n'
+        self.assertEqual(lane_frame_rate(log, 'vertical'), 30)
+        self.assertEqual(lane_frame_rate(log, 'wide'), 60)
+        log += 'Horizontal stream at 30 fps — the video encoder is at capacity\n'
+        self.assertEqual(lane_frame_rate(log, 'wide'), 30)
+        log += 'Vertical stream restored to 60 fps\n'
+        self.assertEqual(lane_frame_rate(log, 'vertical'), 60)
+        self.assertEqual(lane_frame_rate(log, 'wide'), 30)
     def test_all_drop_counters(self):
         base = 'dropped render=0 encoder=0 queueRejected=0 inFlightRejected=0'
         check_drops(base)
