@@ -69,7 +69,7 @@ struct RulerLane: View {
         let selected: UUID? = { if case .marker(let id) = model.selection { return id }; return nil }()
         let hovered: UUID? = { if case .marker(let id) = model.hover { return id }; return nil }()
         SwiftUI.Canvas { ctx, size in
-            let h = size.height
+            let h = Double(size.height), width = Double(size.width)
             let (major, minor) = axis.ticks()
             let parts = max(1, Int((major / minor).rounded()))
             let first = Int((axis.visibleStart / minor).rounded(.down)), last = Int((axis.visibleEnd / minor).rounded(.up))
@@ -90,10 +90,10 @@ struct RulerLane: View {
             }
             ctx.stroke(lines, with: .color(.primary.opacity(0.22)), lineWidth: 1)
             ctx.stroke(majors, with: .color(.primary.opacity(0.45)), lineWidth: 1)
-            ctx.fill(Path(CGRect(x: 0, y: h - 1, width: size.width, height: 1)), with: .color(.primary.opacity(0.12)))
+            ctx.fill(Path(CGRect(x: 0, y: h - 1, width: width, height: 1)), with: .color(.primary.opacity(0.12)))
             for m in markers {
                 let x = axis.x(m.tMs / 1000)
-                guard x > -120, x < size.width + 12 else { continue }
+                guard x > -120, x < width + 12 else { continue }
                 let on = m.id == selected, hot = m.id == hovered
                 var flag = Path()
                 flag.move(to: CGPoint(x: x, y: h * 0.38)); flag.addLine(to: CGPoint(x: x + 10, y: h * 0.38 + 4))
@@ -127,10 +127,10 @@ struct SceneLane: View {
         let hoverRun: UUID?? = { if case .sceneRun(let id) = model.hover { return .some(id) }; return .none }()
         SwiftUI.Canvas { ctx, size in
             laneBackground(&ctx, size)
-            let h = size.height
+            let h = Double(size.height), width = Double(size.width)
             for run in runs {
                 let x0 = axis.x(run.startMs / 1000), x1 = axis.x(run.endMs / 1000)
-                guard x1 > 0, x0 < size.width else { continue }
+                guard x1 > 0, x0 < width else { continue }
                 let id = run.span?.id
                 let isSel = selected.map { $0 == id } ?? false
                 let isHot = hoverRun.map { $0 == id } ?? false
@@ -159,7 +159,7 @@ struct SceneLane: View {
             for run in runs where run.startMs > 0 {
                 guard let id = run.span?.id else { continue }
                 let x = axis.x(run.startMs / 1000)
-                guard x > -4, x < size.width + 4 else { continue }
+                guard x > -4, x < width + 4 else { continue }
                 let hot = id == hoverChange
                 ctx.fill(Path(roundedRect: CGRect(x: x - 1.5, y: hot ? 2 : 6, width: 3, height: hot ? h - 4 : h - 12), cornerRadius: 1.5),
                          with: .color(.white.opacity(hot ? 1 : 0.55)))
@@ -179,10 +179,10 @@ struct ZoomLane: View {
         let hover = model.hover
         SwiftUI.Canvas { ctx, size in
             laneBackground(&ctx, size)
-            let h = size.height
+            let h = Double(size.height), width = Double(size.width)
             for z in zooms {
                 let x0 = axis.x(z.startMs / 1000), x1 = axis.x(z.endMs / 1000)
-                guard x1 > 0, x0 < size.width else { continue }
+                guard x1 > 0, x0 < width else { continue }
                 let on = z.id == selected
                 var hot = false, hotEdge: Bool?
                 if case .zoom(let id) = hover, id == z.id { hot = true }
@@ -231,7 +231,7 @@ struct VideoLane: View {
         let keys = lastKey >= firstKey ? Array(stride(from: firstKey, through: lastKey, by: interval)) : []
         let center = Int((axis.visibleStart + axis.visibleEnd) * 500)
         SwiftUI.Canvas { ctx, size in
-            let h = size.height
+            let h = Double(size.height), width = Double(size.width)
             let lane = Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: TimelineStyle.laneRadius)
             ctx.clip(to: lane)
             ctx.fill(lane, with: .color(Color(white: 0.12)))
@@ -239,7 +239,7 @@ struct VideoLane: View {
                 let t = Double(key) / 1000
                 if axis.collapsed.contains(where: { t >= $0.lowerBound && t < $0.upperBound }) { continue }
                 let x0 = axis.x(t), x1 = axis.x(min(axis.duration, Double(key + interval) / 1000))
-                guard x1 > 0, x0 < size.width else { continue }
+                guard x1 > 0, x0 < width else { continue }
                 let slot = CGRect(x: x0, y: 0, width: x1 - x0, height: h)
                 if let img = film.image(for: key, interval: interval) {
                     let aspect = Double(img.width) / Double(max(1, img.height))
@@ -253,7 +253,7 @@ struct VideoLane: View {
             }
             for s in sections {
                 let x0 = axis.x(s.startMs / 1000), x1 = axis.x(s.endMs / 1000)
-                guard x1 > 0, x0 < size.width else { continue }
+                guard x1 > 0, x0 < width else { continue }
                 let r = CGRect(x: x0, y: 0, width: x1 - x0, height: h)
                 if !s.kept {
                     ctx.fill(Path(r), with: .color(.black.opacity(0.62)))
@@ -266,7 +266,7 @@ struct VideoLane: View {
             }
             for ms in splits {
                 let x = axis.x(ms / 1000)
-                guard x > -2, x < size.width + 2 else { continue }
+                guard x > -2, x < width + 2 else { continue }
                 ctx.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: h)), with: .color(.white.opacity(0.9)))
                 ctx.fill(Path(ellipseIn: CGRect(x: x - 3, y: h / 2 - 3, width: 6, height: 6)), with: .color(.white))
             }
@@ -305,9 +305,9 @@ struct AudioLane: View {
         let color = mic ? TimelineStyle.micWave : TimelineStyle.gameWave
         SwiftUI.Canvas { ctx, size in
             laneBackground(&ctx, size, opacity: 0.04)
-            let h = size.height, mid = h / 2
+            let h = Double(size.height), mid = h / 2, width = Double(size.width)
             guard let w = wave else {
-                ctx.fill(Path(CGRect(x: 0, y: mid - 0.5, width: size.width, height: 1)), with: .color(color.opacity(0.3)))
+                ctx.fill(Path(CGRect(x: 0, y: mid - 0.5, width: width, height: 1)), with: .color(color.opacity(0.3)))
                 return
             }
             // Normalized to the layer's loudest moment, then scaled by its volume, so gain changes are visible.
@@ -315,7 +315,7 @@ struct AudioLane: View {
             let step = 2.0
             var top: [CGPoint] = [], bottom: [CGPoint] = []
             var x = max(0, axis.x(offsetMs / 1000))
-            let end = min(size.width, axis.x(axis.duration))
+            let end = min(width, axis.x(axis.duration))
             while x < end {
                 let a = axis.time(atX: x) * 1000 - offsetMs, b = axis.time(atX: x + step) * 1000 - offsetMs
                 let (lo, hi) = w.range(a, max(b, a + 1))
@@ -329,7 +329,7 @@ struct AudioLane: View {
             path.addLines(bottom.reversed())
             path.closeSubpath()
             ctx.fill(path, with: .color(color.opacity(0.85)))
-            ctx.fill(Path(CGRect(x: 0, y: mid - 0.25, width: size.width, height: 0.5)), with: .color(color.opacity(0.5)))
+            ctx.fill(Path(CGRect(x: 0, y: mid - 0.25, width: width, height: 0.5)), with: .color(color.opacity(0.5)))
         }
         .accessibilityHidden(true)
     }
@@ -349,9 +349,10 @@ struct GuidesOverlay: View {
         SwiftUI.Canvas { ctx, size in
             let top = (layout.lane(.scenes)?.y ?? 28)
             let video = layout.lane(.video)
+            let width = Double(size.width), height = Double(size.height)
             for r in removed {
                 let x0 = axis.x(r.startMs / 1000), x1 = axis.x(r.endMs / 1000)
-                guard x1 > 0, x0 < size.width else { continue }
+                guard x1 > 0, x0 < width else { continue }
                 for lane in layout.lanes where lane.kind != .ruler && lane.kind != video?.kind {
                     ctx.fill(Path(CGRect(x: x0, y: lane.y, width: x1 - x0, height: lane.height)), with: .color(Color(nsColor: .windowBackgroundColor).opacity(0.55)))
                 }
@@ -359,13 +360,13 @@ struct GuidesOverlay: View {
             var lines = Path()
             for m in markers {
                 let x = axis.x(m / 1000).rounded() + 0.5
-                guard x > 0, x < size.width else { continue }
-                lines.move(to: CGPoint(x: x, y: top)); lines.addLine(to: CGPoint(x: x, y: size.height))
+                guard x > 0, x < width else { continue }
+                lines.move(to: CGPoint(x: x, y: top)); lines.addLine(to: CGPoint(x: x, y: height))
             }
             ctx.stroke(lines, with: .color(TimelineStyle.marker.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
             if let s = snap {
                 let x = axis.x(s)
-                ctx.fill(Path(CGRect(x: x - 0.75, y: 0, width: 1.5, height: size.height)), with: .color(DS.Color.warn))
+                ctx.fill(Path(CGRect(x: x - 0.75, y: 0, width: 1.5, height: height)), with: .color(DS.Color.warn))
             }
         }
     }
