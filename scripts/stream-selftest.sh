@@ -83,7 +83,7 @@ assert len(flashes)>=18 and all(abs(b-a-1)<0.05 for a,b in zip(flashes,flashes[1
 for source, filename in [('game','beep.log'),('mic','mic.log')]:
     beeps=[float(x) for x in re.findall(r'silence_end: ([0-9.]+)',(p/filename).read_text())]
     assert beeps, f'FAIL: no {source} beep detected'
-    pairs=[(f,min(beeps,key=lambda t:abs(t-f))) for f in flashes if 1<f<duration-1]
+    pairs=[(f,min(beeps,key=lambda t:abs(t-f))) for f in flashes]
     deltas=[(f-b)*1000 for f,b in pairs]
     assert len(set(b for f,b in pairs))==len(pairs), 'FAIL: missing beep'
     print(f"{source} A/V pairs={len(deltas)} min/mean/max={min(deltas):+.2f}/{sum(deltas)/len(deltas):+.2f}/{max(deltas):+.2f} ms")
