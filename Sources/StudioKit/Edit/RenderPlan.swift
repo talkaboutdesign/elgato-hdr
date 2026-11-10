@@ -11,6 +11,8 @@ struct RenderPlan {
     var cuts: TimeMap? = nil
 
     var cameraRanges: [Segment]? = nil
+    /// Where this plan's image and text layers come from; nil draws none (`RenderPlan+Overlays`).
+    var overlay: OverlaySource? = nil
 
     static func joinedCameraRanges(_ ranges: [Segment]) -> [Segment] {
         var out: [Segment] = []
@@ -22,7 +24,8 @@ struct RenderPlan {
         return out
     }
 
-    private func selection(at t: Double) -> (Scene?, Scene?, SceneTransition, Double) {
+    /// The scene at `t`, the one it is coming from while its transition runs, and the linear progress of it.
+    func selection(at t: Double) -> (Scene?, Scene?, SceneTransition, Double) {
         let s = map.source(fromTimeline: t)
         let spans = timeline.sceneSpans.filter { span in scenes.contains { $0.id == span.sceneID } }.sorted { $0.startMs < $1.startMs }
         guard let i = spans.lastIndex(where: { $0.startMs <= s }) else { return (nil, scenes.first, SceneTransition(style: .cut), 1) }
@@ -80,9 +83,17 @@ struct RenderPlan {
 
     static func transitionLayers(from: Scene?, to: Scene, transition: SceneTransition, progress: Double,
                                  canvas: Canvas, size: CGSize, sources: [SourceKey: SourceInfo]) -> [ResolvedLayer] {
+        transitionState(from: from, to: to, transition: transition)
+            .layers(canvas: canvas, size: size, sources: sources, atNs: transitionNs(progress, transition))
+    }
+
+    /// The live engine's state for a span: switched at host time 0, so `transitionNs` is the time into the switch.
+    static func transitionState(from: Scene?, to: Scene, transition: SceneTransition) -> LiveSceneState {
         var state = LiveSceneState(scene: to)
         state.from = from; state.transition = transition
-        let time = UInt64(max(0, progress * max(0, transition.durationMs) * 1e6).rounded())
-        return state.layers(canvas: canvas, size: size, sources: sources, atNs: time)
+        return state
+    }
+    static func transitionNs(_ progress: Double, _ transition: SceneTransition) -> UInt64 {
+        UInt64(max(0, progress * max(0, transition.durationMs) * 1e6).rounded())
     }
 }

@@ -70,6 +70,8 @@ final class EditorModel {
     @ObservationIgnored var settleWork: DispatchWorkItem?
     @ObservationIgnored var scrubbing = false
     @ObservationIgnored var reverseTimer: Timer?
+    /// Set from the compositor when a preview frame went out before an overlay was ready; cleared by the redraw.
+    @ObservationIgnored private let overlayRedraw = PendingFlag()
 
     var hasCamera: Bool { doc.hasCamera }
     var hasMic: Bool { doc.hasMic }
@@ -280,7 +282,7 @@ final class EditorModel {
                     self.built = b
                     let item = AVPlayerItem(asset: b.asset)
                     // A scene or zoom edit can arrive while track loading is suspended.
-                    item.videoComposition = CompositionBuilder.videoComposition(self.project, canvas: canvas, size: canvas.size(.hd), built: b)
+                    item.videoComposition = self.previewComposition(b, canvas: canvas)
                     item.audioMix = b.audioMix
                     self.player.replaceCurrentItem(with: item)
                     self.previewRevision += 1
@@ -310,10 +312,35 @@ final class EditorModel {
             guard let self = self else { return }
             self.restylePending = false
             guard let b = self.built, let item = self.player.currentItem else { return }
-            item.videoComposition = CompositionBuilder.videoComposition(self.project, canvas: self.canvas, size: self.canvas.size(.hd), built: b)
+            item.videoComposition = self.previewComposition(b, canvas: self.canvas)
             self.previewRevision += 1
             if self.player.rate == 0 { self.requestSeek(CMTime(seconds: self.time, preferredTimescale: 60000)) }
         }
+    }
+
+    /// The preview never waits for an overlay texture (playback must not stall on a 4K image decode). A frame that
+    /// went out without one asks for a redraw once the cache has caught up, so a paused preview does not keep it.
+    private func previewComposition(_ b: BuiltComposition, canvas: Canvas) -> AVMutableVideoComposition {
+        let flag = overlayRedraw
+        return CompositionBuilder.videoComposition(project, canvas: canvas, size: canvas.size(.hd), built: b, waitForOverlays: false) { [weak self] in
+            guard flag.set() else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                OverlayTextureCache.shared.drain()
+                DispatchQueue.main.async { self?.redrawForOverlays() }
+            }
+        }
+    }
+    private func redrawForOverlays() {
+        overlayRedraw.clear()
+        guard !closed, player.rate == 0, let b = built, let item = player.currentItem else { return }
+        item.videoComposition = previewComposition(b, canvas: canvas)
+        previewRevision += 1
+        requestSeek(CMTime(seconds: time, preferredTimescale: 60000))
+    }
+
+    /// The preview's render description with blocking overlay lookups, for one-off frames (debug snapshots).
+    func stillComposition() -> AVVideoComposition? {
+        built.map { CompositionBuilder.videoComposition(project, canvas: canvas, size: canvas.size(.hd), built: $0) }
     }
 
     /// A RenderPlan at the playhead's canvas, for overlays that must line up with the rendered picture.
@@ -353,6 +380,14 @@ struct EditorToast: Identifiable, Equatable {
     var detail: String? = nil
     var style: Toast.Style = .info
     var file: URL? = nil
+}
+
+/// A thread-safe "already asked" bit: `set` is true only for the call that turned it on.
+final class PendingFlag {
+    private let lock = NSLock()
+    private var on = false
+    func set() -> Bool { lock.lock(); defer { lock.unlock() }; if on { return false }; on = true; return true }
+    func clear() { lock.lock(); on = false; lock.unlock() }
 }
 
 /// Seek latency, logged so scrubbing responsiveness can be checked without a screen.

@@ -12,6 +12,9 @@ import Metal
 struct OverlayFrame {
     var sources: [SourceKey: SourceInfo] = [:]
     var textures: [SourceKey: LayerTextures.Kind] = [:]
+    /// Something is still being decoded or rasterized: a layer was left out or shows its previous texture. A paused
+    /// editor preview redraws once the cache has caught up (a missing file never counts).
+    var pending = false
 }
 
 final class OverlayTextureCache {
@@ -26,7 +29,7 @@ final class OverlayTextureCache {
 
     /// Who draws a texture. Each keeps its own last texture per layer to show while a replacement is made, so the
     /// window never borrows the thumbnails' tiny one (or the stream's) for a frame when `{timer}` ticks.
-    enum Consumer: Int { case any, window, wideOutput, verticalOutput, thumbnails
+    enum Consumer: Int { case any, window, wideOutput, verticalOutput, thumbnails, preview, export
         static func output(_ c: Canvas) -> Consumer { c == .wide ? .wideOutput : .verticalOutput }
     }
 
@@ -60,16 +63,22 @@ final class OverlayTextureCache {
             let key = SourceKey.layer(l.id)
             switch l.source.type {
             case "text":
-                guard let t = texture(for: l, pixelSize: l.frame.rect(in: canvas).size, assets: assets, tokens: tokens, wait: wait, consumer: consumer) else { continue }
+                let (t, ready) = lookup(l, pixelSize: l.frame.rect(in: canvas).size, assets: assets, tokens: tokens, wait: wait, consumer: consumer)
+                if !ready { out.pending = true }
+                guard let t else { continue }
                 out.sources[key] = SourceInfo(size: CGSize(width: t.width, height: t.height))
                 out.textures[key] = .rgba(t)
             case "image":
-                guard let file = l.source.file, case let .ready(_, native)? = imageInfo(file, assets, wait: wait),
-                      let r = SceneResolver.resolve(Composition(layers: [l]), canvas: canvas, sources: [key: SourceInfo(size: native)]).first,
+                guard let file = l.source.file else { continue }
+                let info = imageInfo(file, assets, wait: wait)
+                guard case let .ready(_, native)? = info else { if info == nil { out.pending = true }; continue }
+                guard let r = SceneResolver.resolve(Composition(layers: [l]), canvas: canvas, sources: [key: SourceInfo(size: native)]).first,
                       r.src.width > 0, r.src.height > 0 else { continue }
                 // Output pixels the whole image would span, so a zoomed crop is decoded sharp enough.
                 let span = CGSize(width: r.dst.width / r.src.width, height: r.dst.height / r.src.height)
-                guard let t = texture(for: l, pixelSize: span, assets: assets, tokens: tokens, wait: wait, consumer: consumer) else { continue }
+                let (t, ready) = lookup(l, pixelSize: span, assets: assets, tokens: tokens, wait: wait, consumer: consumer)
+                if !ready { out.pending = true }
+                guard let t else { continue }
                 out.sources[key] = SourceInfo(size: native)
                 out.textures[key] = .rgba(t)
             default: continue
@@ -85,6 +94,12 @@ final class OverlayTextureCache {
     /// two at or above its long side, at most 4096 px and never above their own size.
     func texture(for layer: Layer, pixelSize: CGSize, assets: [URL], tokens: OverlayTokens = OverlayTokens(), wait: Bool = false,
                  consumer: Consumer = .any) -> MTLTexture? {
+        lookup(layer, pixelSize: pixelSize, assets: assets, tokens: tokens, wait: wait, consumer: consumer).texture
+    }
+
+    /// `ready` is false while the exact texture is still being made (the layer's previous one, or nothing, stands in).
+    private func lookup(_ layer: Layer, pixelSize: CGSize, assets: [URL], tokens: OverlayTokens, wait: Bool,
+                        consumer: Consumer) -> (texture: MTLTexture?, ready: Bool) {
         let mine = LatestKey(id: layer.id, consumer: consumer)
         let key: Key
         switch layer.source.type {
@@ -94,18 +109,22 @@ final class OverlayTextureCache {
             if max(w, h) > 4096 { let k = 4096.0 / Double(max(w, h)); w = max(1, Int(Double(w) * k)); h = max(1, Int(Double(h) * k)) }
             key = .text(spec, tokens.replace(spec.string), w, h)
         case "image":
-            guard let file = layer.source.file, case let .ready(url, native)? = imageInfo(file, assets, wait: wait) else { return fallback(mine) }
+            guard let file = layer.source.file else { return (nil, true) }
+            let info = imageInfo(file, assets, wait: wait)
+            guard case let .ready(url, native)? = info else { return (fallback(mine), info != nil) }
             let need = max(pixelSize.width / max(native.width, 1), pixelSize.height / max(native.height, 1)) * max(native.width, native.height)
             var bucket = 64
             while CGFloat(bucket) < need && bucket < 4096 { bucket *= 2 }
             key = .image(url, maxPixel: min(bucket, Int(max(native.width, native.height))))
-        default: return nil
+        default: return (nil, true)
         }
-        if let t = lookup(key, wait: wait) {
+        switch lookup(key, wait: wait) {
+        case .ready(let t):
             lock.lock(); latest[mine] = Entry(state: t, used: now()); lock.unlock()
-            return t
+            return (t, true)
+        case .failed: return (fallback(mine), true)
+        case .pending: return (fallback(mine), false)
         }
-        return fallback(mine)
     }
 
     /// Source sizes of image and text layers for laying them out without drawing (a frozen transition picture):
@@ -137,15 +156,16 @@ final class OverlayTextureCache {
         return e.state
     }
 
-    private func lookup(_ key: Key, wait: Bool) -> MTLTexture? {
+    private func lookup(_ key: Key, wait: Bool) -> State {
         let t = now()
         lock.lock()
         purge(t)
         var start = false
         switch textures[key]?.state {
-        case .ready(let tex)?: textures[key]?.used = t; lock.unlock(); return tex
+        case .ready(let tex)?: textures[key]?.used = t; lock.unlock(); return .ready(tex)
         case .pending?: break
         case .failed?: start = t - textures[key]!.settled > retryAfter
+            if !start { lock.unlock(); return .failed }
         case nil: start = true
         }
         if start { textures[key] = Entry(state: .pending, used: t) }
@@ -160,11 +180,11 @@ final class OverlayTextureCache {
                 self.lock.unlock()
             }
         }
-        guard wait else { return nil }
+        guard wait else { return .pending }
         drain()
         lock.lock(); defer { lock.unlock() }
-        if case .ready(let tex)? = textures[key]?.state { textures[key]?.used = now(); return tex }
-        return nil
+        if case .ready(let tex)? = textures[key]?.state { textures[key]?.used = now(); return .ready(tex) }
+        return .failed
     }
 
     private func imageInfo(_ name: String, _ paths: [URL], wait: Bool) -> Info? {
@@ -175,6 +195,7 @@ final class OverlayTextureCache {
         case .ready?: images[ref]?.used = t; let s = images[ref]?.state; lock.unlock(); return s
         case .pending?: break
         case .failed?: start = t - images[ref]!.settled > retryAfter
+            if !start { lock.unlock(); return .failed }
         case nil: start = true
         }
         if start { images[ref] = Entry(state: .pending, used: t) }

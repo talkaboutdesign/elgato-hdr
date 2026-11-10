@@ -388,7 +388,8 @@ struct SnapshotFrameOverlay: View {
                     try? await Task.sleep(nanoseconds: 120_000_000)
                     guard let item = model.player.currentItem else { return }
                     let g = AVAssetImageGenerator(asset: item.asset)
-                    g.videoComposition = item.videoComposition
+                    // Waits for overlays: a snapshot is one frame, with no later redraw to pick them up.
+                    g.videoComposition = model.stillComposition() ?? item.videoComposition
                     let half = CMTime(value: 1, timescale: 120)
                     g.requestedTimeToleranceBefore = half; g.requestedTimeToleranceAfter = half
                     g.maximumSize = model.canvas.size(.hd)

@@ -17,6 +17,7 @@ struct BuiltComposition {
     let cameraTrack: CMPersistentTrackID   // kCMPersistentTrackID_Invalid without a camera layer
     let sourceDurationMs: Double     // the game video's end
     let sourceFrameMs: Double
+    var assets: [URL] = []           // where the project's overlay images are looked up, project `Assets/` first
 }
 
 enum CompositionBuilder {
@@ -106,13 +107,16 @@ enum CompositionBuilder {
         var built = BuiltComposition(map: map, asset: comp, video: AVMutableVideoComposition(), audioMix: mixParams.isEmpty ? nil : mix, duration: duration,
                                      screenSize: screenSize, cameraSize: cameraSize,
                                      frameDuration: frameDuration, outTransfer: outTransfer, screenTrack: sv.trackID, cameraTrack: cameraTrackID,
-                                     sourceDurationMs: sourceMs, sourceFrameMs: frameMs)
+                                     sourceDurationMs: sourceMs, sourceFrameMs: frameMs, assets: AssetStore.searchPaths(project: doc.dir))
         built.video = videoComposition(p, canvas: canvas, size: canvas.size(resolution), built: built)
         return built
     }
 
-    /// The render description alone: cheap to rebuild whenever the layout changes.
-    static func videoComposition(_ p: Project, canvas: Canvas, size: CGSize, built: BuiltComposition) -> AVMutableVideoComposition {
+    /// The render description alone: cheap to rebuild whenever the layout changes. Exports, thumbnails and hover
+    /// frames wait for overlay textures; the editor preview passes `waitForOverlays: false` and is told through
+    /// `onOverlaysPending` (on the compositor's queue) when a frame went out before an overlay was ready.
+    static func videoComposition(_ p: Project, canvas: Canvas, size: CGSize, built: BuiltComposition, waitForOverlays: Bool = true,
+                                 onOverlaysPending: (() -> Void)? = nil) -> AVMutableVideoComposition {
         let out = built.outTransfer
         let vc = AVMutableVideoComposition()
         vc.customVideoCompositorClass = out == 2 ? SDRLayerCompositor.self : HDRLayerCompositor.self
@@ -127,6 +131,8 @@ enum CompositionBuilder {
         var plan = RenderPlan(scenes: p.scenes.isEmpty ? [p.defaultScene] : p.scenes, timeline: p.timeline, map: built.map,
                               canvas: canvas, canvasSize: size, sources: sources, mirrorCamera: p.cameraMirror,
                               cuts: editMap(p, sourceDurationMs: built.sourceDurationMs, frameMs: built.sourceFrameMs))
+        plan.overlay = OverlaySource(assets: built.assets.isEmpty ? AssetStore.searchPaths(project: nil) : built.assets,
+                                     recordedAt: p.recordedAt ?? p.createdAt, wait: waitForOverlays)
         if let track = built.asset.track(withTrackID: built.cameraTrack) {
             plan.cameraRanges = track.segments.filter { !$0.isEmpty }.map {
                 Segment(startMs: $0.timeMapping.target.start.seconds * 1000, endMs: $0.timeMapping.target.end.seconds * 1000)
@@ -134,7 +140,8 @@ enum CompositionBuilder {
         }
         vc.instructions = [CompositionInstruction(timeRange: CMTimeRange(start: .zero, duration: built.duration), screenTrack: built.screenTrack,
                                                   cameraTrack: built.cameraTrack, plan: plan,
-                                                  outTransfer: out, screenTransfer: p.color.transfer, screenSize: built.screenSize, cameraSize: built.cameraSize)]
+                                                  outTransfer: out, screenTransfer: p.color.transfer, screenSize: built.screenSize, cameraSize: built.cameraSize,
+                                                  onOverlaysPending: onOverlaysPending)]
         return vc
     }
 

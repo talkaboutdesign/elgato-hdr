@@ -27,6 +27,8 @@ final class Exporter {
     var stallTimeout: TimeInterval = 20
     var encoderWaitLimit: TimeInterval = 600
     var onEncoderWaiting: ((Bool) -> Void)?
+    /// Image layers whose file could not be found; they are left out of the export.
+    private(set) var missingAssets: [MissingAsset] = []
     /// Starts feeding one writer input. Tests replace it to simulate a pump that never produces.
     var startPump: (Pump) -> Void = Exporter.feed
     var finishWriter: (AVAssetWriter, @escaping () -> Void) -> Void = { $0.finishWriting(completionHandler: $1) }
@@ -152,6 +154,19 @@ final class Exporter {
         }
         #endif
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let plan = (built.video.instructions.first as? CompositionInstruction)?.plan {
+            // Every overlay is decoded before the reader starts; frames then wait for any that are not (a new
+            // `{timer}` second), so no exported frame lacks one. A missing image is left out, never fatal.
+            let missing = AssetStore.missing(in: plan.shownScenes, searchPaths: plan.overlay?.assets ?? [])
+            if !missing.isEmpty { log("export: \(missing.count) overlay image(s) missing, left out: \(missing.map { "\($0.layer) in \($0.scene)" }.joined(separator: ", "))") }
+            missingAssets = missing
+            let started = CACurrentMediaTime()
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async { plan.prewarmOverlays(); c.resume() }
+            }
+            let layers = plan.shownScenes.flatMap { $0.composition(plan.canvas).layers }.filter(\.isOverlay).count
+            if layers > 0 { log(String(format: "export: %d overlay layer(s) ready in %.0f ms", layers, (CACurrentMediaTime() - started) * 1000)) }
+        }
         let hdr = built.outTransfer != 2
         let reader = try AVAssetReader(asset: built.asset)
         let videoTracks = built.asset.tracks(withMediaType: .video)

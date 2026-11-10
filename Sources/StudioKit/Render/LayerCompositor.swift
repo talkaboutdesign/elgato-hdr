@@ -19,10 +19,12 @@ final class CompositionInstruction: NSObject, AVVideoCompositionInstructionProto
     let screenSize: CGSize          // the tracks' natural sizes: what the layout is resolved against
     let cameraSize: CGSize?
     let hdrOutput: Bool
+    /// A frame was composed before one of its overlays was ready (preview only; exports wait).
+    let onOverlaysPending: (() -> Void)?
 
     init(timeRange: CMTimeRange, screenTrack: CMPersistentTrackID, cameraTrack: CMPersistentTrackID, plan: RenderPlan,
-         outTransfer: Int32, screenTransfer: Int32, screenSize: CGSize, cameraSize: CGSize?) {
-        self.timeRange = timeRange; self.screenTrack = screenTrack; self.cameraTrack = cameraTrack
+         outTransfer: Int32, screenTransfer: Int32, screenSize: CGSize, cameraSize: CGSize?, onOverlaysPending: (() -> Void)? = nil) {
+        self.timeRange = timeRange; self.screenTrack = screenTrack; self.cameraTrack = cameraTrack; self.onOverlaysPending = onOverlaysPending
         self.plan = plan; self.canvas = plan.canvasSize; self.outTransfer = outTransfer; self.screenTransfer = screenTransfer
         self.screenSize = screenSize; self.cameraSize = cameraSize; hdrOutput = outTransfer != 2
         requiredSourceTrackIDs = [screenTrack, cameraTrack].filter { $0 != kCMPersistentTrackID_Invalid }.map { NSNumber(value: $0) }
@@ -70,7 +72,13 @@ class LayerCompositor: NSObject, AVVideoCompositing {
             }
             var plan = ins.plan
             if textures[.camera] == nil { plan.sources.removeValue(forKey: .camera) }
-            let layers = DrawLayer.pair(plan.layers(atTimelineMs: request.compositionTime.seconds * 1000), textures)
+            let ms = request.compositionTime.seconds * 1000
+            // Image and text layers, as live: an export waits for each texture, the preview takes what is ready.
+            let overlays = plan.overlays(atTimelineMs: ms)
+            if overlays.pending { ins.onOverlaysPending?() }
+            plan.sources.merge(overlays.sources) { own, _ in own }
+            textures.merge(overlays.textures) { own, _ in own }
+            let layers = DrawLayer.pair(plan.layers(atTimelineMs: ms), textures)
             guard let cb = core.queue.makeCommandBuffer() else { request.finish(with: NSError(domain: "Compositor", code: 2)); return }
             let w = CVPixelBufferGetWidth(out), h = CVPixelBufferGetHeight(out)
             if Self.hdr {
