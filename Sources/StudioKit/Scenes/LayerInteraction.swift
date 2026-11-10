@@ -12,6 +12,8 @@ protocol LayerEditing: AnyObject {
     var editedComposition: Composition { get }
     var editedCanvas: Canvas { get }
     var editedSceneName: String { get }
+    /// The scene `editedComposition` belongs to. A gesture is bound to the scene and canvas it started in.
+    var editedSceneID: UUID? { get }
     var selectedLayerID: UUID? { get }
     var cropLayerID: UUID? { get }
     /// A text layer whose inspector field should take keyboard focus once shown.
@@ -33,10 +35,15 @@ extension SceneModel: LayerEditing {
     var editedComposition: Composition { composition }
     var editedCanvas: Canvas { canvas }
     var editedSceneName: String { active.name }
+    var editedSceneID: UUID? { active.id }
     var layerActions: SceneActions { actions }
     var assetSearchPaths: [URL] { AssetStore.searchPaths(project: nil) }
     var addsSourceLayers: Bool { true }
 }
+
+/// Which scene and canvas a picture shows. Duplicated scenes share layer ids, so a layer id alone does not say which
+/// scene an edit is meant for.
+struct LayerContext: Hashable { var sceneID: UUID?; var canvas: Canvas }
 
 /// The layers as the picture shows them, in canvas pixels (origin top-left), for one pointer or key event.
 struct LayerCanvas {
@@ -48,15 +55,19 @@ struct LayerCanvas {
     let pointsPerPixel: CGFloat
     /// A game layer the resolver draws over the whole canvas instead of its frame (`SceneResolver.pinnedGame`).
     let pinnedID: UUID?
+    /// The scene and canvas these layers belong to (nil: not known, never ends a gesture).
+    let context: LayerContext?
 
-    init(layers: [Layer], size: CGSize, sources: [SourceKey: SourceInfo], selectedID: UUID?, cropID: UUID?, pointsPerPixel: CGFloat) {
+    init(layers: [Layer], size: CGSize, sources: [SourceKey: SourceInfo], selectedID: UUID?, cropID: UUID?, pointsPerPixel: CGFloat,
+         context: LayerContext? = nil) {
         self.layers = layers; self.size = size; self.sources = sources; self.selectedID = selectedID; self.cropID = cropID
+        self.context = context
         self.pointsPerPixel = pointsPerPixel > 0 && pointsPerPixel.isFinite ? pointsPerPixel : 1
         pinnedID = SceneResolver.pinnedGame(Composition(layers: layers), sources: sources)
     }
     init(_ e: LayerEditing, sources: [SourceKey: SourceInfo], pointsPerPixel: CGFloat) {
         self.init(layers: e.editedComposition.layers, size: e.editedCanvasSize, sources: sources, selectedID: e.selectedLayerID,
-                  cropID: e.cropLayerID, pointsPerPixel: pointsPerPixel)
+                  cropID: e.cropLayerID, pointsPerPixel: pointsPerPixel, context: LayerContext(sceneID: e.editedSceneID, canvas: e.editedCanvas))
     }
 
     func layer(_ id: UUID?) -> Layer? { id.flatMap { id in layers.first { $0.id == id } } }
@@ -113,16 +124,24 @@ final class LayerInteraction {
     enum PointerResult: Equatable { case none, grabbing, resizing }
     private(set) var drag: Drag?
     private(set) var guides: [SnapGuide] = []
+    /// Where the current drag started: a drag ends as soon as the picture shows another scene or canvas, so its
+    /// start rectangle is never applied to a different scene's layer of the same id.
+    private var dragContext: LayerContext?
+    /// The open scroll, pinch or nudge step: its timer, name, actions and where it started.
     private var gestureEnd: DispatchWorkItem?
+    private var openContinuous: (name: String, actions: SceneActions, context: LayerContext?)?
     /// How long scroll, pinch and nudges wait for more before closing their undo step.
     var pause: TimeInterval = 0.4
 
-    func cancel() { drag = nil; guides = [] }
+    func cancel() { drag = nil; guides = []; dragContext = nil }
 
     /// The layer being resized, for the size read-out.
     var resizingID: UUID? { if case .resize(let id, _, _)? = drag { return id }; return nil }
 
     func mouseDown(at p: CGPoint, clickCount: Int, canvas c: LayerCanvas, actions a: SceneActions) -> PointerResult {
+        // A scroll or nudge step still waiting for its pause closes now: its timer must not end this drag's step.
+        settleContinuous()
+        dragContext = c.context
         if let crop = c.layer(c.cropID) {
             if c.rect(crop).contains(p) {
                 if clickCount == 2 { a.setCrop(nil); return .none }
@@ -147,6 +166,7 @@ final class LayerInteraction {
 
     func mouseDragged(to p: CGPoint, option: Bool, shift: Bool, canvas c: LayerCanvas, actions a: SceneActions) {
         guard let d = drag else { return }
+        if c.context != dragContext { mouseUp(actions: a); return }
         let snap = !option, size = c.size
         func snapper(excluding id: UUID) -> LayerSnapper? {
             snap ? LayerSnapper(canvas: size, others: c.snapFrames(excluding: id), threshold: 6 / c.pointsPerPixel) : nil
@@ -183,7 +203,7 @@ final class LayerInteraction {
     @discardableResult
     func mouseUp(actions a: SceneActions) -> Bool {
         guard let d = drag else { return false }
-        drag = nil; guides = []
+        drag = nil; guides = []; dragContext = nil
         switch d {
         case .move: a.endGesture("Move Layer")
         case .resize: a.endGesture("Resize Layer")
@@ -197,15 +217,15 @@ final class LayerInteraction {
     func scroll(at p: CGPoint, deltaY: CGFloat, precise: Bool, canvas c: LayerCanvas, actions a: SceneActions) -> Bool {
         guard let l = c.selected, l.visible, c.rect(l).contains(p) else { return false }
         let k = exp(deltaY * (precise ? 0.004 : 0.04))
-        if c.cropID == l.id { zoomCrop(l, by: Double(k), actions: a) } else { scaleSelected(k, canvas: c, actions: a) }
+        if c.cropID == l.id { zoomCrop(l, by: Double(k), canvas: c, actions: a) } else { scaleSelected(k, canvas: c, actions: a) }
         return true
     }
     func magnify(_ m: CGFloat, canvas c: LayerCanvas, actions a: SceneActions) {
         guard let l = c.selected else { return }
-        if c.cropID == l.id { zoomCrop(l, by: 1 + Double(m), actions: a) } else { scaleSelected(1 + m, canvas: c, actions: a) }
+        if c.cropID == l.id { zoomCrop(l, by: 1 + Double(m), canvas: c, actions: a) } else { scaleSelected(1 + m, canvas: c, actions: a) }
     }
-    private func zoomCrop(_ l: Layer, by k: Double, actions a: SceneActions) {
-        continuousEdit("Crop Layer", a)
+    private func zoomCrop(_ l: Layer, by k: Double, canvas c: LayerCanvas, actions a: SceneActions) {
+        continuousEdit("Crop Layer", c, a)
         a.editLayer(l.id) { $0.zoom = min(5, max(1, $0.zoom * k)) }
     }
 
@@ -217,7 +237,7 @@ final class LayerInteraction {
         let k = min(1, c.size.width / w, c.size.height / h); w *= k; h *= k
         if min(w, h) < LayerResize.minSide { let s = LayerResize.minSide / min(w, h); w *= s; h *= s }
         let frame = NRect(c.clamp(CGRect(x: r.midX - w / 2, y: r.midY - h / 2, width: w, height: h)), in: c.size)
-        continuousEdit("Resize Layer", a)
+        continuousEdit("Resize Layer", c, a)
         a.editLayer(l.id) { $0.frame = frame }
     }
 
@@ -246,23 +266,34 @@ final class LayerInteraction {
         case .escape: if c.cropID != nil { a.setCrop(nil) } else { a.selectLayer(nil) }; return true
         }
         if c.cropID == l.id, let r = c.resolved(l), r.dst.width > 0 {
-            continuousEdit("Crop Layer", a)
+            continuousEdit("Crop Layer", c, a)
             let dx = Double(d.x / r.dst.width * r.src.width), dy = Double(d.y / r.dst.height * r.src.height)
             a.editLayer(l.id) { $0.panX -= dx; $0.panY -= dy }
         } else if !c.isPinned(l) {
-            continuousEdit("Nudge Layer", a)
+            continuousEdit("Nudge Layer", c, a)
             let frame = NRect(c.rect(l).offsetBy(dx: d.x, dy: d.y), in: c.size)
             a.editLayer(l.id) { $0.frame = frame }
         }
         return true
     }
 
-    /// Scroll and pinch arrive as many small events: they become one undo step once they pause.
-    private func continuousEdit(_ name: String, _ a: SceneActions) {
+    /// Scroll and pinch arrive as many small events: they become one undo step once they pause. A burst that moves
+    /// to another scene or canvas closes the step it had and starts another.
+    private func continuousEdit(_ name: String, _ c: LayerCanvas, _ a: SceneActions) {
+        if let open = openContinuous, open.context != c.context { settleContinuous() }
         a.beginGesture()
         gestureEnd?.cancel()
-        let w = DispatchWorkItem { a.endGesture(name) }
+        openContinuous = (name, a, c.context)
+        let w = DispatchWorkItem { [weak self] in self?.settleContinuous() }
         gestureEnd = w
         DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: w)
+    }
+
+    /// Closes the open scroll, pinch or nudge step at once (its timer is cancelled).
+    func settleContinuous() {
+        gestureEnd?.cancel(); gestureEnd = nil
+        guard let open = openContinuous else { return }
+        openContinuous = nil
+        open.actions.endGesture(open.name)
     }
 }

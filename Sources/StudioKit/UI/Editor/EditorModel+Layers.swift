@@ -19,6 +19,7 @@ extension EditorModel: LayerEditing {
     var editedComposition: Composition { activeScene?.composition(canvas) ?? Composition() }
     var editedCanvas: Canvas { canvas }
     var editedSceneName: String { activeScene?.name ?? "Scene" }
+    var editedSceneID: UUID? { activeScene?.id }
     /// The selected layer, while the scene at the playhead has it on this canvas.
     var selectedLayerID: UUID? {
         guard case .layer(let id) = selection, editedComposition.layers.contains(where: { $0.id == id }) else { return nil }
@@ -43,12 +44,17 @@ extension EditorModel: LayerEditing {
         a.editText = { [weak self] in self?.editText($0) }
         a.copyLayoutToOtherCanvas = { [weak self] in self?.copyLayoutToOtherCanvas() }
         a.setCrop = { [weak self] in self?.setCrop($0) }
-        a.beginGesture = { [weak self] in self?.beginGesture() }
+        // Playback would move the playhead into another scene while the layer is held: a manipulation pauses it.
+        a.beginGesture = { [weak self] in self?.pauseForLayerEdit(); self?.beginGesture() }
         a.endGesture = { [weak self] in self?.endGesture(named: $0) }
         return a
     }
 
     // MARK: Editing the scene at the playhead
+
+    func pauseForLayerEdit() {
+        if playing || player.rate != 0 || reverseTimer != nil { pause() }
+    }
 
     /// Edits the scene at the playhead on the shown canvas. A scene migrated from a fixed layout becomes a scene of
     /// layers at its first layer edit (its layout controls give way to the layer list). False when nothing changed.
