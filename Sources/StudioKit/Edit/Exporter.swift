@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import VideoToolbox
+import QuartzCore
 
 // MARK: - Export
 
@@ -27,6 +28,7 @@ final class Exporter {
     var stallTimeout: TimeInterval = 20
     /// Starts feeding one writer input. Tests replace it to simulate a pump that never produces.
     var startPump: (Pump) -> Void = Exporter.feed
+    var finishWriter: (AVAssetWriter, @escaping () -> Void) -> Void = { $0.finishWriting(completionHandler: $1) }
 
     private enum Phase: Equatable { case idle, starting, running, finishing, finished, torndown }
     enum Abort: Equatable { case cancelled, stalled, failed }
@@ -81,8 +83,7 @@ final class Exporter {
     /// lifecycle queue, after any step running there, and the partial file goes with them.
     private func abort(_ reason: Abort, why: String) {
         guard aborted.trigger(reason) else { return }
-        let q0 = CACurrentMediaTime()
-        queue.async { let q1 = CACurrentMediaTime(); self.teardown(reason, why: why); log(String(format: "export: DBG queue-wait %.0f ms teardown %.0f ms phase-at-abort", (q1-q0)*1000, (CACurrentMediaTime()-q1)*1000)) }
+        queue.async { self.teardown(reason, why: why) }
     }
 
     private func teardown(_ reason: Abort, why: String) {   // lifecycle queue
@@ -198,8 +199,12 @@ final class Exporter {
             self.ownsOutput = true
             try? FileManager.default.removeItem(at: self.output)
             self.reader = reader; self.writer = writer; self.pumps = pumps
-            pumps.forEach { $0.retain([reader, writer]) }
+            pumps.forEach { p in
+                p.retain([reader, writer])
+                self.aborted.onTrigger { _ in p.done.resolve(false) }
+            }
             guard reader.startReading() else { throw reader.error ?? CompositionBuilder.err("cannot read layers") }
+            if let error = self.abortError(self.aborted.reason) { throw error }
             guard writer.startWriting() else { throw writer.error ?? CompositionBuilder.err("cannot write export") }
             writer.startSession(atSourceTime: .zero)
             // A cancel that arrived while the writer started is torn down right after this step.
@@ -214,7 +219,7 @@ final class Exporter {
             if reader.status == .failed { throw reader.error ?? CompositionBuilder.err("cannot read layers") }
             self.phase = .finishing
             self.activity.touch()
-            writer.finishWriting { finished.resolve(true) }
+            self.finishWriter(writer) { finished.resolve(true) }
         }
         try await await_(finished)
         try await step {
@@ -222,6 +227,7 @@ final class Exporter {
             self.phase = .finished
             self.stopWatchdog()
             self.pumps.forEach { $0.release() }
+            self.aborted.clearHandlers()
         }
         return output
     }
@@ -240,7 +246,7 @@ final class Exporter {
                 log(String(format: "export: STALLED, nothing appended and no state change for %.1f s", idle))
                 self.abort(.stalled, why: "stall watchdog")
                 // The lifecycle queue may be the thing that is stuck: report what can be read without it.
-                log("export: stall diagnostics \(self.pumps.isEmpty ? "(not started)" : "") \(self.diagnostics())")
+                self.queue.async { log("export: stall diagnostics \(self.diagnostics())") }
             }
             self.watchdog = t
             t.resume()
@@ -353,6 +359,7 @@ final class AbortSignal {
         hs.forEach { $0(r) }
         return true
     }
+    func clearHandlers() { lock.lock(); handlers = []; lock.unlock() }
     func onTrigger(_ h: @escaping (Exporter.Abort) -> Void) {
         lock.lock()
         if let r = value { lock.unlock(); h(r); return }
@@ -377,18 +384,14 @@ final class Activity {
     var idle: Double { lock.lock(); defer { lock.unlock() }; return CACurrentMediaTime() - last }
 }
 
-/// Appends and `markAsFinished` never run while the writer is being cancelled, nor after. A wedged append cannot
-/// block cancellation for more than two seconds.
+/// Never hold a shared lock across append: the writer may wait for the other input to advance.
+/// AVFoundation cancellation stops an in-flight append; the flag prevents further work afterwards.
 final class WriterGate {
     private let lock = NSLock()
     private var closed = false
     func run<T>(_ f: () -> T) -> T? {
-        lock.lock(); defer { lock.unlock() }
-        return closed ? nil : f()
+        lock.lock(); let stop = closed; lock.unlock()
+        return stop ? nil : f()
     }
-    func close() {
-        let locked = lock.lock(before: Date().addingTimeInterval(2))
-        closed = true
-        if locked { lock.unlock() } else { log("export: an append did not return within 2 s; cancelling the writer anyway") }
-    }
+    func close() { lock.lock(); closed = true; lock.unlock() }
 }

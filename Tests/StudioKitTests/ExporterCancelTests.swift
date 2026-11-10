@@ -134,6 +134,18 @@ final class ExporterCancelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: out.path), "the partial file is deleted")
     }
 
+    func testStalledFinishTripsTheWatchdog() async throws {
+        let doc = try await fixture()
+        let out = doc.exportsDir.appendingPathComponent("finish-stalled.mp4")
+        let e = Exporter(doc: doc, job: ExportJob(canvas: .wide, resolution: .hd, range: .sdr, fps: .source), output: out)
+        e.stallTimeout = 0.5
+        e.finishWriter = { _, _ in }
+        let task = Task { try await e.run { _ in } }
+        guard case .failure(let error)? = await result(of: task, within: 5) else { return XCTFail("finish must time out") }
+        XCTAssertTrue(error.localizedDescription.hasPrefix("Export stalled"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.path))
+    }
+
     /// The queue resolves every item, whatever its exporter does, and the editor's lock follows it.
     func testQueueResolvesCancelledStalledAndFinishedJobs() async throws {
         let doc = try await fixture()
