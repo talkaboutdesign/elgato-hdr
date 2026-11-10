@@ -21,7 +21,7 @@ extension StreamSession: StreamSessionDriving {}
 final class StreamController {
     let state: StreamingState
     private let store: DestinationStore
-    private let keychain: KeychainStore
+    private let keychain: StreamKeyStore
     /// `--go-live-for` with `EHDR_STREAM_KEY` (the self-test script): one key for every destination, no Keychain.
     var keyOverride: String?
     /// Builds the session for the planned outputs; nil when streaming is unavailable (no capture renderer yet).
@@ -47,7 +47,7 @@ final class StreamController {
         init(_ p: RTMPPublisher) { publisher = p }
     }
 
-    init(state: StreamingState, store: DestinationStore = DestinationStore(), keychain: KeychainStore = KeychainStore()) {
+    init(state: StreamingState, store: DestinationStore = DestinationStore(), keychain: StreamKeyStore = KeychainStore()) {
         self.state = state; self.store = store; self.keychain = keychain
         let config = store.load()
         state.destinations = config.destinations; state.settings = config.settings
@@ -60,25 +60,32 @@ final class StreamController {
 
     // MARK: Configuration
 
-    func save(_ destination: Destination, key: String?, done: @escaping (String?) -> Void) {
+    /// Saves `destination` and, when given, its key. A stream key pasted into the URL never reaches `streaming.json`
+    /// or StreamingState: for a known service it moves to the Keychain here (refused if a different key was typed);
+    /// for a custom server, whose path may legitimately have several components, `keepPath` says the user chose to
+    /// keep it, otherwise the save is refused until they choose.
+    func save(_ destination: Destination, key: String?, keepPath: Bool = false, done: @escaping (String?) -> Void) {
         var d = destination
         d.name = d.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        d.url = Destination.normalizedURL(d.url, service: d.service)
         if d.name.isEmpty { done("Give the destination a name."); return }
+        let newKey: String?
+        switch Destination.separatingKey(url: d.url, key: key, service: d.service, keepPath: keepPath) {
+        case .failure(let problem): done(problem.description); return
+        case .success(let separated): d.url = separated.url; newKey = separated.key
+        }
         if let problem = Destination.urlProblem(d.url, service: d.service) { done(problem); return }
-        let key = key?.trimmingCharacters(in: .whitespacesAndNewlines)
         let isNew = !state.destinations.contains { $0.id == d.id }
-        if isNew, d.service != .custom, (key ?? "").isEmpty { done("Paste the stream key."); return }
+        if isNew, d.service != .custom, newKey == nil { done("Paste the stream key."); return }
         let keychain = keychain
         keyQueue.async { [weak self] in
             var error: String?
-            if let key, !key.isEmpty {
-                do { try keychain.set(key, for: d.id.uuidString) } catch let f as KeychainStore.Failure { error = f.message } catch { }
+            if let newKey {
+                do { try keychain.set(newKey, for: d.id.uuidString) } catch let f as KeychainStore.Failure { error = f.message } catch { }
             }
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let error { done(error); return }
-                if let key, !key.isEmpty { self.state.keyStored.insert(d.id) }
+                if newKey != nil { self.state.keyStored.insert(d.id) }
                 if let i = self.state.destinations.firstIndex(where: { $0.id == d.id }) {
                     let old = self.state.destinations[i]
                     self.state.destinations[i] = d
@@ -207,8 +214,13 @@ final class StreamController {
 
     // MARK: Connection test
 
-    func testConnection(_ destination: Destination, key: String?, done: @escaping (ConnectionTestResult) -> Void) {
-        let url = Destination.normalizedURL(destination.url, service: destination.service)
+    /// Tests `destination` with `key`, or its saved key. The URL is separated from a pasted key exactly as on save.
+    func testConnection(_ destination: Destination, key: String?, keepPath: Bool = false, done: @escaping (ConnectionTestResult) -> Void) {
+        let url: String, typed: String?
+        switch Destination.separatingKey(url: destination.url, key: key, service: destination.service, keepPath: keepPath) {
+        case .failure(let problem): done(.failed(stage: "URL", message: problem.description)); return
+        case .success(let separated): url = separated.url; typed = separated.key
+        }
         guard let endpoint = StreamEndpoint(url: url) else {
             done(.failed(stage: "URL", message: Destination.urlProblem(url, service: destination.service) ?? "The URL is not valid.")); return
         }
@@ -223,7 +235,7 @@ final class StreamController {
                 done(result)
             }
         }
-        if let key, !key.trimmingCharacters(in: .whitespaces).isEmpty { run(key.trimmingCharacters(in: .whitespacesAndNewlines)); return }
+        if let typed { run(typed); return }
         readKeys([destination]) { keys in
             switch keys[destination.id] ?? .failure("No stream key saved") {
             case .success(let key): run(key)

@@ -160,18 +160,49 @@ extension Destination {
         return c.string ?? url
     }
 
-    /// People often copy "URL + key" as one string. For a known service the app is a single path component
-    /// (`/app`, `/live2`), so anything after it is the key: returns the split, or nil if there is nothing to split.
-    static func splitKey(from raw: String, service: Service) -> (url: String, key: String)? {
-        guard service != .custom else { return nil }
+    /// The part of a pasted URL that may be the stream key. `certain` for a known service, whose application is a
+    /// single path component (`/app`, `/live2`), so anything after it is the key; a custom server's path may
+    /// legitimately have several components (`/app/_definst_`), so there only the user can tell.
+    struct KeySplit: Equatable {
+        var url: String
+        var key: String
+        var certain: Bool
+    }
+
+    /// People often copy "URL + key" as one string: returns the split, or nil if the path has a single component.
+    /// For a known service everything after the application is the key (with any query, `live_1_abc?bandwidthtest=true`);
+    /// for a custom server only the last component is offered.
+    static func splitKey(from raw: String, service: Service) -> KeySplit? {
         let url = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard var c = URLComponents(string: url), c.host != nil, c.query == nil else { return nil }
+        guard var c = URLComponents(string: url), c.host != nil else { return nil }
         let parts = c.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: true)
         guard parts.count > 1 else { return nil }
-        c.percentEncodedPath = "/" + parts[0]
-        let key = parts.dropFirst().joined(separator: "/")
+        let certain = service != .custom
+        let keep = certain ? 1 : parts.count - 1
+        var key = parts.dropFirst(keep).joined(separator: "/")
+        key = key.removingPercentEncoding ?? key
+        if let query = c.query, !query.isEmpty { key += "?" + query }
+        c.percentEncodedPath = "/" + parts.prefix(keep).joined(separator: "/")
+        c.query = nil
         guard let base = c.string, !key.isEmpty else { return nil }
-        return (base, key.removingPercentEncoding ?? key)
+        return KeySplit(url: base, key: key, certain: certain)
+    }
+
+    /// What to store for a URL and a typed key: the URL without any key in its path, and the key (typed, or taken
+    /// from the URL). Fails with a message for the sheet when the URL ends with a different key than the one typed,
+    /// or when a custom server's path may end with the key and the user has not said (`keepPath`) that it does not.
+    static func separatingKey(url raw: String, key typed: String?, service: Service, keepPath: Bool) -> Result<(url: String, key: String?), KeyError> {
+        let url = normalizedURL(raw, service: service)
+        let typed = typed?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        guard let split = splitKey(from: url, service: service) else { return .success((url, typed)) }
+        if !split.certain {
+            if keepPath { return .success((url, typed)) }
+            return .failure("The end of this URL may be your stream key. Choose whether to move it to the key field or keep it in the URL.")
+        }
+        if let typed, typed != split.key {
+            return .failure("This URL ends with a stream key that differs from the one in the key field. Remove the key from the URL or clear the key field.")
+        }
+        return .success((normalizedURL(split.url, service: service), split.key))
     }
 
     /// Nil when the URL is usable, else a short reason for the sheet.
@@ -183,4 +214,8 @@ extension Destination {
         guard StreamEndpoint(url: url) != nil else { return "The URL needs a server and an application path, like rtmp://host/live." }
         return nil
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

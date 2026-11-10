@@ -24,12 +24,12 @@ extension AppDelegate {
         var a = StreamActions()
         a.goLive = { c.goLive() }
         a.endStream = { c.endStream() }
-        a.save = { d, key, done in c.save(d, key: key, done: done) }
+        a.save = { d, key, keepPath, done in c.save(d, key: key, keepPath: keepPath, done: done) }
         a.delete = { c.delete($0) }
         a.setEnabled = { c.setEnabled($0, $1) }
         a.retry = { c.retry($0) }
         a.updateSettings = { c.updateSettings($0) }
-        a.testConnection = { d, key, done in c.testConnection(d, key: key, done: done) }
+        a.testConnection = { d, key, keepPath, done in c.testConnection(d, key: key, keepPath: keepPath, done: done) }
         a.openHelp = { s in if let url = s.preset.helpURL { NSWorkspace.shared.open(url) } }
         a.addDestination = { [weak self] in self?.showStreamTab(); self?.state.streaming.editor = DestinationEditorRequest() }
         a.showStreamTab = { [weak self] in self?.showStreamTab() }

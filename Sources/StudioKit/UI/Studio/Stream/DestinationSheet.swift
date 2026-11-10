@@ -7,6 +7,8 @@ struct DestinationSheet: View {
     let streaming: StreamingState
     let close: () -> Void
     private let isNew: Bool
+    /// The destination as saved, when editing.
+    private let original: Destination?
 
     @State private var service: Destination.Service?
     @State private var draft: Destination
@@ -18,6 +20,8 @@ struct DestinationSheet: View {
     @State private var saving = false
     @State private var error: String?
     @State private var confirmDelete = false
+    /// The user said a custom server's multi-part path is not a stream key.
+    @State private var keepPath: Bool
     @FocusState private var focus: Field?
 
     enum Field { case name, url, key }
@@ -26,10 +30,13 @@ struct DestinationSheet: View {
     init(streaming: StreamingState, request: DestinationEditorRequest, close: @escaping () -> Void) {
         self.streaming = streaming; self.close = close
         isNew = request.destination == nil
+        original = request.destination
         let d = request.destination ?? Destination(service: request.service ?? .custom)
         _draft = State(initialValue: d)
         _service = State(initialValue: request.destination?.service ?? request.service)
         _nameEdited = State(initialValue: request.destination != nil)
+        // A saved custom URL with several path components was already kept as it is.
+        _keepPath = State(initialValue: request.destination.map { Destination.splitKey(from: $0.url, service: $0.service)?.certain == false } ?? false)
     }
 
     var body: some View {
@@ -107,7 +114,11 @@ struct DestinationSheet: View {
                         TextField("Server URL", text: $draft.url, prompt: Text(s == .kick ? "rtmps://…global-contribute.live-video.net/app" : "rtmp://server/app"))
                             .textFieldStyle(.roundedBorder).font(.system(size: 11, design: .monospaced))
                             .focused($focus, equals: .url)
-                            .onChange(of: draft.url) { _, _ in if focus == .url { urlTouched = true }; test = .idle }
+                            .onChange(of: draft.url) { _, url in
+                                if focus == .url { urlTouched = true }
+                                test = .idle
+                                if url != original?.url { keepPath = false }
+                            }
                         urlFootnote(s)
                     }
                 }
@@ -166,7 +177,7 @@ struct DestinationSheet: View {
                 Button(action: runTest) {
                     if test == .running { ProgressView().controlSize(.small).frame(width: 96) } else { Text("Test Connection").frame(minWidth: 96) }
                 }
-                .disabled(test == .running || Destination.urlProblem(draft.url, service: s) != nil || (!hasKey && s != .custom))
+                .disabled(test == .running || Destination.urlProblem(draft.url, service: s) != nil || (!hasKey && s != .custom) || needsPathChoice(s))
                 .help("Connects and starts publishing without sending video, then disconnects")
                 testResult
                 Spacer(minLength: 0)
@@ -185,7 +196,11 @@ struct DestinationSheet: View {
                 }
                 if let error {
                     Label(error, systemImage: "exclamationmark.circle.fill").font(.system(size: 11)).foregroundStyle(DS.Color.record)
-                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                } else if editsLiveConnection {
+                    // A live destination keeps its connection; the edit is used when it next starts.
+                    Label("Applies next time this destination goes live.", systemImage: "clock.arrow.circlepath")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: DS.Space.s)
                 Button("Cancel", action: close).keyboardShortcut(.cancelAction)
@@ -218,12 +233,18 @@ struct DestinationSheet: View {
     }
 
     @ViewBuilder private func urlFootnote(_ s: Destination.Service) -> some View {
-        if let split = Destination.splitKey(from: draft.url, service: s) {
+        if let split = Destination.splitKey(from: draft.url, service: s), split.certain || !keepPath {
             HStack(spacing: 6) {
                 Image(systemName: "key.fill").foregroundStyle(DS.Color.warn)
-                Text("This URL seems to end with your stream key.").font(.system(size: 11))
-                Button("Move It to the Key Field") { draft.url = split.url; key = split.key; reveal = false; test = .idle }
+                // A known service's key is moved on save anyway; a custom server's path may really have several parts.
+                Text(split.certain ? "This URL ends with your stream key. Saving moves it to the key field." : "Is the end of this URL your stream key?")
+                    .font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+                Button(split.certain ? "Move It Now" : "Move It to the Key Field") { draft.url = split.url; key = split.key; reveal = false; test = .idle }
                     .buttonStyle(.link).font(.system(size: 11, weight: .semibold))
+                if !split.certain {
+                    Button("Keep It in the URL") { keepPath = true; test = .idle }
+                        .buttonStyle(.link).font(.system(size: 11, weight: .semibold))
+                }
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous).fill(DS.Color.warn.opacity(0.12)))
@@ -241,7 +262,21 @@ struct DestinationSheet: View {
         }
     }
 
-    private var hasKey: Bool { !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!isNew && streaming.keyStored.contains(draft.id)) }
+    private var hasKey: Bool {
+        !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!isNew && streaming.keyStored.contains(draft.id))
+            || Destination.splitKey(from: draft.url, service: draft.service)?.certain == true
+    }
+
+    /// A custom URL whose last path component may be the key: the user has to say which it is.
+    private func needsPathChoice(_ s: Destination.Service) -> Bool {
+        Destination.splitKey(from: draft.url, service: s)?.certain == false && !keepPath
+    }
+
+    /// Editing the server, key or canvas of a destination that is streaming right now.
+    private var editsLiveConnection: Bool {
+        guard let original, streaming.isActive, streaming.health(draft.id).status.isActive else { return false }
+        return original.url != draft.url || original.canvas != draft.canvas || !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     private func keyPrompt(_ s: Destination.Service) -> String {
         if !isNew && streaming.keyStored.contains(draft.id) { return "Saved in Keychain · type to replace" }
@@ -249,7 +284,7 @@ struct DestinationSheet: View {
     }
 
     private func canSave(_ s: Destination.Service) -> Bool {
-        guard Destination.urlProblem(draft.url, service: s) == nil else { return false }
+        guard Destination.urlProblem(draft.url, service: s) == nil, !needsPathChoice(s) else { return false }
         return s == .custom || hasKey
     }
 
@@ -257,7 +292,7 @@ struct DestinationSheet: View {
         guard let text = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
         // A pasted URL belongs in the URL field; if it carries the key, split it right away.
         if text.lowercased().hasPrefix("rtmp") {
-            if let s = service, let split = Destination.splitKey(from: text, service: s) { draft.url = split.url; key = split.key }
+            if let s = service, let split = Destination.splitKey(from: text, service: s), split.certain { draft.url = split.url; key = split.key }
             else { draft.url = text }
             urlTouched = true
         } else {
@@ -270,7 +305,7 @@ struct DestinationSheet: View {
         error = nil
         test = .running
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        streaming.actions.testConnection(draft, k.isEmpty ? nil : k) { result in
+        streaming.actions.testConnection(draft, k.isEmpty ? nil : k, keepPath) { result in
             withAnimation(DS.Motion.snappy) { test = .done(result) }
         }
     }
@@ -293,12 +328,16 @@ struct DestinationSheet: View {
     }
 
     private func save() {
-        guard let s = service, canSave(s) else { error = Destination.urlProblem(draft.url, service: service ?? .custom); return }
+        guard let s = service, canSave(s) else {
+            error = Destination.urlProblem(draft.url, service: service ?? .custom)
+                ?? (needsPathChoice(service ?? .custom) ? "Choose whether the end of the URL is your stream key." : nil)
+            return
+        }
         saving = true; error = nil
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
         var d = draft
         if d.name.trimmingCharacters(in: .whitespaces).isEmpty { d.name = s.preset.defaultName(d.canvas) }
-        streaming.actions.save(d, k.isEmpty ? nil : k) { message in
+        streaming.actions.save(d, k.isEmpty ? nil : k, keepPath) { message in
             saving = false
             if let message { error = message } else { key = ""; close() }
         }

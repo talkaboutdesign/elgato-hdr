@@ -69,7 +69,12 @@ final class DestinationTests: XCTestCase {
         XCTAssertEqual(split?.key, "abcd-efgh-ijkl")
         XCTAssertEqual(Destination.splitKey(from: "rtmps://ingest.global-contribute.live-video.net/app/live_123_abc", service: .twitch)?.key, "live_123_abc")
         XCTAssertNil(Destination.splitKey(from: "rtmps://a.rtmps.youtube.com:443/live2", service: .youtube))
-        XCTAssertNil(Destination.splitKey(from: "rtmp://host/live/name", service: .custom), "a custom server's path may have several components")
+        XCTAssertEqual(split?.certain, true)
+        XCTAssertEqual(Destination.splitKey(from: "rtmp://host/live/name", service: .custom),
+                       Destination.KeySplit(url: "rtmp://host/live", key: "name", certain: false), "a custom server's path may have several components")
+        XCTAssertEqual(Destination.splitKey(from: "rtmp://host/app/_definst_/name", service: .custom)?.url, "rtmp://host/app/_definst_")
+        XCTAssertEqual(Destination.splitKey(from: "rtmps://host/app/live_1_a?bandwidthtest=true", service: .twitch)?.key, "live_1_a?bandwidthtest=true")
+        XCTAssertNil(Destination.splitKey(from: "rtmps://b.rtmps.youtube.com/live2?backup=1", service: .youtube))
         XCTAssertNil(Destination.urlProblem("rtmp://127.0.0.1:1935/live", service: .custom))
         XCTAssertNotNil(Destination.urlProblem("", service: .kick))
         XCTAssertNotNil(Destination.urlProblem("https://twitch.tv", service: .twitch))

@@ -143,11 +143,21 @@ final class RTMPPublisher {
         if pressure.dropping { needsKeyframe = true }
         return true
     }
+    /// Removes the stream key, and anything after the application's first path component (where a key pasted into
+    /// the URL would sit), from text that reaches the log or the UI, such as a server's error description.
     private func safe(_ text: String) -> String {
-        guard !streamKey.isEmpty else { return text }
-        var result = text.replacingOccurrences(of: streamKey, with: "[redacted]")
-        if let encoded = streamKey.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), !encoded.isEmpty {
-            result = result.replacingOccurrences(of: encoded, with: "[redacted]")
+        var secrets = [streamKey]
+        let path = endpoint.app.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
+        if let slash = path.firstIndex(of: "/") {
+            let tail = String(path[path.index(after: slash)...])
+            secrets += [tail, tail.removingPercentEncoding ?? tail]
+        }
+        var result = text
+        for secret in secrets where !secret.isEmpty {
+            result = result.replacingOccurrences(of: secret, with: "[redacted]")
+            if let encoded = secret.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), !encoded.isEmpty {
+                result = result.replacingOccurrences(of: encoded, with: "[redacted]")
+            }
         }
         return result
     }
@@ -172,7 +182,8 @@ final class RTMPPublisher {
         let c = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
         connection = c
         transition(.connecting)
-        log("RTMP connecting to " + safe(endpoint.host + "/" + endpoint.app))
+        // Host only: a key pasted into the URL would sit in the application path.
+        log("RTMP connecting to " + safe(endpoint.host))
         armTimeout("TCP/TLS")
         c.stateUpdateHandler = { [weak self] status in
             guard let self, self.generation == token, self.active else { return }

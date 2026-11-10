@@ -21,6 +21,8 @@ final class FakeRTMPServer {
     var rejectSession = 0
     var rejectOptional = false
     var malformedConnect = false
+    /// The rejection's description; the default names the test key so redaction can be checked.
+    var rejectDescription = "Invalid secret-test-key"
     private var sentBytes: UInt64 = 3073
     var wireBytes: UInt64 { queue.sync { sentBytes } }
     var onMessage: ((Int, RTMPMessage) -> Void)?
@@ -101,7 +103,7 @@ final class FakeRTMPServer {
                 case "publish":
                     command(s, [.string("onStatus"), .number(0), .null, .object([
                         "code": .string((reject || s.number == rejectSession) ? "NetStream.Publish.BadName" : "NetStream.Publish.Start"),
-                        "description": .string((reject || s.number == rejectSession) ? "Invalid secret-test-key" : "Started")
+                        "description": .string((reject || s.number == rejectSession) ? rejectDescription : "Started")
                     ])], stream: 1)
                 default: break
                 }

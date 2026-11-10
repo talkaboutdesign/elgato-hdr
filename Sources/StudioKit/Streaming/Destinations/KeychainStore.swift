@@ -4,7 +4,15 @@
 import Foundation
 import Security
 
-struct KeychainStore {
+/// Where stream keys are kept: the Keychain in the app, memory in tests that must not depend on a usable keychain.
+protocol StreamKeyStore {
+    func set(_ key: String, for account: String) throws
+    func get(_ account: String) throws -> String?
+    func delete(_ account: String) throws
+    func contains(_ account: String) -> Bool
+}
+
+struct KeychainStore: StreamKeyStore {
     static let streamKeyService = "dev.max.elgato-hdr.stream-key"
 
     enum Failure: Error, Equatable {

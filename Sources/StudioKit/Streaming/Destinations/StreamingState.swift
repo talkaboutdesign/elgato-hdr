@@ -49,14 +49,15 @@ enum ConnectionTestResult: Equatable {
 struct StreamActions {
     var goLive: () -> Void = {}
     var endStream: () -> Void = {}
-    /// Saves a destination and, when `key` is non-nil, its stream key. Calls back on main with an error message or nil.
-    var save: (Destination, String?, @escaping (String?) -> Void) -> Void = { _, _, done in done(nil) }
+    /// Saves a destination and, when `key` is non-nil, its stream key. The Bool says the user chose to keep a custom
+    /// server's multi-part path as it is. Calls back on main with an error message or nil.
+    var save: (Destination, String?, Bool, @escaping (String?) -> Void) -> Void = { _, _, _, done in done(nil) }
     var delete: (UUID) -> Void = { _ in }
     var setEnabled: (UUID, Bool) -> Void = { _, _ in }
     var retry: (UUID) -> Void = { _ in }
     var updateSettings: (StreamSettings) -> Void = { _ in }
-    /// Tests `destination` with `key`, or with its saved key when `key` is nil.
-    var testConnection: (Destination, String?, @escaping (ConnectionTestResult) -> Void) -> Void = { _, _, _ in }
+    /// Tests `destination` with `key`, or with its saved key when `key` is nil; the Bool as for `save`.
+    var testConnection: (Destination, String?, Bool, @escaping (ConnectionTestResult) -> Void) -> Void = { _, _, _, _ in }
     var openHelp: (Destination.Service) -> Void = { _ in }
     /// Shows the Stream tab and opens the add sheet.
     var addDestination: () -> Void = {}
