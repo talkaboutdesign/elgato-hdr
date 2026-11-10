@@ -34,10 +34,10 @@ final class LayerWriter {
         try start()
     }
 
-    /// Microphone layer: mono AAC.
+    /// Microphone layer: mono AAC in an audio-only QuickTime movie, because .m4a cannot take movie fragments.
     init(micURL url: URL, startNs: UInt64) throws {
         self.url = url; self.startNs = startNs; queue = DispatchQueue(label: "layer-mic")
-        writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
+        writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
             AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 160_000])
         input.expectsMediaDataInRealTime = true
@@ -48,6 +48,7 @@ final class LayerWriter {
     private func start() throws {
         guard writer.canAdd(input) else { throw NSError(domain: "LayerWriter", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot add input"]) }
         writer.add(input)
+        writer.movieFragmentInterval = Recorder.fragmentInterval   // crash safety, see Recorder.init
         guard writer.startWriting() else { throw writer.error ?? NSError(domain: "LayerWriter", code: 2) }
         writer.startSession(atSourceTime: .zero)
     }

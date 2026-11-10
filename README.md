@@ -89,7 +89,7 @@ A recording folder contains:
 ```
 game.mov       10-bit HEVC HDR video + game audio (the card's signal, untouched)
 camera.mov     H.264 facecam (only if the camera was on)
-mic.m4a        AAC microphone (only if a mic was selected)
+mic.mov        AAC microphone (only if a mic was selected; mic.m4a in older recordings)
 project.json   Layouts, trim, volumes and sync; every edit is non-destructive
 thumbnail.jpg  Library preview
 Exports/       Rendered videos
