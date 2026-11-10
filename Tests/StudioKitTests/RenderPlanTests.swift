@@ -37,6 +37,8 @@ final class RenderPlanTests: XCTestCase {
             let original = p.layers(atTimelineMs: 0)[0].src
             let crop = p.layers(atTimelineMs: 500)[0].src
             XCTAssertEqual(crop.width, original.width / 2, accuracy: 0.0001)
+            let pivot = min(original.maxX, max(original.minX, z.focusX))
+            XCTAssertEqual(crop.minX, pivot + (original.minX - pivot) / 2, accuracy: 0.0001)
             XCTAssertGreaterThanOrEqual(crop.minX, 0); XCTAssertLessThanOrEqual(crop.maxX, 1)
             XCTAssertGreaterThanOrEqual(crop.minY, 0); XCTAssertLessThanOrEqual(crop.maxY, 1)
             p.timeline.zooms.append(ZoomBlock(startMs: 490, endMs: 1000, scale: 4))

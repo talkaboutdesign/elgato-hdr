@@ -32,11 +32,11 @@ struct RenderPlan {
             guard scale.isFinite, scale > 1 else { continue }
             let crop = layers[i].src
             let w = crop.width / scale, h = crop.height / scale
-            // Focus is in source coordinates, clamped to the current crop. Interpolating the crop centre avoids
-            // a jump at weight zero, and preserves the same focus in differently cropped canvases.
+            // Map the source-space focus into the current crop, then shrink around that pivot. At scale one
+            // this is exactly the original crop, including when the focus is near a source edge.
             let fx = min(crop.maxX, max(crop.minX, z.focusX)), fy = min(crop.maxY, max(crop.minY, z.focusY))
-            let x = crop.midX + (fx - crop.midX) * weight - w/2
-            let y = crop.midY + (fy - crop.midY) * weight - h/2
+            let x = fx + (crop.minX - fx) / scale
+            let y = fy + (crop.minY - fy) / scale
             layers[i].src = CGRect(x: min(1-w, max(0, x)), y: min(1-h, max(0, y)), width: w, height: h)
         }
         return layers

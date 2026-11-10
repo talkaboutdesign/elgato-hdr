@@ -181,13 +181,16 @@ struct TimelineView: View {
                 Text("\(formatTimePrecise(model.time)) / \(formatTime(model.duration))").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 Spacer()
                 Text("Trimmed: \(formatTime(max(0, model.trimEnd - model.trimStart)))").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                Button("Split") { model.split() }.keyboardShortcut("b", modifiers: .command)
-                Button("Delete Section") { model.deleteSection() }
-                Button("Add Zoom Here") { model.addZoom() }
                 Button("Set In") { model.setIn() }.keyboardShortcut("i", modifiers: [])
                 Button("Set Out") { model.setOut() }.keyboardShortcut("o", modifiers: [])
                 Button("Reset") { model.update { $0.trimStartMs = 0; $0.trimEndMs = 0 } }
                     .disabled(model.project.trimStartMs == 0 && model.project.trimEndMs == 0)
+            }
+            HStack(spacing: 12) {
+                Button("Split") { model.split() }.keyboardShortcut("b", modifiers: .command)
+                Button("Delete Section") { model.deleteSection() }
+                Button("Add Zoom Here") { model.addZoom() }
+                Spacer()
             }
             LayerLanes(model: model).frame(height: 24 + 22 * CGFloat(1 + (model.hasCamera ? 1 : 0) + (model.hasMic ? 1 : 0)))
         }

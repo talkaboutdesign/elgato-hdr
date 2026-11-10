@@ -118,7 +118,8 @@ final class EditorModel: ObservableObject {
                     guard gen == self.buildGen else { return }
                     self.built = b
                     let item = AVPlayerItem(asset: b.asset)
-                    item.videoComposition = b.video
+                    // A scene or zoom edit can arrive while track loading is suspended.
+                    item.videoComposition = CompositionBuilder.videoComposition(self.project, canvas: canvas, size: canvas.size(.hd), built: b)
                     item.audioMix = b.audioMix
                     self.player.replaceCurrentItem(with: item)
                     self.duration = b.duration.seconds
