@@ -1,7 +1,7 @@
 #!/bin/bash
 # A positive debug control prevents a missing tool or stripped input from passing vacuously.
 set -euo pipefail
-pattern='StudioKit.AppDelegate.(startSceneDebug|runEventDemo|dumpTransitions|runSceneDemo|scheduleStreamUIChecks)'
+pattern='StudioKit.AppDelegate.(startSceneDebug|runEventDemo|dumpTransitions|runSceneDemo|scheduleStreamUIChecks|dumpLivePicture)'
 if [[ "${1:-}" == --check ]]; then
     symbols=$(mktemp /tmp/ehdr-symbols.XXXXXX)
     trap 'rm -f "$symbols"' EXIT

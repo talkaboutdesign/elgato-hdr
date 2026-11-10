@@ -680,6 +680,7 @@ extension AppDelegate {
                     let target = c.scenes.first { $0.name == name } ?? Int(name).flatMap { n in c.scenes.indices.contains(n - 1) ? c.scenes[n - 1] : nil }
                     if let t = target { self.switchScene(to: t.id) } else { log("scene-script: no scene \(name)") }
                 }
+                if action == "next" || action == "prev" || action == "punch" || action.hasPrefix("scene=") { self.dumpLivePicture(after: action) }
             }
         }
     }
