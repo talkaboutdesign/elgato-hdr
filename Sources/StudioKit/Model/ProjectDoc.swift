@@ -24,7 +24,7 @@ final class ProjectDoc: Identifiable, Hashable {
         Exporter.removeStalePartials(in: doc.exportsDir)
         let raw = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
         if (raw?["scenes"] as? [Any])?.isEmpty != false || (raw?["version"] as? Int ?? 1) < 2 ||
-            (p.eventsImported && raw?["eventsImported"] as? Bool != true) { doc.save() }
+            (p.eventsImported && raw?["eventsImported"] as? Bool != true) || (p.eventTransitions && raw?["eventTransitions"] as? Bool != true) { doc.save() }
         return doc
     }
 

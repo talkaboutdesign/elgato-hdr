@@ -78,6 +78,8 @@ extension AppDelegate {
         do {
             let r = try Recorder(url: dir.appendingPathComponent("game.mov"), width: s.w, height: s.h, fps: fps, colorMode: colorMode, startNs: startNs)
             var proj = Project(name: name, createdAt: Date())
+            let sinceFirstFrame = Double(Int64(bitPattern: nowNs() &- startNs)) / 1e9
+            proj.recordedAt = proj.createdAt.addingTimeInterval(-max(0, min(5, sinceFirstFrame)))
             proj.state = "recording"
             proj.width = s.w; proj.height = s.h; proj.fps = fps; proj.colorMode = colorMode.rawValue
             proj.cameraMirror = cameraMirror

@@ -155,6 +155,12 @@ struct Project: Codable, Equatable {
     var sceneTransition = SceneTransition() // recording-time default for events with absent transition fields
     var events: [SessionEvent] = []           // live switches, zooms and markers, in source milliseconds
     var eventsImported = false                // events turned into the timeline once (importEvents)
+    /// Scene spans made from events carry each switch's own transition. False on projects imported before switches
+    /// recorded their transition: `importEvents` then upgrades spans the user has not edited, once.
+    var eventTransitions = false
+    /// Wall-clock time of the recording's first frame, for `{time}` in edits and exports; nil before it was stored
+    /// (`createdAt`, a fraction of a second later, stands in; a duplicate keeps this but gets a new `createdAt`).
+    var recordedAt: Date? = nil
     var timeline = Timeline()
     var lastExport: [String: String] = [:]    // canvas raw value -> file name
 
@@ -162,6 +168,7 @@ struct Project: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case version, name, createdAt, state, durationMs, width, height, fps, colorMode, game, camera, mic, cameraMirror
         case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline, eventsImported, sceneTransition
+        case eventTransitions, recordedAt
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -175,7 +182,8 @@ struct Project: Codable, Equatable {
         wide = c.v(.wide, z.wide); vertical = c.v(.vertical, z.vertical); lastExport = c.v(.lastExport, [:])
         sceneTransition = c.v(.sceneTransition, SceneTransition())
         scenes = c.v(.scenes, []); events = c.v(.events, []); timeline = c.v(.timeline, Timeline())
-        eventsImported = c.v(.eventsImported, false)
+        eventsImported = c.v(.eventsImported, false); eventTransitions = c.v(.eventTransitions, false)
+        recordedAt = c.v(.recordedAt, nil)
         if scenes.isEmpty { scenes = [defaultScene] }
         if version < 2 { migrateTimeline() }
         importEvents()
@@ -191,19 +199,16 @@ struct Project: Codable, Equatable {
         if timeline.sceneSpans.isEmpty, let scene = scenes.first { timeline.sceneSpans = [SceneSpan(startMs: 0, sceneID: scene.id)] }
     }
 
+    /// Turns the live event log into the timeline, once: scene switches become spans with the transition that was live
+    /// (the event's own style and duration, else the recording's `sceneTransition`), punch-ins become zoom blocks and
+    /// markers become markers. Projects imported before switches carried their transition are upgraded the same way,
+    /// but only while their spans are exactly what that import made (see `upgradeEventTransitions`).
     mutating func importEvents() {
-        guard state != "recording", !eventsImported, !events.isEmpty else { return }
-        eventsImported = true
+        guard state != "recording", !events.isEmpty else { return }
+        guard !eventsImported else { upgradeEventTransitions(); return }
+        eventsImported = true; eventTransitions = true
         let sorted = events.sorted { $0.tMs < $1.tMs }
-        if timeline.sceneSpans.isEmpty {
-            timeline.sceneSpans = sorted.compactMap { e in
-                guard e.type == "scene", let id = e.sceneID else { return nil }
-                return SceneSpan(startMs: e.tMs, sceneID: id)
-            }
-            if timeline.sceneSpans.first?.startMs != 0, let scene = scenes.first {
-                timeline.sceneSpans.insert(SceneSpan(startMs: 0, sceneID: scene.id), at: 0)
-            }
-        }
+        if timeline.sceneSpans.isEmpty { timeline.sceneSpans = spansFromEvents(recordedTransitions: true) }
         if timeline.zooms.isEmpty {
             var start: SessionEvent?
             for e in sorted {
@@ -216,6 +221,36 @@ struct Project: Codable, Equatable {
             if let a = start, durationMs > a.tMs { timeline.zooms.append(ZoomBlock(startMs: a.tMs, endMs: durationMs, scale: a.zoom ?? 1.8, focusX: a.focusX ?? 0.5, focusY: a.focusY ?? 0.5)) }
         }
         if timeline.markers.isEmpty { timeline.markers = sorted.filter { $0.type == "marker" }.map { Marker(tMs: $0.tMs) } }
+    }
+
+    /// The transition a recorded switch used: its own fields, else the recording's default.
+    func recordedTransition(_ e: SessionEvent) -> SceneTransition {
+        SceneTransition(style: e.transitionStyle ?? sceneTransition.style, durationMs: e.transitionDurationMs ?? sceneTransition.durationMs)
+    }
+
+    /// One span per scene event (and the first scene from 0 when the log starts later). Without `recordedTransitions`
+    /// every span has the default transition: exactly what the import wrote before events carried transitions.
+    func spansFromEvents(recordedTransitions: Bool) -> [SceneSpan] {
+        var spans = events.sorted { $0.tMs < $1.tMs }.compactMap { e -> SceneSpan? in
+            guard e.type == "scene", let id = e.sceneID else { return nil }
+            return SceneSpan(startMs: e.tMs, sceneID: id, transition: recordedTransitions ? recordedTransition(e) : SceneTransition())
+        }
+        if spans.first?.startMs != 0, let scene = scenes.first { spans.insert(SceneSpan(startMs: 0, sceneID: scene.id), at: 0) }
+        return spans
+    }
+
+    /// Spans imported with the old defaults get their recorded transitions, keeping their ids, only if the user cannot
+    /// have edited them: the same count, starts, scenes and default transitions as that import produced. Anything else
+    /// (a moved, added, removed or restyled change) is left exactly as it is. Runs once either way.
+    mutating func upgradeEventTransitions() {
+        guard eventsImported, !eventTransitions, state != "recording" else { return }
+        eventTransitions = true
+        let old = spansFromEvents(recordedTransitions: false), recorded = spansFromEvents(recordedTransitions: true)
+        let current = timeline.sceneSpans.enumerated().sorted { ($0.element.startMs, $0.offset) < ($1.element.startMs, $1.offset) }
+        guard current.count == old.count, recorded.count == old.count,
+              zip(current, old).allSatisfy({ c, o in c.element.startMs == o.startMs && c.element.sceneID == o.sceneID && c.element.transition == o.transition })
+        else { return }
+        for (c, r) in zip(current, recorded) { timeline.sceneSpans[c.offset].transition = r.transition }
     }
 
     mutating func ensureRecordingScene() {
@@ -256,6 +291,8 @@ struct Project: Codable, Equatable {
         try c.encode(scenes, forKey: .scenes)
         try c.encode(events, forKey: .events)
         try c.encode(eventsImported, forKey: .eventsImported)
+        try c.encode(eventTransitions, forKey: .eventTransitions)
+        try c.encodeIfPresent(recordedAt, forKey: .recordedAt)
         try c.encode(timeline, forKey: .timeline)
         let bounds = timeline.segments.sorted { $0.startMs < $1.startMs }
         try c.encode(bounds.first?.startMs ?? trimStartMs, forKey: .trimStartMs)
