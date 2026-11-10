@@ -22,6 +22,23 @@ struct CostMeter {
 
 struct LiveGameFrame { let y: MTLTexture, c: MTLTexture; let size: CGSize; let transfer: Int32 }
 
+/// Frames drawn in Game mode that the screen has not yet reported showing, by arrival time. At most three may wait;
+/// one that is not reported within `limit` is forgotten, so a swallowed presented handler cannot block drawing.
+struct GameWaitList {
+    static let limit = 0.1
+    var times: [Double] = []
+    var expired = 0
+    /// True when a frame arriving at `t` may be drawn (and is now waiting); false when three are already waiting.
+    mutating func admit(_ t: Double) -> Bool {
+        let before = times.count
+        times.removeAll { t - $0 > GameWaitList.limit }
+        expired += before - times.count
+        guard times.count < 3 else { return false }
+        times.append(t); return true
+    }
+    mutating func release(_ t: Double) { if let i = times.firstIndex(of: t) { times.remove(at: i) } }
+}
+
 final class Renderer: NSObject {
     let device: MTLDevice
     let queue: MTLCommandQueue
@@ -40,7 +57,10 @@ final class Renderer: NSObject {
     var presentation: Presentation = .smooth { didSet { layer.displaySyncEnabled = presentation != .immediate; resetPacing() } }
 
     // Game mode: frames drawn on arrival with vsync; dropped only if three drawables are already waiting for the screen.
-    var gameQueued = 0
+    // Each waiting frame is remembered by its arrival time and forgotten after `GameWaitList.limit`: Core Animation does not
+    // call the presented handler for every drawable (a hitch, an occluded window or a display change can swallow one),
+    // and a plain counter then leaks until every frame is dropped and the picture freezes for good.
+    var gameWaiting = GameWaitList()
 
     // App-owned texture ring: frames are blitted here on arrival so shared-memory slots can be reused freely.
     static let ringSize = 8
@@ -158,7 +178,7 @@ final class Renderer: NSObject {
         ringNext = 0
     }
 
-    func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); gameQueued = 0; lock.unlock() }
+    func resetPacing() { lock.lock(); grid0 = 0; nextTarget = 0; lastTarget = 0; period = 0; lastArrival = 0; pending.removeAll(); gameWaiting.times.removeAll(); lock.unlock() }
 
     /// Reader thread: copy the shared-memory slot into the ring on the GPU and schedule it. Never blocks on drawables.
     func submit(slot: Int, w: Int, h: Int, arrivalNs: UInt64, isCurrent: @escaping () -> Bool = { true }) {
@@ -203,14 +223,16 @@ final class Renderer: NSObject {
     /// and arrive a refresh or two late, so they must not gate or trigger drawing.
     func gameSubmit(y: MTLTexture, c: MTLTexture, w: Int, h: Int, arrival: Double) {
         lock.lock()
-        if gameQueued >= 3 { pacingDrops += 1; _lastGame = LiveGameFrame(y: y, c: c, size: CGSize(width: w, height: h), transfer: colorMode.transfer); lock.unlock(); return }
-        gameQueued += 1
+        guard gameWaiting.admit(arrival) else { pacingDrops += 1; _lastGame = LiveGameFrame(y: y, c: c, size: CGSize(width: w, height: h), transfer: colorMode.transfer); lock.unlock(); return }
         lock.unlock()
-        let ok = drawNow(y: y, c: c, w: w, h: h, arrival: arrival, onPresented: { [weak self] in
+        let release = { [weak self] in
             guard let self = self else { return }
-            self.lock.lock(); self.gameQueued = max(0, self.gameQueued - 1); self.lock.unlock()
-        })
-        if !ok { lock.lock(); gameQueued = max(0, gameQueued - 1); lock.unlock() }
+            self.lock.lock()
+            self.gameWaiting.release(arrival)
+            self.lock.unlock()
+        }
+        let ok = drawNow(y: y, c: c, w: w, h: h, arrival: arrival, onPresented: release)
+        if !ok { release() }
     }
 
     /// Display link (main thread), once per vsync: present the frame due at this vsync, if any.
@@ -320,6 +342,7 @@ final class Renderer: NSObject {
             log("reader cost: program outputs \(outputCost.summary) per frame (\(_programOutputs.count) lanes), window draw \(drawCost.summary)")
         }
         outputCost = CostMeter(); drawCost = CostMeter()
+        if gameWaiting.expired > 0 { log("game mode: \(gameWaiting.expired) drawable(s) never reported shown; forgotten after \(Int(GameWaitList.limit * 1000)) ms"); gameWaiting.expired = 0 }
         slips = 0; pacingDrops = 0; arrHist = [Int](repeating: 0, count: 6); tickGaps = 0
         latSum = 0; latMax = 0; latN = 0; hist = [Int](repeating: 0, count: 6)
         return r
