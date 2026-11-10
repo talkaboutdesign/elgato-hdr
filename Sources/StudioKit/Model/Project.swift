@@ -150,7 +150,7 @@ struct Project: Codable, Equatable {
         name = try c.decode(String.self, forKey: .name)
         createdAt = c.v(.createdAt, Date())
         let z = Project(name: name, createdAt: createdAt)
-        version = c.v(.version, z.version); state = c.v(.state, z.state); durationMs = c.v(.durationMs, 0)
+        version = c.v(.version, 1); state = c.v(.state, z.state); durationMs = c.v(.durationMs, 0)
         width = c.v(.width, 0); height = c.v(.height, 0); fps = c.v(.fps, z.fps); colorMode = c.v(.colorMode, z.colorMode)
         game = c.v(.game, z.game); camera = c.v(.camera, nil); mic = c.v(.mic, nil); cameraMirror = c.v(.cameraMirror, false)
         trimStartMs = c.v(.trimStartMs, 0); trimEndMs = c.v(.trimEndMs, 0)

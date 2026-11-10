@@ -46,7 +46,7 @@ final class ProjectDoc: Identifiable, Hashable {
 
     /// Card image for the library: a frame of the 16:9 composite, so it shows the facecam as laid out.
     func writeThumbnail() async {
-        let at = CMTime(seconds: project.timeline.markers.first.map { max(0, min(project.durationMs, $0.tMs)) / 1000 } ?? min(3, max(0, project.durationMs / 2000)), preferredTimescale: 600)
+        let at = CMTime(seconds: project.timeline.markers.first.map { max(0, min(project.durationMs - 1000 / max(1, project.fps), $0.tMs)) / 1000 } ?? min(3, max(0, project.durationMs / 2000)), preferredTimescale: 600)
         var image: CGImage?
         if let built = try? await CompositionBuilder.build(self, canvas: .wide, resolution: .hd, range: .sdr, ignoreCuts: true) {
             let gen = AVAssetImageGenerator(asset: built.asset)

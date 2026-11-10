@@ -35,27 +35,28 @@ enum CompositionBuilder {
         let segments = ignoreCuts ? [] : p.editSegments.map { r in
             Segment(startMs: (r.startMs / frameMs).rounded() * frameMs, endMs: (r.endMs / frameMs).rounded() * frameMs)
         }
-        let map = TimeMap(segments: segments, sourceDurationMs: gameDur.seconds * 1000, frameMs: frameMs)
+        var map = TimeMap(segments: segments, sourceDurationMs: gameDur.seconds * 1000, frameMs: frameMs)
+        map.normalize()
         guard map.durationMs > 0 else { throw err("No kept video remains") }
-        try insert(gv, into: sv, offsetMs: 0, map: map)
+        try await insert(gv, into: sv, offsetMs: 0, map: map)
         var mixParams: [AVMutableAudioMixInputParameters] = []
         if let ga = try await game.loadTracks(withMediaType: .audio).first, let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            try insert(ga, into: t, offsetMs: 0, map: map)
-            mixParams.append(audioParameters(t, volume: p.game.volume, map: map))
+            try await insert(ga, into: t, offsetMs: 0, map: map)
+            if t.segments.isEmpty { comp.removeTrack(t) } else { mixParams.append(audioParameters(t, volume: p.game.volume, map: map)) }
         }
         var cameraSize: CGSize?
         if let cam = p.camera, doc.hasCamera {
             let a = AVURLAsset(url: doc.url(cam.file))
             if let cv = try await a.loadTracks(withMediaType: .video).first, let t = camTrack {
-                try insert(cv, into: t, offsetMs: cam.offsetMs, map: map)
+                try await insert(cv, into: t, offsetMs: cam.offsetMs, map: map)
                 if !t.segments.isEmpty { cameraSize = try await cv.load(.naturalSize) }
             }
         }
         if let mic = p.mic, doc.hasMic {
             let a = AVURLAsset(url: doc.url(mic.file))
             if let mt = try await a.loadTracks(withMediaType: .audio).first, let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-                try insert(mt, into: t, offsetMs: mic.offsetMs, map: map)
-                mixParams.append(audioParameters(t, volume: mic.volume, map: map))
+                try await insert(mt, into: t, offsetMs: mic.offsetMs, map: map)
+                if t.segments.isEmpty { comp.removeTrack(t) } else { mixParams.append(audioParameters(t, volume: mic.volume, map: map)) }
             }
         }
         var cameraTrackID = kCMPersistentTrackID_Invalid
@@ -96,8 +97,8 @@ enum CompositionBuilder {
     static func time(_ ms: Double) -> CMTime { CMTime(seconds: ms / 1000, preferredTimescale: 60000) }
 
     /// Each intersection is placed relative to its kept segment, preserving gaps and positive/negative offsets.
-    private static func insert(_ src: AVAssetTrack, into t: AVMutableCompositionTrack, offsetMs: Double, map: TimeMap) throws {
-        let available = src.timeRange
+    private static func insert(_ src: AVAssetTrack, into t: AVMutableCompositionTrack, offsetMs: Double, map: TimeMap) async throws {
+        let available = try await src.load(.timeRange)
         var at = 0.0
         for s in map.segments {
             let start = max(s.startMs - offsetMs, available.start.seconds * 1000)

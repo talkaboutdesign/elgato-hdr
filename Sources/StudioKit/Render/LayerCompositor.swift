@@ -29,18 +29,21 @@ final class CompositionInstruction: NSObject, AVVideoCompositionInstructionProto
     }
 }
 
-/// Base compositor. Sources arrive as 10-bit biplanar YCbCr; the HDR subclass writes 10-bit P010 (BT.2020), the SDR
+/// Base compositor. Sources keep their native 8/10-bit biplanar YCbCr; HDR writes 10-bit P010 (BT.2020), SDR
 /// one writes 8-bit BGRA (BT.709).
 class LayerCompositor: NSObject, AVVideoCompositing {
     class var hdr: Bool { false }
     var sourcePixelBufferAttributes: [String: any Sendable]? {
-        [kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange],
+        [kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange],
          kCVPixelBufferMetalCompatibilityKey as String: true]
     }
     var requiredPixelBufferAttributesForRenderContext: [String: any Sendable] {
         [kCVPixelBufferPixelFormatTypeKey as String: [Self.hdr ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA],
          kCVPixelBufferMetalCompatibilityKey as String: true]
     }
+    // Keep SDR camera samples in their own encoding. Otherwise AVFoundation converts them to the game's PQ
+    // space with different SDR-white levels in AVAssetImageGenerator and AVAssetReader.
+    var canConformColorOfSourceFrames: Bool { true }
     var supportsHDRSourceFrames: Bool { true }
     var supportsWideColorSourceFrames: Bool { true }
     let renderQueue = DispatchQueue(label: "compositor")
@@ -59,9 +62,9 @@ class LayerCompositor: NSObject, AVVideoCompositing {
             var keep: [CVMetalTexture] = []
             var textures: [SourceKey: LayerTextures.Kind] = [:]
             for (key, track, size, fallback) in [(SourceKey.game, ins.screenTrack, Optional(ins.screenSize), ins.screenTransfer), (.camera, ins.cameraTrack, ins.cameraSize, 2)] {
-                guard track != kCMPersistentTrackID_Invalid, let size = size, let pb = request.sourceFrame(byTrackID: track), let p = core.planes(pb) else { continue }
+                guard track != kCMPersistentTrackID_Invalid, size != nil, let pb = request.sourceFrame(byTrackID: track), let p = core.planes(pb) else { continue }
                 let tags = MetalCore.colorTags(pb, fallback: fallback)
-                keep += p.2; _ = size
+                keep += p.2
                 textures[key] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: tags.transfer, bt709: tags.bt709)
             }
             let layers = DrawLayer.pair(ins.plan.layers(atTimelineMs: request.compositionTime.seconds * 1000), textures)

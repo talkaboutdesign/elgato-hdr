@@ -103,7 +103,7 @@ struct TimeMap {
     }
     func crossedCut(from start: Double, through end: Double) -> Bool {
         segments.enumerated().contains { i, s in
-            s.startMs > start && s.startMs <= end && (i == 0 ? s.startMs > 0 : s.startMs > segments[i-1].endMs)
+            s.startMs >= start && s.startMs <= end && (i == 0 ? s.startMs > 0 : s.startMs > segments[i-1].endMs)
         }
     }
     mutating func split(atSourceMs s: Double) {

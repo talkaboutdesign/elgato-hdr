@@ -69,6 +69,12 @@ final class EditorModel: ObservableObject {
                 if p.vertical != old.vertical { p.scenes[0].vertical = template.vertical }
             }
         }
+        if p.cameraMirror != old.cameraMirror {
+            for i in p.scenes.indices {
+                for j in p.scenes[i].wide.layers.indices where p.scenes[i].wide.layers[j].source.type == "camera" { p.scenes[i].wide.layers[j].mirror = p.cameraMirror }
+                for j in p.scenes[i].vertical.layers.indices where p.scenes[i].vertical.layers[j].source.type == "camera" { p.scenes[i].vertical.layers[j].mirror = p.cameraMirror }
+            }
+        }
         project = p
         doc.project = p
         dirty = true
