@@ -14,7 +14,7 @@ func trackChanges<T>(_ read: @escaping () -> T, _ apply: @escaping (T) -> Void) 
 final class StudioWindowController: NSWindowController, NSToolbarDelegate {
     let state: StudioState
     let stage: StageViewController
-    let split = NSSplitViewController()
+    let split = StudioSplitViewController()
     let sidebarItem: NSSplitViewItem
     private var collapseObservation: NSKeyValueObservation?
 
@@ -56,6 +56,7 @@ final class StudioWindowController: NSWindowController, NSToolbarDelegate {
         tb.centeredItemIdentifiers = [.canvas]
         w.toolbar = tb
 
+        split.onToggleInspector = { [weak state] in state?.actions.toggleSidebar() }
         state.sidebarVisible = !sidebarItem.isCollapsed
         collapseObservation = sidebarItem.observe(\.isCollapsed, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
@@ -67,7 +68,6 @@ final class StudioWindowController: NSWindowController, NSToolbarDelegate {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func toggleSidebar() { split.toggleInspector(nil) }
     func setSidebar(visible: Bool, animated: Bool) {
         guard sidebarItem.isCollapsed == visible else { return }
         if animated { sidebarItem.animator().isCollapsed = !visible } else { sidebarItem.isCollapsed = !visible }
@@ -96,6 +96,15 @@ final class StudioWindowController: NSWindowController, NSToolbarDelegate {
         case .goLive: return hosted(GoLiveButton(state: state), label: "Go Live", tip: "Streaming arrives in a later update")
         default: return nil
         }
+    }
+}
+
+/// The toolbar's system inspector button sends `toggleInspector(_:)` here; it takes the same path as ⌥⌘S so focus
+/// mode is handled in one place.
+final class StudioSplitViewController: NSSplitViewController {
+    var onToggleInspector: (() -> Void)?
+    override func toggleInspector(_ sender: Any?) {
+        if let h = onToggleInspector { h() } else { super.toggleInspector(sender) }
     }
 }
 

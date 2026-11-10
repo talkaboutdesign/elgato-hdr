@@ -56,6 +56,44 @@ final class StudioStateTests: XCTestCase {
         XCTAssertEqual(s.pillText, "No signal · The stream ended")
     }
 
+    /// Changing the colour mode after the stream ended re-labels the signal but must not bring back "live".
+    func testRelabelKeepsConnection() {
+        let s = StudioState()
+        s.applyStats(width: 2560, height: 1440, fps: 60, latencyMs: 20, demo: false)
+        s.connection = .noSignal("The stream ended")
+        s.colorMode = .sdr
+        s.formatSignal(width: 2560, height: 1440, fps: 60)
+        XCTAssertEqual(s.connection, .noSignal("The stream ended"))
+        XCTAssertEqual(s.signal, "2560×1440 · 60 fps · SDR")
+        XCTAssertEqual(s.pillText, "No signal · The stream ended")
+        s.connection = .connecting
+        s.formatSignal(width: 2560, height: 1440, fps: 60)
+        XCTAssertEqual(s.connection, .connecting)
+    }
+
+    func testSidebarAcrossFocusMode() {
+        var p = PanelLayout()
+        XCTAssertFalse(p.toggleSidebar()); XCTAssertFalse(p.sidebar)       // plain toggle outside focus mode
+        XCTAssertFalse(p.toggleSidebar()); XCTAssertTrue(p.sidebar)
+        p.enterFocus()
+        XCTAssertTrue(p.focus); XCTAssertFalse(p.sidebar)
+        p.leaveFocus()
+        XCTAssertEqual(p, PanelLayout(focus: false, sidebar: true, restoreSidebar: true))
+
+        // Sidebar toggle in focus mode: leaves focus mode rather than opening the sidebar over the picture.
+        p.enterFocus()
+        XCTAssertTrue(p.toggleSidebar())
+        XCTAssertTrue(p.focus, "focus ends when full screen exits, not before")
+        XCTAssertFalse(p.sidebar)
+        p.leaveFocus()
+        XCTAssertFalse(p.focus); XCTAssertTrue(p.sidebar)
+
+        // Hidden before focus mode: plain leave keeps it hidden; a toggle in focus mode shows it.
+        _ = p.toggleSidebar(); XCTAssertFalse(p.sidebar)
+        p.enterFocus(); p.leaveFocus(); XCTAssertFalse(p.sidebar)
+        p.enterFocus(); XCTAssertTrue(p.toggleSidebar()); p.leaveFocus(); XCTAssertTrue(p.sidebar)
+    }
+
     func testCameraShape() {
         var p = CameraPlacement()
         XCTAssertEqual(CameraShape(p), .rounded)
