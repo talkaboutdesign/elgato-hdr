@@ -17,7 +17,7 @@ final class DemoExportStressTests: XCTestCase {
         for n in 0..<20 {
             let drain = expectation(description: "queue \(n)")
             await MainActor.run {
-                model.startExport([.youtube1080, .shorts], custom: ExportPreset.Custom())
+                model.startExport([.youtube, .shorts], custom: ExportPreset.Custom())
                 model.exportQueue.onDrained = { drain.fulfill() }
                 if n % 2 == 1 { model.player.play() } else { model.player.pause() }
             }
@@ -31,7 +31,7 @@ final class DemoExportStressTests: XCTestCase {
             if n % 2 == 0 {
                 let retry = expectation(description: "restart \(n)")
                 await MainActor.run {
-                    model.startExport([.youtube1080, .shorts], custom: ExportPreset.Custom())
+                    model.startExport([.youtube, .shorts], custom: ExportPreset.Custom())
                     model.exportQueue.onDrained = { retry.fulfill() }
                 }
                 await fulfillment(of: [retry], timeout: 60)
