@@ -432,30 +432,29 @@ extension AppDelegate {
 
     // MARK: Keys
 
-    /// ⌃Space zooms in while held (menus cannot see key-up); arrow keys move the zoom's focus while zoomed in.
+    /// ⌃⇧Space zooms in while held (menus cannot see key-up); arrow keys move the zoom's focus while zoomed in.
     func installSceneKeys() {
         guard sceneRuntime.keyMonitor == nil else { return }
         sceneRuntime.keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in self?.handleSceneKey(e) ?? e }
     }
 
     private func handleSceneKey(_ e: NSEvent) -> NSEvent? {
-        let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
         let rt = sceneRuntime
-        if e.keyCode == 49 {   // space
-            if e.type == .keyDown && mods == .control { if !e.isARepeat && !rt.spaceHeld { rt.spaceHeld = true; setPunchIn(true) }; return nil }
-            if e.type == .keyUp && rt.spaceHeld { rt.spaceHeld = false; setPunchIn(false); return nil }
+        let a = SceneKeys.action(keyCode: e.keyCode, keyDown: e.type == .keyDown, isRepeat: e.type == .keyDown && e.isARepeat,
+                                 mods: e.modifierFlags, textFocused: SceneKeys.textFocused(NSApp.keyWindow?.firstResponder),
+                                 punchedIn: scenes.punchedIn, spaceHeld: rt.spaceHeld)
+        switch a {
+        case nil: return e
+        case .consume: return nil
+        case .punchIn(let on): rt.spaceHeld = on; setPunchIn(on); return nil
+        case .moveFocus(let dx, let dy): movePunchFocus(dx: dx, dy: dy); return nil
         }
-        if e.type == .keyDown, scenes.punchedIn, mods.subtracting(.shift).isEmpty, !(NSApp.keyWindow?.firstResponder is NSText) {
-            let step: CGFloat = mods.contains(.shift) ? 0.2 : 0.1
-            switch e.keyCode {
-            case 123: movePunchFocus(dx: -step, dy: 0); return nil
-            case 124: movePunchFocus(dx: step, dy: 0); return nil
-            case 125: movePunchFocus(dx: 0, dy: step); return nil
-            case 126: movePunchFocus(dx: 0, dy: -step); return nil
-            default: break
-            }
-        }
-        return e
+    }
+
+    /// ⌃Z and ⌃⇧← / ⌃⇧→ stay with a text field that has keyboard focus. Every other item behaves as without this.
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let a = item.action, [#selector(togglePunchIn), #selector(nextScene), #selector(previousScene)].contains(a) else { return true }
+        return !SceneKeys.textFocused(NSApp.keyWindow?.firstResponder)
     }
 
     // MARK: Clean game picture
@@ -502,8 +501,9 @@ extension AppDelegate {
             }
             for (i, s) in c.scenes.enumerated() { _ = add(s.name, #selector(switchSceneFromMenu(_:)), i < 9 ? "\(i + 1)" : "", obj: s.id) }
             m.addItem(.separator())
-            _ = add("Next Scene", #selector(nextScene), String(UnicodeScalar(NSRightArrowFunctionKey)!))
-            _ = add("Previous Scene", #selector(previousScene), String(UnicodeScalar(NSLeftArrowFunctionKey)!))
+            // ⌃← / ⌃→ alone belong to Mission Control.
+            add("Next Scene", #selector(nextScene), String(UnicodeScalar(NSRightArrowFunctionKey)!)).keyEquivalentModifierMask = SceneKeys.stepModifiers
+            add("Previous Scene", #selector(previousScene), String(UnicodeScalar(NSLeftArrowFunctionKey)!)).keyEquivalentModifierMask = SceneKeys.stepModifiers
             m.addItem(.separator())
             let tm = NSMenu(title: "Transition")
             for st in SceneTransition.Style.allCases {
@@ -514,7 +514,7 @@ extension AppDelegate {
             add("Transition", nil).submenu = tm
             m.addItem(.separator())
             _ = add("Zoom In on Game", #selector(togglePunchIn), "z", tag: 1)
-            add("Hold ⌃Space to zoom while held", nil).isEnabled = false
+            add("Hold \(SceneKeys.holdLabel) to zoom while held", nil).isEnabled = false
             _ = add("Add Marker", #selector(addMarker), "m")
             m.addItem(.separator())
             _ = add("16:9 Canvas", #selector(showWideCanvas), tag: 2)

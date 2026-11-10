@@ -410,11 +410,11 @@ private struct TransitionSection: View {
             InspectorRow(label: "Live zoom") {
                 Button(model.punchedIn ? "Zoom Out" : "Zoom In") { model.actions.togglePunchIn() }
                     .controlSize(.small)
-                    .help("Zoom in on the game (⌃Z, or hold ⌃Space)")
+                    .help("Zoom in on the game (⌃Z, or hold \(SceneKeys.holdLabel))")
             }
             LabeledSlider(label: "Zoom amount", value: Binding(get: { model.punchAmount }, set: { model.actions.setPunchAmount($0) }),
                           range: PunchIn.range, defaultValue: 1.6, format: { String(format: "%.1f×", $0) })
-            Text("⌃1…⌃9 switch scenes, ⌃Z zooms in on the game, arrow keys move the zoom while zoomed, ⌃M marks a moment in a recording.")
+            Text("⌃1…⌃9 switch scenes, \(SceneKeys.previousLabel) / \(SceneKeys.nextLabel) step through them, ⌃Z zooms in on the game (or hold \(SceneKeys.holdLabel)), arrow keys move the zoom while zoomed, ⌃M marks a moment in a recording.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
