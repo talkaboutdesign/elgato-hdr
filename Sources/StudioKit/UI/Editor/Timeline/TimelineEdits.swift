@@ -126,7 +126,8 @@ enum TimelineEdits {
         return out
     }
 
-    /// Drags one boundary. `original` is the kept list when the drag began, so the result never accumulates error.
+    /// Drags one boundary. `p` and `original` are the project and kept list as they were when the drag began
+    /// (`EditorModel.updateDrag`): the boundary's split point is replaced, so earlier positions of the drag never stay.
     static func move(_ b: CutBoundary, to ms: Double, original: [Segment], in p: inout Project) {
         var segs = original
         let f = frameMs(p)

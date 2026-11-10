@@ -3,7 +3,7 @@ import AVFoundation
 import SwiftUI
 
 /// The aspect-fitted canvas preview. On top: the zoom focus target while a zoom block is selected, otherwise the
-/// camera and game direct manipulation of the active legacy-layout scene.
+/// camera and game direct manipulation of the scene at the playhead.
 struct PreviewStage: View {
     let model: EditorModel
 
@@ -40,14 +40,73 @@ struct StageOverlay: View {
     var body: some View {
         if case .zoom(let id) = model.selection {
             FocusTargetOverlay(model: model, id: id)
-        } else if editableSceneShowing && !model.editsLocked {
-            StageInteraction(model: model)
+        } else if !model.editsLocked {
+            let c = model.sceneControls
+            if c.legacy { StageInteraction(model: model) } else if c.game || c.camera { LayerStageInteraction(model: model) }
         }
     }
-    private var editableSceneShowing: Bool {
-        let p = model.project
-        let id = p.timeline.activeSceneID(atSourceMs: model.playheadMs) ?? p.scenes.first?.id
-        return p.scenes.first { $0.id == id }?.composition(model.canvas).legacyLayout != nil
+}
+
+/// Direct manipulation of a scene built from layers: drag the game to reframe it, drag the camera to move it and a
+/// corner to resize it. Edits go to the scene's own layers (`EditorModel.updateSceneLayer`).
+struct LayerStageInteraction: View {
+    let model: EditorModel
+    @State private var hover = false
+    @State private var panStart: (x: Double, y: Double)?
+    @State private var cameraStart: NRect?
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+            let controls = model.sceneControls
+            ZStack(alignment: .topLeading) {
+                if controls.game, let g = model.sceneLayer(.game) {
+                    let r = g.frame.rect(in: size)
+                    Color.clear.contentShape(Rectangle())
+                        .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
+                        .gesture(DragGesture(minimumDistance: 2)
+                            .onChanged { v in
+                                model.beginGesture()
+                                if panStart == nil, let g = model.sceneLayer(.game) { panStart = (g.panX, g.panY) }
+                                if let s = panStart { model.panSceneGame(from: s, translation: v.translation, stage: size) }
+                            }
+                            .onEnded { _ in panStart = nil; model.endGesture() })
+                        .help("Drag to reframe the game")
+                }
+                if controls.camera, let cam = model.sceneLayer(.camera) {
+                    let r = cam.frame.rect(in: size)
+                    let radius = CGFloat(min(0.5, max(0, cam.roundness))) * min(r.width, r.height)
+                    RoundedRectangle(cornerRadius: radius + 3, style: .circular)
+                        .strokeBorder(.white.opacity(hover || cameraStart != nil ? 0.9 : 0), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                        .frame(width: r.width + 6, height: r.height + 6)
+                        .contentShape(Rectangle())
+                        .position(x: r.midX, y: r.midY)
+                        .onHover { hover = $0; $0 ? NSCursor.openHand.push() : NSCursor.pop() }
+                        .gesture(DragGesture(minimumDistance: 1)
+                            .onChanged { v in
+                                model.beginGesture()
+                                if cameraStart == nil { cameraStart = model.sceneLayer(.camera)?.frame }
+                                if let s = cameraStart { model.moveSceneCamera(from: s, translation: v.translation, stage: size) }
+                            }
+                            .onEnded { _ in cameraStart = nil; model.endGesture() })
+                    ForEach(0..<4, id: \.self) { i in
+                        let c = CGPoint(x: i % 2 == 0 ? r.minX : r.maxX, y: i < 2 ? r.minY : r.maxY)
+                        Circle().fill(.white).frame(width: 10, height: 10).shadow(radius: 1.5)
+                            .opacity(hover || cameraStart != nil ? 1 : 0)
+                            .frame(width: 22, height: 22).contentShape(Rectangle())
+                            .position(c)
+                            .onHover { h in hover = h || hover; h ? NSCursor.crosshair.push() : NSCursor.pop() }
+                            .gesture(DragGesture()
+                                .onChanged { v in
+                                    model.beginGesture()
+                                    if cameraStart == nil { cameraStart = model.sceneLayer(.camera)?.frame }
+                                    if let s = cameraStart { model.resizeSceneCamera(from: s, corner: v.location, stage: size) }
+                                }
+                                .onEnded { _ in cameraStart = nil; model.endGesture() })
+                    }
+                }
+            }
+        }
     }
 }
 

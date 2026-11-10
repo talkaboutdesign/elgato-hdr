@@ -104,12 +104,58 @@ func recordingSummary(_ p: Project, duration: Double) -> String {
     return parts.joined(separator: " · ")
 }
 
-/// The template controls of the default scene (the layout the recording started with) for the current canvas.
+/// Layout of the scene at the playhead for the current canvas: the fixed-layout controls for a scene migrated from
+/// one, otherwise the scene's own game and camera layers.
 struct LayoutInspector: View {
     @Bindable var model: EditorModel
     var body: some View {
+        if model.sceneControls.legacy { LegacyLayoutInspector(model: model) } else { SceneLayersInspector(model: model) }
+    }
+}
+
+/// A scene built from layers (templates, live scenes): only what its layers have, edited in place.
+struct SceneLayersInspector: View {
+    @Bindable var model: EditorModel
+    var body: some View {
+        let controls = model.sceneControls
+        InspectorSection(title: "\(model.activeScene?.name ?? "Scene") · \(model.canvas.label)") {
+            if controls.game {
+                InspectorRow(label: "Game") {
+                    SegmentedSwitch(selection: model.sceneLayerBinding(.game, \.fit, "Game Fit", fallback: false),
+                                    options: [.init(value: false, label: "Fill"), .init(value: true, label: "Fit")]).frame(width: 120)
+                }
+                LabeledSlider(label: "Game zoom", value: model.sceneLayerBinding(.game, \.zoom, "Game Zoom", fallback: 1), range: 1...3, defaultValue: 1,
+                              format: { String(format: "%.2f×", $0) }, onEditingChanged: model.gesture)
+                HStack {
+                    Text("Drag the preview to reframe").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Center") { model.updateSceneLayer(.game, "Center") { $0.panX = 0.5; $0.panY = 0.5; $0.zoom = 1 } }.controlSize(.small)
+                }
+            }
+            if controls.camera {
+                LabeledSlider(label: "Corners", value: model.sceneLayerBinding(.camera, \.roundness, "Camera Corners", fallback: 0), range: 0...0.5,
+                              defaultValue: 0.16, onEditingChanged: model.gesture)
+                HStack {
+                    Toggle("Shadow", isOn: model.sceneLayerBinding(.camera, \.shadow, "Camera Shadow", fallback: false))
+                    Toggle("Border", isOn: model.sceneLayerBinding(.camera, \.border, "Camera Border", fallback: false))
+                }
+                .toggleStyle(.checkbox).font(.system(size: 12))
+                Toggle("Mirror camera", isOn: model.projectBinding(\.cameraMirror, "Mirror")).toggleStyle(.checkbox).font(.system(size: 12))
+                Text("Drag the camera in the preview to move it, a corner to resize it.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if !controls.game && !controls.camera {
+                Text("This scene has no game or camera layer to adjust.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// The template controls of a scene migrated from a fixed layout (the layout the recording started with).
+struct LegacyLayoutInspector: View {
+    @Bindable var model: EditorModel
+    var body: some View {
         let l = model.layout
-        InspectorSection(title: "Default Scene · \(model.canvas.label)") {
+        InspectorSection(title: "\(model.activeScene?.name ?? "Default Scene") · \(model.canvas.label)") {
             InspectorRow(label: "Layout") {
                 Picker("Layout", selection: model.binding(\.kind)) {
                     ForEach(LayoutKind.allCases, id: \.self) { k in Text(k.label).tag(k) }

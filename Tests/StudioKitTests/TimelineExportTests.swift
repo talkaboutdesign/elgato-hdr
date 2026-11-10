@@ -177,3 +177,62 @@ final class TimelineExportTests: XCTestCase {
         do { _ = try await CompositionBuilder.build(doc,canvas: .wide,resolution: .hd,range: .sdr); XCTFail("all-deleted must not export original") } catch {}
     }
 }
+
+/// A scene transition that is still running where a cut removes material: the export finishes it at the cut, and so
+/// must the preview, which plays the uncut source and jumps over the removed section.
+final class TransitionAcrossCutTests: XCTestCase {
+    private func project() async throws -> (URL, ProjectDoc, Scene, Scene) {
+        try TimelineExportTests().requireHardware()
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("CutTransition-" + UUID().uuidString)
+        let doc = try await GeneratedMedia.project(at: dir, fps: 60)
+        let game = Composition(layers: [Layer(source: .game)])
+        let small = Composition(background: [0.9, 0.2, 0.1, 1], layers: [Layer(source: .game, frame: NRect(x: 0.25, y: 0.25, w: 0.5, h: 0.5))])
+        let a = Scene(name: "Full", wide: game, vertical: game), b = Scene(name: "Small", wide: small, vertical: small)
+        doc.project.scenes = [a, b]
+        // A 1.5 s fade starting at 1.0 s would run until 2.5 s; the cut removes 1.2–2.0 s.
+        doc.project.timeline = Timeline(segments: [Segment(startMs: 0, endMs: 1200), Segment(startMs: 2000, endMs: 3000)],
+                                        sceneSpans: [SceneSpan(startMs: 0, sceneID: a.id), SceneSpan(startMs: 1000, sceneID: b.id, transition: SceneTransition(style: .fade, durationMs: 1500))])
+        return (dir, doc, a, b)
+    }
+
+    func testPreviewMatchesExportWhenATransitionCrossesACut() async throws {
+        let (dir, doc, _, _) = try await project()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let export = try await CompositionBuilder.build(doc, canvas: .wide, resolution: .hd, range: .sdr)
+        // The editor's preview: the uncut source, with the instruction it swaps in on every edit.
+        let previewBuilt = try await CompositionBuilder.build(doc, canvas: .wide, resolution: .hd, range: .sdr, ignoreCuts: true)
+        let preview = CompositionBuilder.videoComposition(doc.project, canvas: .wide, size: Canvas.wide.size(.hd), built: previewBuilt)
+        var report: [String] = []
+        for timelineMs in [600.0, 1100, 1300, 1700] {
+            let sourceMs = export.map.source(fromTimeline: timelineMs)
+            let e = RawCompositionFrames.codes(try RawCompositionFrames.frame(export.asset, video: export.video, ms: timelineMs, hdr: false))
+            let p = RawCompositionFrames.codes(try RawCompositionFrames.frame(previewBuilt.asset, video: preview, ms: sourceMs, hdr: false))
+            let worst = zip(e, p).map { abs($0 - $1) }.max() ?? 0
+            report.append(String(format: "t=%.0f (source %.0f): max diff %.0f", timelineMs, sourceMs, worst))
+            XCTAssertLessThanOrEqual(worst, 1, "preview and export frame at timeline \(timelineMs) ms (source \(sourceMs) ms)")
+        }
+        print("Transition across a cut, preview vs export: " + report.joined(separator: "; "))
+    }
+
+    func testEditorPreviewInstructionFollowsCutEdits() async throws {
+        let (dir, doc, _, _) = try await project()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        doc.project.timeline.segments = []
+        let m = await MainActor.run { EditorModel(doc: doc) }
+        func waitFor(_ what: String, _ ok: @escaping () -> Bool) async throws {
+            for _ in 0..<200 { if await MainActor.run(body: ok) { return }; try await Task.sleep(nanoseconds: 25_000_000) }
+            XCTFail("timed out waiting for \(what)")
+        }
+        try await waitFor("the preview") { m.previewRevision >= 1 }
+        let revision = await MainActor.run { m.previewRevision }
+        await MainActor.run { m.update("Cut") { $0.timeline.segments = [Segment(startMs: 0, endMs: 1200), Segment(startMs: 2000, endMs: 3000)] } }
+        try await waitFor("the instruction swap") { m.previewRevision > revision }
+        let plan = await MainActor.run { (m.player.currentItem?.videoComposition?.instructions.first as? CompositionInstruction)?.plan }
+        let cuts = try XCTUnwrap(plan?.cuts)
+        XCTAssertEqual(cuts.segments.map { [($0.startMs * 1000).rounded() / 1000, ($0.endMs * 1000).rounded() / 1000] }, [[0, 1200], [2000, 3000]])
+        XCTAssertEqual(plan?.map.segments.count, 1, "the preview still plays the uncut source")
+        let layers = plan?.layers(atTimelineMs: 2100) ?? []
+        XCTAssertEqual(layers.map(\.opacity), [1], "past the cut the transition has finished, as in the export")
+        await MainActor.run { m.close() }
+    }
+}

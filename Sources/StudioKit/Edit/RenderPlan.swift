@@ -6,6 +6,9 @@ struct RenderPlan {
     var scenes: [Scene]; var timeline: Timeline; var map: TimeMap
     var canvas: Canvas; var canvasSize: CGSize
     var sources: [SourceKey: SourceInfo]; var mirrorCamera: Bool
+    /// Where the cuts are, in source time. `map` only says which source time a composition time shows: the editor
+    /// preview plays the uncut source (identity map) but must end a transition at a cut exactly as the export does.
+    var cuts: TimeMap? = nil
 
     private func selection(at t: Double) -> (Scene?, Scene?, SceneTransition, Double) {
         let s = map.source(fromTimeline: t)
@@ -14,7 +17,7 @@ struct RenderPlan {
         let span = spans[i]
         let to = scenes.first { $0.id == span.sceneID }
         let from = i > 0 ? scenes.first { $0.id == spans[i-1].sceneID } : nil
-        let done = span.transition.durationMs <= 0 || map.crossedCut(from: span.startMs, through: s)
+        let done = span.transition.durationMs <= 0 || (cuts ?? map).crossedCut(from: span.startMs, through: s)
         let progress = done ? 1 : min(1, max(0, (s - span.startMs) / span.transition.durationMs))
         return (from, to, span.transition, progress)
     }
