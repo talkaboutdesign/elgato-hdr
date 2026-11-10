@@ -52,6 +52,9 @@ final class VideoEncoder {
     private var leases: [Int: () -> Void] = [:], nextLease = 0
     private var lastErrorNs: UInt64 = 0
     private var failRecoveryForTesting = false
+    #if DEBUG
+    private var heldCallbacksForTesting: [() -> Void]?
+    #endif
 
     init?(settings: Settings) {
         guard settings.width > 0, settings.height > 0, settings.fps.isFinite, settings.fps > 0, settings.bitrate > 0 else { return nil }
@@ -101,11 +104,17 @@ final class VideoEncoder {
                 frameProperties: options, infoFlagsOut: nil) { [self] status, _, sample in
                     // VT may invoke this inline or on an internal queue. Preserve callback/config order on our queue.
                     queue.async { [self] in
-                        defer { completeLease(leaseID, token: token) }
-                        guard token == epoch else { return }
-                        guard status == noErr, let sample else { failed(status); return }
-                        failures = 0
-                        receive(sample, begin: begin)
+                        let deliver: () -> Void = { [self] in
+                            defer { completeLease(leaseID, token: token) }
+                            guard token == epoch else { return }
+                            guard status == noErr, let sample else { failed(status); return }
+                            failures = 0
+                            receive(sample, begin: begin)
+                        }
+                        #if DEBUG
+                        if heldCallbacksForTesting != nil { heldCallbacksForTesting!.append(deliver); return }
+                        #endif
+                        deliver()
                     }
                 }
             let elapsed = Double(nowNs() - begin) / 1e6
@@ -118,6 +127,17 @@ final class VideoEncoder {
     func invalidateForTesting(fatal: Bool = false) { queue.sync { failRecoveryForTesting = fatal; if let session { VTCompressionSessionInvalidate(session) } } }
     func enqueueForTesting(_ work: @escaping () -> Void) { queue.async(execute: work) }
     func drainForTesting() { queue.sync {} }
+    #if DEBUG
+    func holdCallbacksForTesting() { queue.sync { heldCallbacksForTesting = [] } }
+    var outstandingForTesting: Int { lock.lock(); defer { lock.unlock() }; return admission.pending }
+    func releaseCallbacksForTesting() {
+        queue.sync { if let session { VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid) } }
+        queue.sync {
+            let callbacks = heldCallbacksForTesting ?? []; heldCallbacksForTesting = nil
+            callbacks.forEach { $0() }
+        }
+    }
+    #endif
     private func failed(_ status: OSStatus) {
         lock.lock(); counters.dropped += 1; totalDropped += 1; lock.unlock()
         failures += 1

@@ -19,10 +19,22 @@ final class LiveReviewTests: XCTestCase {
         XCTAssertEqual(CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA,
             [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pb), kCVReturnSuccess)
         let buffer = try XCTUnwrap(pb), entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        encoder.holdCallbacksForTesting()
+        let burst = expectation(description: "Nine hardware callbacks released together"); burst.expectedFulfillmentCount = 9
+        for n in 0..<9 {
+            encoder.encode(buffer, hostNs: 1_000_000_000 + UInt64(n) * 17_000_000) { burst.fulfill() }
+            encoder.drainForTesting()
+        }
+        XCTAssertEqual(encoder.outstandingForTesting, 9)
+        XCTAssertEqual(encoder.takeStats().dropped, 0)
+        encoder.releaseCallbacksForTesting()
+        wait(for: [burst], timeout: 5)
+        XCTAssertEqual(encoder.outstandingForTesting, 0)
+        XCTAssertEqual(encoder.takeStats().frames, 9)
         encoder.enqueueForTesting { entered.signal(); _ = release.wait(timeout: .now() + 5) }
         XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
         let callbacks = expectation(description: "Every lease released once"); callbacks.expectedFulfillmentCount = 9
-        for n in 0..<9 { encoder.encode(buffer, hostNs: 1_000_000_000 + UInt64(n) * 17_000_000) { callbacks.fulfill() } }
+        for n in 0..<9 { encoder.encode(buffer, hostNs: 2_000_000_000 + UInt64(n) * 17_000_000) { callbacks.fulfill() } }
         XCTAssertEqual(encoder.takeStats().queueRejected, 7)
         release.signal(); encoder.finish()
         wait(for: [callbacks], timeout: 5)
