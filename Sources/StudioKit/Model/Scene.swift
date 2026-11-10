@@ -22,8 +22,29 @@ extension NRect {
     }
 }
 
-/// Text layer contents; filled in by the overlays plan.
-struct TextSpec: Codable, Equatable {}
+/// Text layer contents. The layer's frame is the box: the font size is the largest at which the text (and its plate
+/// padding) fits it; lines break only where the string has line breaks. `{time}` and `{timer}` are replaced at render
+/// time (`OverlayTokens`). Colours are SDR sRGB code values r, g, b, a.
+struct TextSpec: Codable, Equatable, Hashable {
+    var string = "Text"
+    var fontName = ""                 // empty = system font; kept even when this Mac lacks the font
+    var weight = "semibold"           // regular, medium, semibold, bold, heavy
+    var color: [Double] = [1, 1, 1, 1]
+    var alignment = "center"          // left, center, right
+    var plate: [Double]? = nil        // background colour behind the text, nil = none
+    var plateRadius = 0.3             // fraction of the plate height
+    var platePadding = 0.35           // fraction of the font size
+    var shadow = true
+}
+extension TextSpec {
+    enum CodingKeys: String, CodingKey { case string, fontName, weight, color, alignment, plate, plateRadius, platePadding, shadow }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self), z = TextSpec()
+        self.init(string: c.v(.string, z.string), fontName: c.v(.fontName, z.fontName), weight: c.v(.weight, z.weight),
+                  color: c.v(.color, z.color), alignment: c.v(.alignment, z.alignment), plate: c.v(.plate, z.plate),
+                  plateRadius: c.v(.plateRadius, z.plateRadius), platePadding: c.v(.platePadding, z.platePadding), shadow: c.v(.shadow, z.shadow))
+    }
+}
 
 struct LayerSource: Codable, Equatable {
     var type: String            // "game" | "camera" | "image" | "text" | "color"
