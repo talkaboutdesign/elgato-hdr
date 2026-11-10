@@ -13,7 +13,7 @@ extension AppDelegate {
     func installActions() {
         var a = StudioActions()
         a.toggleRecording = { [weak self] in self?.toggleRecording() }
-        a.goLive = {}
+        a.goLive = { [weak self] in self?.showGoLive() }
         a.selectMode = { [weak self] in self?.selectMode(index: $0) }
         a.selectColor = { [weak self] in self?.selectColor(mode: $0) }
         a.selectPresentation = { [weak self] in self?.selectPresentation(mode: $0) }
@@ -36,6 +36,7 @@ extension AppDelegate {
         a.toggleSidebar = { [weak self] in self?.toggleSidebar() }
         a.toggleFocus = { [weak self] in self?.toggleFocusMode() }
         state.actions = a
+        installStreamActions()
     }
 
     // MARK: Devices

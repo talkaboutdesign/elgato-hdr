@@ -59,6 +59,7 @@ struct StreamActions {
     var openHelp: (Destination.Service) -> Void = { _ in }
     /// Shows the Stream tab and opens the add sheet.
     var addDestination: () -> Void = {}
+    var showStreamTab: () -> Void = {}
 }
 
 @Observable

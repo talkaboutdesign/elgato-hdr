@@ -22,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var demoRequested = false          // "Try the Demo Source" on the first-launch sheet
     let demoCamera = CommandLine.arguments.contains("--demo-camera")
     let streamMixer = AudioMixer()
-    var streamSession: StreamSession?
+    lazy var streamController = makeStreamController()
     var streamItem: NSMenuItem?
     var session: Session?
     var modeIndex = min(max(UserDefaults.standard.integer(forKey: "mode"), 0), modes.count - 1) { didSet { state.modeIndex = modeIndex } }   // also accepts `-mode N` on the command line
@@ -221,6 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard confirmEndingStream("Quit") else { return .terminateCancel }
         endStream()
         guard recorder != nil else { return .terminateNow }
         finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }

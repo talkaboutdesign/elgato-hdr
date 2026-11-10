@@ -18,10 +18,15 @@ if [[ "${SELFTEST_SKIP_BUILD:-0}" != 1 ]]; then ./build.sh > "$out/build.log" 2>
 "$ffmpeg" -hide_banner -loglevel warning -y -listen 1 -i rtmp://127.0.0.1:1935/live/test -t 20 -c copy "$out/selftest.flv" > "$out/listener.log" 2>&1 &
 listener_pid=$!
 sleep 1
-EHDR_STREAM_KEY=test "dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" \
+# One local destination in a throwaway streaming.json: the user's destinations and Keychain stay untouched, and
+# EHDR_STREAM_KEY stands in for the key on the --go-live-for path only.
+cat > "$out/streaming.json" <<JSON
+{"destinations":[{"id":"6D1A3F0E-5B7C-4C2A-9E61-0F3B8D2A7C41","service":"custom","name":"Self-test","url":"rtmp://127.0.0.1:1935/live","canvas":"$canvas","enabled":true}],
+ "settings":{"resolution":1080,"fps":60,"videoKbps":6000,"audioKbps":160,"micDelayMs":0}}
+JSON
+EHDR_STREAM_KEY=test EHDR_STREAMING_FILE="$out/streaming.json" "dist/Elgato HDR.app/Contents/MacOS/ElgatoHDR" \
     --demo-source "${SELFTEST_SOURCE:-2560x1440@60}" --demo-camera \
-    -presentation "${SELFTEST_PRESENTATION:-game}" -streamURL rtmp://127.0.0.1:1935/live \
-    -streamCanvas "$canvas" -streamBitrate 6000 --go-live-for 25 > "$out/app.log" 2>&1 &
+    -presentation "${SELFTEST_PRESENTATION:-game}" --go-live-for 25 > "$out/app.log" 2>&1 &
 app_pid=$!
 # Bound failures (failed encoder, connection, or launch) instead of leaving a listener hanging forever.
 for ((i=0;i<45;i++)); do
@@ -59,7 +64,8 @@ for line in (p/'flash.log').read_text().splitlines():
     m=re.search(r'lavfi.signalstats.YAVG=([0-9.]+)',line)
     if m and time is not None:frames.append((time,float(m[1])))
 peak=max(y for _,y in frames)
-flashes=[t for i,(t,y) in enumerate(frames) if 0<i<len(frames)-1 and y>peak*0.98 and y-frames[i-1][1]>20 and y-frames[i+1][1]>20]
+# A flash in the first 0.3 s has no silence before its beep (the stream starts mid-beep), so it cannot be paired.
+flashes=[t for i,(t,y) in enumerate(frames) if 0<i<len(frames)-1 and t>0.3 and y>peak*0.98 and y-frames[i-1][1]>20 and y-frames[i+1][1]>20]
 beeps=[float(x) for x in re.findall(r'silence_end: ([0-9.]+)',(p/'beep.log').read_text())]
 assert flashes and beeps, 'FAIL: no flash/beep detected'
 flash=flashes[0]; beep=min(beeps,key=lambda t:abs(t-flash))

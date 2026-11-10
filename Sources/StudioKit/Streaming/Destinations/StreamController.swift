@@ -89,7 +89,7 @@ final class StreamController {
     }
 
     func delete(_ id: UUID) {
-        if runtimes[id] != nil { stopDestination(id, quietly: true) }
+        if runtimes[id] != nil { stopDestination(id) }
         state.destinations.removeAll { $0.id == id }
         state.health[id] = nil; state.keyStored.remove(id)
         persist()
@@ -104,7 +104,7 @@ final class StreamController {
         if save { persist() }
         guard isActive else { return }
         if on, runtimes[id] == nil { startDestination(id) }
-        if !on, runtimes[id] != nil || state.health(id).status != .off { stopDestination(id, quietly: false) }
+        if !on, runtimes[id] != nil || state.health(id).status != .off { stopDestination(id) }
     }
 
     func updateSettings(_ settings: StreamSettings) {
@@ -142,6 +142,11 @@ final class StreamController {
         for d in enabled { state.health[d.id] = DestinationHealth(status: .connecting) }
         for d in state.destinations where !d.enabled { state.health[d.id] = nil }
         log("stream: going live to \(enabled.count) destination(s) at \(settings.resolution)p\(settings.fps) \(settings.videoKbps) kbps")
+        // A Keychain read waits silently while macOS shows its access prompt (after a rebuild of an ad-hoc signed app).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.generation == token, self.state.phase == .connecting, self.session == nil else { return }
+            self.toast("Waiting for Keychain access", "macOS may be asking for your password to read the stream keys.", .warning)
+        }
         readKeys(enabled) { [weak self] keys in
             guard let self, self.generation == token, self.state.phase == .connecting, self.session == nil else { return }
             var publishers: [UUID: RTMPPublisher] = [:]
@@ -233,11 +238,12 @@ final class StreamController {
         }
     }
 
-    private func stopDestination(_ id: UUID, quietly: Bool) {
+    /// The user turned a destination off or deleted it.
+    private func stopDestination(_ id: UUID) {
         if let r = runtimes.removeValue(forKey: id) { r.publisher.onState = nil; session?.removePublisher(r.publisher) }
         state.health[id] = nil
         if let name = state.destinations.first(where: { $0.id == id })?.name { log("stream: \(name) stopped") }
-        checkEnded(userStopped: !quietly)
+        checkEnded(userStopped: true)
     }
 
     private func watch(_ publisher: RTMPPublisher, for id: UUID) {
@@ -267,7 +273,9 @@ final class StreamController {
             log("stream: \(d.name) live")
             if state.phase == .connecting { state.phase = .live(since: Date()) }
         case .reconnecting(let attempt, _):
-            let text = StreamErrorText.describe(error).message
+            // A connection that was live and then closed is a network or server problem, not a key problem.
+            let closed = (error ?? "").lowercased().hasPrefix("connection closed")
+            let text = r.everLive && closed ? "The server closed the connection." : StreamErrorText.describe(error).message
             if attempt == 1 { toast("\(d.name): \(r.everLive ? "connection lost, reconnecting" : "cannot connect, retrying")", text, .warning) }
             h.status = .reconnecting(attempt: attempt); h.detail = text
             log("stream: \(d.name) reconnecting (attempt \(attempt))")

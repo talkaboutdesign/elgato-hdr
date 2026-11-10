@@ -163,3 +163,32 @@ final class StreamControllerTests: XCTestCase {
 private extension StreamUIState {
     var isLive: Bool { if case .live = self { return true }; return false }
 }
+
+/// Manual harness for acceptance check 4 in the real app: `EHDR_FAKE_RTMP_REJECT_PORT=1940 swift test --filter
+/// RejectingServerHarness` serves a FakeRTMPServer that rejects every key for 60 s. Skipped otherwise.
+final class RejectingServerHarness: XCTestCase {
+    func testServeRejectingServer() throws {
+        guard let port = ProcessInfo.processInfo.environment["EHDR_FAKE_RTMP_REJECT_PORT"].flatMap(UInt16.init) else {
+            throw XCTSkip("manual harness: set EHDR_FAKE_RTMP_REJECT_PORT")
+        }
+        let server = try FakeRTMPServer(port: port); server.reject = true
+        defer { server.stop() }
+        print("rejecting RTMP server on 127.0.0.1:\(port)")
+        RunLoop.main.run(until: Date().addingTimeInterval(60))
+        print("connections: \(Set(server.messages.map(\.0)).count)")
+    }
+}
+
+extension StreamControllerTests {
+    func testDeletingTheLastLiveDestinationEndsAsUserStopped() throws {
+        let server = try FakeRTMPServer(); defer { server.stop() }
+        let d = local("Only", server)
+        let c = try controller([d])
+        c.goLive()
+        XCTAssertTrue(spin(5) { c.state.health(d.id).status == .live })
+        c.delete(d.id)
+        XCTAssertEqual(c.state.phase, .idle)
+        XCTAssertTrue(toasts.contains("Stream ended: every destination is off"), "\(toasts)")
+        XCTAssertTrue(c.state.destinations.isEmpty)
+    }
+}

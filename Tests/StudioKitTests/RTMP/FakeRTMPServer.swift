@@ -27,10 +27,10 @@ final class FakeRTMPServer {
     var messages: [(Int, RTMPMessage)] { queue.sync { recorded } }
     var port: UInt16 { listener.port!.rawValue }
 
-    init() throws {
+    init(port: UInt16 = 0) throws {
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
         let p = NWParameters(tls: nil, tcp: tcp)
-        p.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        p.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port == 0 ? .any : NWEndpoint.Port(rawValue: port)!)
         listener = try NWListener(using: p)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { state in if case .ready = state { ready.signal() }; if case .failed = state { ready.signal() } }

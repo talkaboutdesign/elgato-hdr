@@ -10,7 +10,7 @@ enum Connection: Equatable {
     case connecting, live, noSignal(String), demo
 }
 
-/// Streaming is filled in by plans 20 and 21; until then the Go Live control is shown disabled.
+/// Phase of the stream as a whole; per-destination health is in `StreamingState`.
 enum StreamUIState: Equatable {
     case unavailable
     case idle
@@ -101,8 +101,8 @@ final class StudioState {
     var recording = false
     var recordingElapsed: TimeInterval = 0
     var recordingLayers: [String] = []
-    // streaming (plans 20 and 21)
-    var streaming: StreamUIState = .unavailable
+    // streaming: destinations, settings and live health (plan 21)
+    let streaming = StreamingState()
     // transient messages
     var toast: Toast?
     // window chrome
