@@ -91,7 +91,7 @@ final class StudioWindowController: NSWindowController, NSToolbarDelegate {
             return item
         }
         switch id {
-        case .canvas: return hosted(CanvasSwitch(), label: "Canvas", tip: "Live 16:9 and 9:16 canvases are coming with scenes")
+        case .canvas: return hosted(CanvasSwitch(state: state), label: "Canvas", tip: "Show and edit the 16:9 or the 9:16 canvas")
         case .record: return hosted(RecordButton(state: state), label: "Record", tip: "Start or stop recording (⌘R)")
         case .goLive: return hosted(GoLiveButton(state: state), label: "Go Live", tip: "Go live to your stream destinations (⇧⌘L)")
         default: return nil
@@ -201,10 +201,10 @@ final class StageViewController: NSViewController {
 
     private func observeOverlays() {
         let state = state
-        trackChanges({ state.connection == .live || state.connection == .demo }) { [weak self] live in
+        trackChanges({ (state.connection == .live || state.connection == .demo, state.scenes.canvas == .vertical) }) { [weak self] v in
             guard let self = self else { return }
-            self.placeholderHost.isHidden = live
-            self.showPill(autoHide: live)
+            self.placeholderHost.isHidden = v.0
+            self.showPill(autoHide: v.0)
         }
         trackChanges({ state.toast != nil }) { [weak self] shown in
             guard let self = self else { return }
@@ -218,9 +218,10 @@ final class StageViewController: NSViewController {
         hidePill?.cancel()
         if pillHost.isHidden { pillHost.isHidden = false }
         if !chrome.pillVisible { withAnimation(DS.Motion.fade) { chrome.pillVisible = true } }
-        guard autoHide else { return }
+        // The 9:16 view keeps its pill: it says the picture is the vertical canvas.
+        guard autoHide, state.scenes.canvas == .wide else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self = self, self.state.connection == .live || self.state.connection == .demo else { return }
+            guard let self = self, self.state.connection == .live || self.state.connection == .demo, self.state.scenes.canvas == .wide else { return }
             withAnimation(.easeOut(duration: 0.4)) { self.chrome.pillVisible = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { if !self.chrome.pillVisible { self.pillHost.isHidden = true } }
         }

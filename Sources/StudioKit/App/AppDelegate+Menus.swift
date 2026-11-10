@@ -51,6 +51,7 @@ extension AppDelegate {
         let camItem = NSMenuItem(); main.addItem(camItem)
         cameraMenu.delegate = self   // rebuilt on open so device lists stay current
         camItem.submenu = cameraMenu
+        addScenesMenu(to: main)
 
         let recItem = NSMenuItem(); main.addItem(recItem)
         let recMenu = NSMenu(title: "Record")
@@ -67,6 +68,7 @@ extension AppDelegate {
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Show Live View", action: #selector(showLiveView), keyEquivalent: "0")
         viewMenu.addItem(withTitle: "Focus Mode (Full Screen)", action: #selector(toggleFocusMode), keyEquivalent: "f")
+        viewMenu.addItem(makeCleanGameItem())
         sidebarItem = NSMenuItem(title: "Hide Sidebar", action: #selector(toggleSidebar), keyEquivalent: "s")
         sidebarItem.keyEquivalentModifierMask = [.command, .option]
         viewMenu.addItem(sidebarItem)

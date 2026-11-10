@@ -44,6 +44,7 @@ final class ProjectDoc: Identifiable, Hashable {
                 return
             }
             project.durationMs = d.seconds * 1000
+            project.seedTimelineFromEvents()
             if let s = try? await t.load(.naturalSize) { project.width = Int(s.width); project.height = Int(s.height) }
             if let f = try? await t.load(.nominalFrameRate), f > 0 { project.fps = Double(f) }
             if let c = project.camera, await !layerReadable(c) { log("finalize: dropping unreadable camera layer \(c.file)"); project.camera = nil }

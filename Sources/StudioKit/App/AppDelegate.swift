@@ -13,6 +13,7 @@ import QuartzCore
 /// on the main thread (the didSets below).
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let state = StudioState()
+    let sceneRuntime = SceneRuntime()
     var studio: StudioWindowController!
     var window: NSWindow!
     var view: MetalView!
@@ -97,12 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             return
         }
         #endif
-        view.placement = { [weak self] in
-            guard let self = self, self.camera.cameraOn else { return nil }
-            return self.livePlacement
-        }
-        view.onPlacement = { [weak self] p in self?.setPlacement(p) }
-        view.contextMenu = { [weak self] in self?.makeCameraMenu(title: "Camera") }
+        setUpScenes()
         camera.onState = { [weak self] in self?.syncDevices() }
         buildMenu()
         startMeterTimer()
@@ -204,8 +200,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             s.onGameAudio = { bytes, count, ns in gameInput.pushInt16Stereo(bytes, byteCount: count, endHostNs: ns) }
             s.onInfo = { [weak self] info in DispatchQueue.main.async {
                 if let r = info.range(of: #"([0-9.]+) fps"#, options: .regularExpression), let v = Double(info[r].dropLast(4)) { self?.measuredFps = v }
-                if let self = self, s.w > 0, self.view.videoSize != CGSize(width: s.w, height: s.h) {
-                    self.view.videoSize = CGSize(width: s.w, height: s.h)
+                if let self = self, s.w > 0, self.view.gameSize != CGSize(width: s.w, height: s.h) {
+                    self.view.gameSize = CGSize(width: s.w, height: s.h)
                 }
                 self?.setStatus(info) } }
             DispatchQueue.main.async { self.session = s }
@@ -237,5 +233,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         finishRecording { _ in NSApp.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }
-    func applicationWillTerminate(_ n: Notification) { stopStudioObservers(); endStream(); session?.stop(); demoSource?.stop() }
+    func applicationWillTerminate(_ n: Notification) { stopStudioObservers(); endStream(); sceneRuntime.store.flush(scenes.collection); session?.stop(); demoSource?.stop() }
 }

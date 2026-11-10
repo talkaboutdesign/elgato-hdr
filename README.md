@@ -81,6 +81,7 @@ open "dist/Elgato HDR.app"
 - **Bottom bar:** the current layout, game-audio monitoring and a live microphone meter.
 - **Sidebar** (⌥⌘S): **Scene** holds the camera window (device, shape, aspect, size, position, mirror, border, shadow) and the picture settings; **Audio** holds game monitoring and the microphone with its level; **Stream** lists your destinations with their switches and, while live, each one's state, bitrate, dropped frames and uptime, plus the output settings (resolution, frame rate, bitrate with the total upload, mic delay).
 - **Focus mode** (⌘F): full screen with the sidebar and bottom bar out of the way, so the game fills the display. Move the pointer to the top edge for the toolbar; leaving full screen brings the panels back as they were.
+  With **View › Show Clean Game Picture in Focus Mode** (on by default) the full-screen picture is the whole game in its own aspect, without camera, overlays, crop or zoom: an ultrawide game is letterboxed instead of cropped to 16:9, so no HUD is lost. The stream, recordings and scene thumbnails still show the scene.
 - Messages such as *Recording saved* appear briefly at the top of the picture instead of in the window title.
 
 ### Streaming
@@ -136,6 +137,14 @@ Exports/       Rendered videos
 | View | Hide / Show Sidebar | ⌥⌘S |
 | View | Smooth / Game / Lowest Latency | ⌘J / ⌘G / ⌘L |
 | View | Reconnect | ⇧⌘R |
+| View | Show Clean Game Picture in Focus Mode | — |
+| Scenes | Switch to a scene | ⌃1 – ⌃9 (also a click in the scene strip) |
+| Scenes | Next / Previous Scene | ⌃⇧→ / ⌃⇧← |
+| Scenes | Zoom In on Game / Zoom Out | ⌃Z, or hold ⌃⇧Space to zoom while held; arrow keys move the zoom |
+| Scenes | Add Marker (while recording) | ⌃M |
+
+macOS keeps ⌃Space (input sources) and ⌃← / ⌃→ (Mission Control) for itself, so the scene shortcuts add ⇧. While you
+type in a field, ⌃Z, the arrow keys and ⌫ go to the field, never to the picture.
 
 The **View** menu picks how frames reach the screen. None of these affect recordings.
 

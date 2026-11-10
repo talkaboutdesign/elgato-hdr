@@ -29,12 +29,13 @@ extension AppDelegate {
 
     func applyOverlay() {
         renderer?.overlay = LiveOverlay(camera: camera.cameraOn ? camera : nil, placement: livePlacement, mirror: cameraMirror)
-        view.updateOutline()
+        pushScene()
+        view.refreshOverlay()
         syncActiveDevices()
     }
+    /// The facecam window now lives in the active scene: this edits its camera layer (`livePlacement` follows).
     func setPlacement(_ p: CameraPlacement) {
-        livePlacement = p
-        if let d = try? JSONEncoder().encode(p) { UserDefaults.standard.set(d, forKey: "livePlacement") }
+        applyCameraPlacement(p)
         applyOverlay()
     }
 
@@ -81,7 +82,7 @@ extension AppDelegate {
     }
     @objc func biggerCamera() { var p = livePlacement; p.size = min(1, p.size * 1.15); setPlacement(p) }
     @objc func smallerCamera() { var p = livePlacement; p.size = max(0.08, p.size / 1.15); setPlacement(p) }
-    @objc func toggleMirror() { cameraMirror.toggle(); UserDefaults.standard.set(cameraMirror, forKey: "cameraMirror"); applyOverlay() }
+    @objc func toggleMirror() { cameraMirror.toggle(); UserDefaults.standard.set(cameraMirror, forKey: "cameraMirror"); applyCameraMirror(cameraMirror); applyOverlay() }
     @objc func toggleBorder() { var p = livePlacement; p.border.toggle(); setPlacement(p) }
     @objc func toggleShadow() { var p = livePlacement; p.shadow.toggle(); setPlacement(p) }
 
