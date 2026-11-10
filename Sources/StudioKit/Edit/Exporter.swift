@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import VideoToolbox
 import QuartzCore
+import Darwin
 
 // MARK: - Export
 
@@ -24,6 +25,7 @@ final class Exporter {
     let doc: ProjectDoc
     let job: ExportJob
     let output: URL
+    private let partialOutput: URL
     /// No appended sample and no state change for this long fails the export as stalled.
     var stallTimeout: TimeInterval = 20
     /// Starts feeding one writer input. Tests replace it to simulate a pump that never produces.
@@ -52,6 +54,7 @@ final class Exporter {
         let name = doc.project.name.replacingOccurrences(of: "/", with: "-")
         let res = job.resolution == .uhd ? "4K" : "1080p"
         self.output = output ?? doc.exportsDir.appendingPathComponent("\(name) — \(job.canvas == .wide ? "16x9" : "9x16") \(res) \(job.range == .hdr ? "HDR" : "SDR").mp4")
+        partialOutput = self.output.deletingLastPathComponent().appendingPathComponent(".export-" + UUID().uuidString + ".mp4")
         // Exports are file names only: the project folder can be renamed or moved freely.
     }
 
@@ -66,7 +69,9 @@ final class Exporter {
             // Teardown (and deleting the partial file) is queued behind whatever the lifecycle queue is doing. Wait
             // for it, but never long: a blocked media engine must not keep the caller (and the export queue) waiting.
             watchQueue.asyncAfter(deadline: .now() + 1.2) { self.tornDown.resolve(false) }
-            if await !tornDown.wait() { log("export: teardown still waiting on the media engine; the partial file is deleted when it finishes") }
+            if await !tornDown.wait() { log("export: teardown still waiting on the media engine") }
+            // Each run owns a unique partial path; a late teardown cannot delete a restarted export.
+            try? FileManager.default.removeItem(at: partialOutput)
             throw abortError(reason) ?? error
         }
     }
@@ -93,12 +98,13 @@ final class Exporter {
         phase = .torndown
         stopWatchdog()
         guard started else { return }
+        let statusBeforeCancel = reason == .cancelled ? "" : diagnostics()
         gate.close()
         if let r = reader, r.status == .reading { r.cancelReading() }
         if let w = writer, w.status == .writing { w.cancelWriting() }
-        if ownsOutput { try? FileManager.default.removeItem(at: output) }
+        if ownsOutput { try? FileManager.default.removeItem(at: partialOutput) }
         pumps.forEach { $0.release() }
-        if reason != .cancelled { log("export: aborted (\(why)) \(diagnostics())") }
+        if reason != .cancelled { log("export: aborted (\(why)) before cancel: \(statusBeforeCancel); after cancel: \(diagnostics())") }
     }
 
     /// Runs a lifecycle step on the queue. An abort before it starts skips it and returns at once. A `blocking` step
@@ -153,7 +159,7 @@ final class Exporter {
 
         let size = built.video.renderSize
         let fps = 1 / built.video.frameDuration.seconds
-        let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
+        let writer = try AVAssetWriter(outputURL: partialOutput, fileType: .mp4)
         var compression: [String: Any] = [AVVideoExpectedSourceFrameRateKey: fps, AVVideoMaxKeyFrameIntervalKey: Int(fps * 2)]
         let videoSettings: [String: Any]
         if hdr {
@@ -193,11 +199,11 @@ final class Exporter {
 
         // The watchdog covers the start too: starting the writer can block when the media engines are busy.
         activity.touch()
-        startWatchdog()
+        startWatchdog(reader: reader, writer: writer)
         try await step(blocking: true) {
             self.phase = .starting
             self.ownsOutput = true
-            try? FileManager.default.removeItem(at: self.output)
+            try? FileManager.default.removeItem(at: self.partialOutput)
             self.reader = reader; self.writer = writer; self.pumps = pumps
             pumps.forEach { p in
                 p.retain([reader, writer])
@@ -224,6 +230,7 @@ final class Exporter {
         try await await_(finished)
         try await step {
             guard writer.status == .completed else { throw writer.error ?? CompositionBuilder.err("export failed") }
+            guard rename(self.partialOutput.path, self.output.path) == 0 else { throw CompositionBuilder.err("Cannot publish completed export") }
             self.phase = .finished
             self.stopWatchdog()
             self.pumps.forEach { $0.release() }
@@ -234,13 +241,18 @@ final class Exporter {
 
     // MARK: Watchdog
 
-    private func startWatchdog() {
+    private func startWatchdog(reader: AVAssetReader, writer: AVAssetWriter) {
         watchQueue.async {
+            var readerStatus = reader.status, writerStatus = writer.status
             let t = DispatchSource.makeTimerSource(queue: self.watchQueue)
             let interval = max(0.05, min(1, self.stallTimeout / 4))
             t.schedule(deadline: .now() + interval, repeating: interval)
             t.setEventHandler { [weak self] in
                 guard let self = self, self.aborted.reason == nil else { return }
+                let rs = reader.status, ws = writer.status
+                if rs != readerStatus || ws != writerStatus {
+                    readerStatus = rs; writerStatus = ws; self.activity.touch()
+                }
                 let idle = self.activity.idle
                 guard idle >= self.stallTimeout else { return }
                 log(String(format: "export: STALLED, nothing appended and no state change for %.1f s", idle))
