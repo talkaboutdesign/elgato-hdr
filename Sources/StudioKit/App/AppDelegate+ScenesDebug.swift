@@ -46,15 +46,18 @@ extension AppDelegate {
         guard let dir = ProcessInfo.processInfo.environment["EHDR_LIVE_DUMP"], sceneRuntime.eventLog != nil else { return }
         LiveDump.count += 1
         let folder = URL(fileURLWithPath: dir).appendingPathComponent(String(format: "%02d-%@", LiveDump.count, action.replacingOccurrences(of: "/", with: "-")))
-        for offset in [0.0, 60, 120, 200, 300, 450, 700, 1000] {
+        // Nothing between +40 and +200 ms: a render takes the main thread for a moment, which would delay a scripted
+        // switch made 150 ms later.
+        for offset in [0.0, 40, 200, 300, 450, 700, 1000] {
             DispatchQueue.main.asyncAfter(deadline: .now() + offset / 1000) { [weak self] in
                 guard let self = self, let log0 = self.sceneRuntime.eventLog else { return }
                 let t = nowNs(), state = self.sceneRuntime.live, ms = Int(log0.tMs(atNs: t).rounded())
                 for canvas in Canvas.allCases {
-                    let size = canvas == .wide ? CGSize(width: 1280, height: 720) : CGSize(width: 720, height: 1280)
+                    let size = canvas == .wide ? CGSize(width: 960, height: 540) : CGSize(width: 540, height: 960)
                     guard let img = self.renderOffscreen({ state.frame(canvas: canvas, size: size, sources: $0, atNs: t) }, size: size,
                                                          overlays: state.overlayLayers(canvas: canvas, atNs: t)) else { continue }
-                    AppDelegate.writePNG(img, folder.appendingPathComponent("\(canvas.rawValue)-\(ms).png"))
+                    // Written off the main thread: PNG encoding is the slow part.
+                    DispatchQueue.global(qos: .utility).async { AppDelegate.writePNG(img, folder.appendingPathComponent("\(canvas.rawValue)-\(ms).png")) }
                 }
                 log("live-dump: \(action) +\(Int(offset)) ms at recording \(ms) ms")
             }
