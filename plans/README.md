@@ -150,6 +150,8 @@ One line per plan on what turned out differently from the plan; the pull request
 - **30** Timeline engine: as planned; transitions end at cuts in the preview exactly as in the export.
 - **31** Editor UI: `@Observable` model with its own undo manager; removing and restoring sections works on the kept
   ranges directly so other split points survive; zoom blocks never overlap in the UI. Step 7 landed in plan 40.
+- **41** SDR brightness: one global "SDR white" setting (default 150 nits, was a fixed 203) for every HDR -> SDR
+  conversion; [plan](41-sdr-brightness.md).
 
 ### Known limits
 

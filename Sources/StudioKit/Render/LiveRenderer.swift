@@ -287,7 +287,7 @@ final class Renderer: NSObject {
         let canvas = pic.size, frame = pic.frame, vw = Double(canvas.width), vh = Double(canvas.height)
         MetalCore.shared.encodeLayers(cb, target: drawable.texture,
                                       viewport: MTLViewport(originX: ((dw - vw) / 2).rounded(.down), originY: ((dh - vh) / 2).rounded(.down), width: vw, height: vh, znear: 0, zfar: 1),
-                                      canvas: canvas, background: frame.background, outTransfer: transfer,
+                                      canvas: canvas, background: frame.background, outTransfer: transfer, sdrWhiteNits: SdrBrightness.current,
                                       layers: DrawLayer.pair(frame.layers, textures))
         if !keep.isEmpty { cb.addCompletedHandler { _ in _ = keep } }
         drawable.addPresentedHandler { [weak self] d in

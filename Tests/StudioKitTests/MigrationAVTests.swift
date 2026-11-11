@@ -7,6 +7,12 @@ import Metal
 
 // Full-HD game baselines: pre-engine 092984d plus the prerequisite hard-edge fix, through AVFoundation.
 final class MigrationAVTests: XCTestCase {
+    // The baselines predate the SDR brightness setting: export at the former fixed 203-nit SDR white. Only the
+    // in-process render cache changes; no defaults are written.
+    private var savedSdrWhite: Float = SdrBrightness.defaultNits
+    override func setUp() { savedSdrWhite = SdrBrightness.current; SdrBrightness.current = 203 }
+    override func tearDown() { SdrBrightness.current = savedSdrWhite }
+
     func testMigratedProjectFirstFrames() async throws {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("No Metal device") }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Migration-"+UUID().uuidString)

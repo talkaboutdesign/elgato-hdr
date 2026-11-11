@@ -49,7 +49,7 @@ enum OverlayTestSupport {
         let w = Int(canvas.width), h = Int(canvas.height)
         let target = texture(.rgba16Float, w, h, Data(count: w * h * 8), w * 8)
         let cb = MetalCore.shared.queue.makeCommandBuffer()!
-        MetalCore.shared.encodeLayers(cb, target: target, canvas: canvas, background: background, outTransfer: transfer, layers: layers)
+        MetalCore.shared.encodeLayers(cb, target: target, canvas: canvas, background: background, outTransfer: transfer, sdrWhiteNits: 203, layers: layers)
         cb.commit(); cb.waitUntilCompleted()
         XCTAssertEqual(cb.status, .completed)
         var raw = [UInt16](repeating: 0, count: w * h * 4)

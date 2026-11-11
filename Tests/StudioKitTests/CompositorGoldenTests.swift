@@ -66,7 +66,7 @@ final class CompositorGoldenTests: XCTestCase {
                 let layers = DrawLayer.pair(resolved,[.game:.biplanar(y:screen.0,c:screen.1,bits:10,transfer:0,bt709:false),
                                                       .camera:.biplanar(y:camera.0,c:camera.1,bits:8,transfer:2,bt709:true)])
                 try check(render { cb, target in
-                    core.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer:transfer,layers:layers)
+                    core.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer: transfer, sdrWhiteNits: 203, layers:layers)
                 }, "\(kind.rawValue)-\(transfer)")
             }
         }
@@ -87,7 +87,7 @@ final class CompositorGoldenTests: XCTestCase {
                                          .camera:.biplanar(y:camera.0,c:camera.1,bits:8,transfer:2,bt709:true)])
             XCTAssertEqual(layers[1].covers(CGRect(origin:.zero,size:Self.canvas)),gameOpacity == 1)
             return render { cb, target in
-                MetalCore.shared.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer:transfer,layers:layers)
+                MetalCore.shared.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer: transfer, sdrWhiteNits: 203, layers:layers)
             }
         }
         for transfer: Int32 in 0...2 {
@@ -132,7 +132,7 @@ final class CompositorGoldenTests: XCTestCase {
             XCTAssertEqual(layers.count,comp.layers.count,name)
             for transfer: Int32 in 0...2 {
                 let grid = render { cb, target in
-                    core.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer:transfer,layers:layers)
+                    core.encodeLayers(cb,target:target,canvas:Self.canvas,background:comp.backgroundColor,outTransfer: transfer, sdrWhiteNits: 203, layers:layers)
                 }
                 if transfer == 2 { sdr[name] = grid }
                 try check(grid,"layers-\(name)-\(transfer)")

@@ -92,7 +92,7 @@ extension AppDelegate {
         let ctx = sceneRuntime.overlayContext
         let o = OverlayTextureCache.shared.overlays(for: Composition(layers: overlays), canvas: size, assets: ctx.assets, tokens: ctx.tokens(atNs: nowNs()), wait: true)
         let f = make(live.sources.merging(o.sources) { a, _ in a })
-        core.encodeLayers(cb, target: t, canvas: size, background: f.background, outTransfer: 2, layers: DrawLayer.pair(f.layers, live.textures.merging(o.textures) { a, _ in a }))
+        core.encodeLayers(cb, target: t, canvas: size, background: f.background, outTransfer: 2, sdrWhiteNits: SdrBrightness.current, layers: DrawLayer.pair(f.layers, live.textures.merging(o.textures) { a, _ in a }))
         cb.commit(); cb.waitUntilCompleted()
         _ = live.keep
         return SceneThumbnailer.image(t)

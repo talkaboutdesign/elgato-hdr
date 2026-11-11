@@ -42,6 +42,13 @@ struct ExportSheet: View {
                     .transition(DS.Motion.transition(.opacity.combined(with: .move(edge: .top))))
             }
 
+            // An HDR recording exported as SDR is tone mapped with the same global setting as the stream.
+            if model.isHDRSource && chosen.contains(where: { $0.jobs(for: p, custom: custom).contains { $0.range == .sdr } }) {
+                SdrBrightnessControl()
+                    .padding(.horizontal, DS.Space.xl).padding(.top, DS.Space.l)
+                    .transition(DS.Motion.transition(.opacity))
+            }
+
             HStack {
                 Button { NSWorkspace.shared.open(model.doc.exportsDir.deletingLastPathComponent()) } label: {
                     Label("Saved in the project's Exports folder", systemImage: "folder").font(.system(size: 11))
@@ -64,6 +71,10 @@ struct ExportSheet: View {
         .frame(width: 600)
         .fixedSize(horizontal: false, vertical: true)
         .background(DS.Color.panel)
+        #if DEBUG
+        // `EHDR_EXPORT_CHOSEN=youtube1080,shorts`: presets ticked when the sheet opens, for harness screenshots.
+        .onAppear { if let v = ProcessInfo.processInfo.environment["EHDR_EXPORT_CHOSEN"] { chosen = Set(v.split(separator: ",").compactMap { ExportPreset(rawValue: String($0)) }) } }
+        #endif
     }
 
     private var jobCount: Int { chosen.reduce(0) { $0 + $1.jobs(for: model.project, custom: custom).count } }

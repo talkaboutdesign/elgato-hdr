@@ -170,7 +170,7 @@ final class LiveOverlayTests: XCTestCase {
                     let dt: UInt64 = UInt64(i) * 16_666_667 % 300_000_000
                     let pic = st.picture(canvas: c, size: size, sources: sources, atNs: t + dt, context: context, consumer: consumer)
                     lookupNs += nowNs() - l0
-                    core.encodeLayers(cb, target: out[k], canvas: size, background: pic.frame.background, outTransfer: 2, layers: DrawLayer.pair(pic.frame.layers, pic.textures))
+                    core.encodeLayers(cb, target: out[k], canvas: size, background: pic.frame.background, outTransfer: 2, sdrWhiteNits: 203, layers: DrawLayer.pair(pic.frame.layers, pic.textures))
                 }
                 cb.commit()
                 totalNs += nowNs() - begin

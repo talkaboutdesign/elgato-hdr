@@ -91,14 +91,14 @@ class LayerCompositor: NSObject, AVVideoCompositing {
                     request.finish(with: NSError(domain: "Compositor", code: 3)); return
                 }
                 keep += [yRef, cRef]
-                core.encodeLayers(cb, target: mid, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, layers: layers)
+                core.encodeLayers(cb, target: mid, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, sdrWhiteNits: SdrBrightness.current, layers: layers)
                 core.encodeConvert(cb, fragment: "lumaFrag", source: mid, target: yT)
                 core.encodeConvert(cb, fragment: "chromaFrag", source: mid, target: cT)
                 tag(out, hdrTransfer: ins.outTransfer)
             } else {
                 guard let (t, ref) = core.texture(out, .bgra8Unorm) else { request.finish(with: NSError(domain: "Compositor", code: 3)); return }
                 keep.append(ref)
-                core.encodeLayers(cb, target: t, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, layers: layers)
+                core.encodeLayers(cb, target: t, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, sdrWhiteNits: SdrBrightness.current, layers: layers)
                 tag(out, hdrTransfer: nil)
             }
             cb.addCompletedHandler { _ in
