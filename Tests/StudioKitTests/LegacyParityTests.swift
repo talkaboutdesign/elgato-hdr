@@ -116,7 +116,7 @@ extension CompositorGoldenTests {
             u.flags = SIMD4(p.showScreen ? 1 : 0, p.showCam ? 1 : 0, mirror ? 1 : 0, 0)
 
             let cb = core.queue.makeCommandBuffer()!
-            core.encodeLayers(cb, target: a, canvas: canvas, background: comp.backgroundColor, outTransfer: transfer, layers: layers)
+            core.encodeLayers(cb, target: a, canvas: canvas, background: comp.backgroundColor, outTransfer: transfer, sdrWhiteNits: 203, layers: layers)
             let rp = MTLRenderPassDescriptor()
             rp.colorAttachments[0].texture = b; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
             let enc = cb.makeRenderCommandEncoder(descriptor: rp)!

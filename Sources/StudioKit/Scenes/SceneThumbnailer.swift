@@ -64,7 +64,7 @@ final class SceneThumbnailer {
             let comp = s.composition(canvas)
             let o = OverlayTextureCache.shared.overlays(for: comp, canvas: size, assets: context.assets, tokens: tokens, consumer: .thumbnails)
             let all = sources.merging(o.sources) { own, _ in own }
-            core.encodeLayers(cb, target: targets[i], canvas: size, background: comp.backgroundColor, outTransfer: 2,
+            core.encodeLayers(cb, target: targets[i], canvas: size, background: comp.backgroundColor, outTransfer: 2, sdrWhiteNits: SdrBrightness.current,
                               layers: DrawLayer.pair(SceneResolver.resolve(comp, canvas: size, sources: all), textures.merging(o.textures) { own, _ in own }))
         }
         cb.commit(); cb.waitUntilCompleted()

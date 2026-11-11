@@ -29,7 +29,7 @@ final class SceneGoldenTests: XCTestCase {
     func render(_ frame: SceneFrame, _ tex: [SourceKey: LayerTextures.Kind], transfer: Int32) -> [Float] {
         let target = texture(.rgba16Float, 128, 72, Data(count: 128 * 72 * 8), 128 * 8)
         let cb = MetalCore.shared.queue.makeCommandBuffer()!
-        MetalCore.shared.encodeLayers(cb, target: target, canvas: Self.canvas, background: frame.background, outTransfer: transfer, layers: DrawLayer.pair(frame.layers, tex))
+        MetalCore.shared.encodeLayers(cb, target: target, canvas: Self.canvas, background: frame.background, outTransfer: transfer, sdrWhiteNits: 203, layers: DrawLayer.pair(frame.layers, tex))
         cb.commit(); cb.waitUntilCompleted()
         var raw = [UInt16](repeating: 0, count: 128 * 72 * 4)
         raw.withUnsafeMutableBytes { target.getBytes($0.baseAddress!, bytesPerRow: 128 * 8, from: MTLRegionMake2D(0, 0, 128, 72), mipmapLevel: 0) }

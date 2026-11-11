@@ -220,6 +220,7 @@ struct StreamSettingsSection: View {
             }
             .disabled(live)
             .help("Video bitrate for every destination. Each destination uploads its own copy.")
+            SdrBrightnessControl()
             if live {
                 Text("Resolution, frame rate and bitrate apply the next time you go live.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -251,5 +252,21 @@ struct StreamSettingsSection: View {
     private func twitchWarning(kbps: Int) -> String? {
         guard kbps > 6000, streaming.destinations.contains(where: { $0.enabled && $0.service == .twitch }) else { return nil }
         return "Twitch may reject more than 6,000 kbps."
+    }
+}
+
+/// How bright HDR games look once converted to SDR (streams, SDR exports). Edits the one global setting, live: the
+/// next streamed frame already uses it. Double-click the label to reset to 100%.
+struct SdrBrightnessControl: View {
+    var setting = SdrBrightness.shared
+    var body: some View {
+        @Bindable var s = setting
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledSlider(label: "SDR brightness", value: $s.percent, range: SdrBrightness.percentRange,
+                          defaultValue: SdrBrightness.percent(nits: SdrBrightness.defaultNits), format: { String(format: "%.0f%%", $0) })
+                .accessibilityHint("How bright HDR games look on streams and SDR exports. Double-click to reset.")
+            Text("How bright HDR games look on streams and SDR exports.")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

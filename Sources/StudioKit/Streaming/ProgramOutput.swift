@@ -163,7 +163,7 @@ final class ProgramOutput {
         // Without a game frame (no signal) the scene renders without its game layers: the background shows.
         let pic = picture(size, sources, hostNs), token = generation
         textures.merge(pic.textures) { own, _ in own }
-        core.encodeLayers(cb, target: target, canvas: size, background: pic.frame.background, outTransfer: 2,
+        core.encodeLayers(cb, target: target, canvas: size, background: pic.frame.background, outTransfer: 2, sdrWhiteNits: SdrBrightness.current,
                           layers: DrawLayer.pair(pic.frame.layers, textures), renderPass: slot.renderPass, layerPipelines: layerPipelines)
         if let chroma = slot.chroma {
             guard let conversion, let enc = cb.makeComputeCommandEncoder() else {

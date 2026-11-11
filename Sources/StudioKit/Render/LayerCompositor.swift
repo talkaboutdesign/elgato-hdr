@@ -21,9 +21,13 @@ final class CompositionInstruction: NSObject, AVVideoCompositionInstructionProto
     let hdrOutput: Bool
     /// A frame was composed before one of its overlays was ready (preview only; exports wait).
     let onOverlaysPending: (() -> Void)?
+    /// Fixed for an export so moving the slider mid-export cannot change brightness inside the file; nil (preview)
+    /// follows the live setting.
+    let sdrWhiteNits: Float?
 
     init(timeRange: CMTimeRange, screenTrack: CMPersistentTrackID, cameraTrack: CMPersistentTrackID, plan: RenderPlan,
-         outTransfer: Int32, screenTransfer: Int32, screenSize: CGSize, cameraSize: CGSize?, onOverlaysPending: (() -> Void)? = nil) {
+         outTransfer: Int32, screenTransfer: Int32, screenSize: CGSize, cameraSize: CGSize?, onOverlaysPending: (() -> Void)? = nil, sdrWhiteNits: Float? = nil) {
+        self.sdrWhiteNits = sdrWhiteNits
         self.timeRange = timeRange; self.screenTrack = screenTrack; self.cameraTrack = cameraTrack; self.onOverlaysPending = onOverlaysPending
         self.plan = plan; self.canvas = plan.canvasSize; self.outTransfer = outTransfer; self.screenTransfer = screenTransfer
         self.screenSize = screenSize; self.cameraSize = cameraSize; hdrOutput = outTransfer != 2
@@ -91,14 +95,14 @@ class LayerCompositor: NSObject, AVVideoCompositing {
                     request.finish(with: NSError(domain: "Compositor", code: 3)); return
                 }
                 keep += [yRef, cRef]
-                core.encodeLayers(cb, target: mid, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, layers: layers)
+                core.encodeLayers(cb, target: mid, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, sdrWhiteNits: ins.sdrWhiteNits ?? SdrBrightness.current, layers: layers)
                 core.encodeConvert(cb, fragment: "lumaFrag", source: mid, target: yT)
                 core.encodeConvert(cb, fragment: "chromaFrag", source: mid, target: cT)
                 tag(out, hdrTransfer: ins.outTransfer)
             } else {
                 guard let (t, ref) = core.texture(out, .bgra8Unorm) else { request.finish(with: NSError(domain: "Compositor", code: 3)); return }
                 keep.append(ref)
-                core.encodeLayers(cb, target: t, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, layers: layers)
+                core.encodeLayers(cb, target: t, canvas: ins.canvas, background: ins.plan.background(atTimelineMs: request.compositionTime.seconds * 1000), outTransfer: ins.outTransfer, sdrWhiteNits: ins.sdrWhiteNits ?? SdrBrightness.current, layers: layers)
                 tag(out, hdrTransfer: nil)
             }
             cb.addCompletedHandler { _ in

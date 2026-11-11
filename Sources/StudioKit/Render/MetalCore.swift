@@ -48,11 +48,15 @@ float3 linearToHlg(float3 l) {
 }
 float3 sdrToLinear(float3 e) { return m709to2020 * pow(e, 2.4) * 0.0203; }
 
-// HDR -> SDR: identity below a knee, smooth roll-off up to a 1000-nit peak, applied on max(RGB) to keep hue.
-float3 linearToSdr(float3 l) {
-    float3 c = max(m2020to709 * (l / 0.0203), 0.0);
+// HDR -> SDR: `sdrWhite` nits of the source become SDR white. BT.2408 says 203, but many games keep midtones and UI
+// well below that and looked dim; the user's "SDR brightness" setting picks it. Identity below a knee, then a smooth
+// roll-off up to a 1000-nit source peak (W in SDR-white units, so highlights still compress at any gain), applied on
+// max(RGB) to keep hue. At 203 this is exactly the former fixed curve.
+float3 linearToSdr(float3 l, float sdrWhite) {
+    float3 c = max(m2020to709 * (l * (203.0 / sdrWhite) / 0.0203), 0.0);
     float m = max(c.r, max(c.g, c.b));
-    const float k = 0.7, W = 1000.0 / 203.0, a = (1.0 - k) / (W - 1.0);
+    const float k = 0.7;
+    float W = 1000.0 / sdrWhite, a = (1.0 - k) / (W - 1.0);
     if (m > k) {
         float x = min((m - k) / (W - k), 1.0);
         c *= (k + (1.0 - k) * x * (1.0 + a) / (x + a)) / m;
@@ -61,9 +65,11 @@ float3 linearToSdr(float3 l) {
 }
 
 float3 toLinear(float3 e, int t) { return t == 0 ? pqToLinear(e) : t == 1 ? hlgToLinear(e) : sdrToLinear(e); }
-float3 encodeOut(float3 l, int t) { return t == 0 ? linearToPq(l) : t == 1 ? linearToHlg(l) : linearToSdr(l); }
-/// Converts a non-linear color from transfer `from` into the output transfer; untouched if they already match.
-float3 convert(float3 e, int from, int to) { return from == to ? e : encodeOut(toLinear(e, from), to); }
+float3 encodeOut(float3 l, int t, float sdrWhite) { return t == 0 ? linearToPq(l) : t == 1 ? linearToHlg(l) : linearToSdr(l, sdrWhite); }
+/// Converts a non-linear color from transfer `from` into the output transfer; untouched if they already match, so
+/// SDR sources never reach `linearToSdr` and `sdrWhite` only affects HDR sources drawn into SDR output.
+float3 convert(float3 e, int from, int to, float sdrWhite) { return from == to ? e : encodeOut(toLinear(e, from), to, sdrWhite); }
+float3 convert(float3 e, int from, int to) { return convert(e, from, to, 203.0); }
 
 float sdRoundRect(float2 p, float2 c, float2 h, float r) {
     float2 q = abs(p - c) - h + r;
@@ -72,7 +78,7 @@ float sdRoundRect(float2 p, float2 c, float2 h, float r) {
 
 // Mirrors `LayerParams` in Swift. One layer: its source, shape and shadow, drawn source-over onto what lies below.
 struct LayerU {
-    float4 canvas;      // w, h, -, -
+    float4 canvas;      // w, h, SDR white in source nits (HDR into SDR output only), -
     float4 dst, src;    // destination in canvas pixels, normalized source crop (x, y, w, h)
     float4 shape;       // corner radius px, border px, shadow px, opacity
     float4 color;       // color layers: SDR BT.709 code values and alpha
@@ -87,6 +93,7 @@ struct LayerU {
 fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]], texture2d<float> tC [[texture(1)]], constant LayerU &u [[buffer(0)]]) {
     float2 p = in.uv * u.canvas.xy;
     int out = u.fmt.z;
+    float sdrWhite = u.canvas.z > 0.0 ? u.canvas.z : 203.0;
     float2 h = u.dst.zw * 0.5, c = u.dst.xy + h;
     float r = min(u.shape.x, min(h.x, h.y)), border = u.shape.y, shadow = u.shape.z, opacity = u.shape.w;
     float d = sdRoundRect(p, c, h, r);
@@ -108,7 +115,7 @@ fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]],
                 float4 px = tY.sample(ls, uv);
                 cc = convert(px.a > 0.0 ? clamp(px.rgb / px.a, 0.0, 1.0) : float3(0.0), 2, out); a *= px.a;
             } else {
-                cc = convert(yuvToRgb(tY, tC, uv, u.fmt.w, u.flags.x != 0), u.fmt.y, out);
+                cc = convert(yuvToRgb(tY, tC, uv, u.fmt.w, u.flags.x != 0), u.fmt.y, out, sdrWhite);
             }
         }
         if (border > 0.0) cc = mix(convert(float3(1.0), 2, out), cc, clamp(-(d + border) + 0.5, 0.0, 1.0));
@@ -161,7 +168,7 @@ kernel void streamNV12(texture2d<float, access::read> rgb [[texture(0)]],
 
 /// Uniforms for `layerFrag`; layout matches the Metal `LayerU` struct.
 struct LayerParams {
-    var canvas = SIMD4<Float>(1, 1, 0, 0)
+    var canvas = SIMD4<Float>(1, 1, 0, 0)     // w, h, SDR white nits (0 means 203), -
     var dst = SIMD4<Float>(0, 0, 1, 1), src = SIMD4<Float>(0, 0, 1, 1)
     var shape = SIMD4<Float>(0, 0, 0, 1)
     var color = SIMD4<Float>(0, 0, 0, 1)
@@ -303,8 +310,10 @@ final class MetalCore {
     /// Draws the background, then each layer bottom first, into `target` in one render pass, in the output encoding
     /// `outTransfer`. `viewport` places the canvas inside the target (the live view letterboxes it). Every layer is a
     /// full-viewport quad scissored to its frame plus shadow, so small layers on large canvases stay cheap.
+    /// `sdrWhiteNits`: the HDR source luminance that becomes SDR white when PQ/HLG layers are drawn into SDR output;
+    /// read per frame, so a change shows on the next frame.
     func encodeLayers(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil,
-                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, layers: [DrawLayer], renderPass: MTLRenderPassDescriptor? = nil, layerPipelines: LayerPipelines? = nil) {
+                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, sdrWhiteNits: Float = SdrBrightness.current, layers: [DrawLayer], renderPass: MTLRenderPassDescriptor? = nil, layerPipelines: LayerPipelines? = nil) {
         let rp = renderPass ?? layerRenderPass(target: target)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
         defer { enc.endEncoding() }
@@ -327,7 +336,7 @@ final class MetalCore {
         }
         let full = CGRect(origin: .zero, size: canvas)
         var base = LayerParams()
-        base.canvas = SIMD4(Float(canvas.width), Float(canvas.height), 0, 0)
+        base.canvas = SIMD4(Float(canvas.width), Float(canvas.height), SdrBrightness.clamp(sdrWhiteNits), 0)
         base.fmt.z = outTransfer
         // Nothing beneath an opaque layer that covers the canvas can show, so start there (the live game usually
         // does), and draw it without blending. Exact when canvas pixels are target pixels: every pixel centre then
