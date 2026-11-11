@@ -11,10 +11,15 @@ final class SdrBrightness {
     static let range: ClosedRange<Float> = 80...300
     static let shared = SdrBrightness(store: .standard, publishes: true)
 
-    /// What renderers read on their own threads, without a lock. Written only on the main thread; an aligned 32-bit
-    /// Float load or store is one instruction on arm64 (and x86-64), so a reader sees the old or the new value,
-    /// never a torn mix. A change therefore shows on the next frame each renderer draws.
-    nonisolated(unsafe) static var current: Float = shared.nits
+    /// What renderers read on their own threads; written on the main thread when the slider moves. Behind a lock:
+    /// the hold is a single load or store, so a render thread never waits on anything slow. A change shows on the
+    /// next frame each renderer draws.
+    static var current: Float {
+        get { lock.lock(); defer { lock.unlock() }; return cached }
+        set { lock.lock(); cached = newValue; lock.unlock() }
+    }
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cached: Float = read(.standard)
 
     @ObservationIgnored private let store: UserDefaults
     @ObservationIgnored private let publishes: Bool
