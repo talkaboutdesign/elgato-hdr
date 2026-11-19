@@ -49,6 +49,12 @@ struct ExportSheet: View {
                     .transition(DS.Motion.transition(.opacity))
             }
 
+            if !PictureAdjust.shared.grades.isNeutral {
+                Text("Picture adjustments from the Studio sidebar are applied.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, DS.Space.xl).padding(.top, DS.Space.l)
+            }
+
             HStack {
                 Button { NSWorkspace.shared.open(model.doc.exportsDir.deletingLastPathComponent()) } label: {
                     Label("Saved in the project's Exports folder", systemImage: "folder").font(.system(size: 11))

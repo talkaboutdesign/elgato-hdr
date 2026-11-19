@@ -197,3 +197,29 @@ All existing tests, including every golden test, must pass without changing a go
 
 The neutral path cannot stay bit-identical; a live path bypasses `layerFrag` in a way that would need a second
 render pass; or the cost limit in check 4 is exceeded.
+
+## Acceptance results
+
+- `swift build`, `swift test`: pass (353 tests, 0 failures, 10 opt-in skips; every
+  golden test passes and no golden file changed). CI result: see the pull request.
+- Live paths: every path that shows the game goes through `encodeLayers` -> `layerFrag` (`Renderer.drawNow` for
+  Smooth, Game and Lowest presentation and the clean focus picture; `ProgramOutput.render` for streams;
+  `SceneThumbnailer` and the debug renders read the raw `GameSnapshot` copy and grade it in `encodeLayers`). No path
+  bypasses the shader, so no pass was added.
+- Live cost, release bundle, demo source 2560x1440@60 with the demo camera, Game mode, about 70 s each (first 3 s
+  dropped). The screen was unlocked, so "helper->screen" was measured:
+
+  | run | helper->screen | draw ms/frame | window draw (reader) |
+  |---|---|---|---|
+  | `main` (0500fd5) | 32.47 ms | 0.377 | 387 µs |
+  | this branch, neutral | 33.43 ms | 0.371 | 348 µs |
+  | this branch, game and camera graded | 26.70 ms | 0.366 | 352 µs |
+
+  CPU-side draw cost is unchanged; "helper->screen" moves by several ms between runs with the vsync phase in every
+  configuration (the graded run happened to be the fastest), so it shows no regression but cannot resolve 0.3 ms.
+  GPU time of the shader itself (`EHDR_MEASURE_GRADE=1 swift test --filter PictureAdjustTests/testGradeCost`, one
+  2560x1440 PQ layer, median of 120): +0.035 / +0.137 ms into PQ, -0.026 / +0.063 ms into SDR over two runs, under
+  the 0.3 ms limit.
+- `scripts/stream-scenes-check.sh`: PASS, neutral and with both sources graded (`CHECK_ARGS` with the grades).
+- Snapshots (sidebar, Game and Camera, default and minimum window) and before/after renders are attached to the pull
+  request. At the minimum window size the Picture section scrolls with the tab.

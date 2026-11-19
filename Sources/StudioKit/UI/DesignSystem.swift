@@ -400,6 +400,8 @@ struct LabeledSlider: View {
     let defaultValue: Double
     var format: (Double) -> String = { String(format: "%.0f%%", $0 * 100) }
     var onEditingChanged: (Bool) -> Void = { _ in }
+    /// One line on what the control does; the tooltip adds how to reset it.
+    var help: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -413,7 +415,7 @@ struct LabeledSlider: View {
             .onTapGesture(count: 2) { withAnimation(DS.Motion.snappy) { value = defaultValue } }
             Slider(value: $value, in: range, onEditingChanged: onEditingChanged).controlSize(.small)
         }
-        .help("\(label): double-click to reset")
+        .help(help.map { "\($0). Double-click to reset." } ?? "\(label): double-click to reset")
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
         .accessibilityValue(format(value))

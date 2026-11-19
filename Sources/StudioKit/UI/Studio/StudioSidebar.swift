@@ -30,6 +30,10 @@ struct StudioSidebar: View {
                 .transition(.opacity)
             }
             .scrollIndicators(.automatic)
+            #if DEBUG
+            // `EHDR_SIDEBAR_BOTTOM=1`: open scrolled to the end of the tab (the Picture section), for harness snapshots.
+            .defaultScrollAnchor(ProcessInfo.processInfo.environment["EHDR_SIDEBAR_BOTTOM"] != nil ? .bottom : nil)
+            #endif
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
         .background(DS.Color.panel)
@@ -68,7 +72,74 @@ struct PictureSection: View {
                     .init(value: .immediate, label: "Lowest", help: "Lowest latency: may tear in full screen, about 5 ms (⌘L)"),
                 ])
             }
+            Divider().opacity(0.4)
+            PictureControls()
         }
+    }
+}
+
+/// Exposure, contrast, tone and colour for the game or the camera (`PictureAdjust`). They change the live window,
+/// streams, thumbnails, the editor preview and exports on the next frame; recordings stay raw.
+struct PictureControls: View {
+    var adjust = PictureAdjust.shared
+    @State private var source = PictureAdjust.Source.game
+
+    private struct Control {
+        let label: String, key: WritableKeyPath<PictureGrade, Double>, range: ClosedRange<Double>, format: String, help: String
+        var steps: Double = 1      // per unit
+    }
+    private static let controls: [Control] = [
+        Control(label: "Exposure", key: \.exposure, range: PictureGrade.exposureRange, format: "%+.1f EV",
+                help: "Brightens or darkens the whole picture, in stops", steps: 10),
+        Control(label: "Contrast", key: \.contrast, range: PictureGrade.percentRange, format: "%+.0f",
+                help: "Spreads or flattens tones around the midtones"),
+        Control(label: "Highlights", key: \.highlights, range: PictureGrade.percentRange, format: "%+.0f",
+                help: "Brightens or recovers the brightest parts"),
+        Control(label: "Shadows", key: \.shadows, range: PictureGrade.percentRange, format: "%+.0f",
+                help: "Lifts or deepens the darkest parts"),
+        Control(label: "Saturation", key: \.saturation, range: PictureGrade.saturationRange, format: "%.0f%%",
+                help: "Colour intensity: 0% is black and white"),
+        Control(label: "Temperature", key: \.temperature, range: PictureGrade.percentRange, format: "%+.0f",
+                help: "White balance: warmer (orange) or cooler (blue)"),
+        Control(label: "Tint", key: \.tint, range: PictureGrade.percentRange, format: "%+.0f",
+                help: "White balance: magenta or green"),
+    ]
+
+    var body: some View {
+        let grade = adjust.grade(source)
+        VStack(alignment: .leading, spacing: DS.Space.m) {
+            HStack {
+                Text("Adjust").font(.system(size: 12)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Reset") { withAnimation(DS.Motion.snappy) { adjust.reset(source) } }
+                    .buttonStyle(.link).font(.system(size: 11))
+                    .disabled(grade.isNeutral)
+                    .help(source == .game ? "Reset the game's picture adjustments" : "Reset the camera's picture adjustments")
+            }
+            SegmentedSwitch(selection: $source, options: [
+                .init(value: .game, label: "Game", help: "Adjust the game picture"),
+                .init(value: .camera, label: "Camera", help: "Adjust the camera picture"),
+            ])
+            ForEach(Self.controls, id: \.label) { c in
+                LabeledSlider(label: c.label, value: binding(c), range: c.range, defaultValue: PictureGrade.neutral[keyPath: c.key],
+                              format: { String(format: c.format, $0) }, help: c.help)
+            }
+            if source == .game { SdrBrightnessControl() }
+        }
+        #if DEBUG
+        // `EHDR_PICTURE_SOURCE=camera`: the camera's controls when the section appears, for harness snapshots.
+        .onAppear { if ProcessInfo.processInfo.environment["EHDR_PICTURE_SOURCE"] == "camera" { source = .camera } }
+        #endif
+    }
+
+    /// Whole steps (tenths of a stop for exposure), so the read-out does not flicker between neighbours.
+    private func binding(_ c: Control) -> Binding<Double> {
+        let source = source, adjust = adjust
+        return Binding(get: { adjust.grade(source)[keyPath: c.key] }, set: { (v: Double) in
+            var g = adjust.grade(source)
+            g[keyPath: c.key] = (v * c.steps).rounded() / c.steps
+            adjust.set(source, g)
+        })
     }
 }
 
