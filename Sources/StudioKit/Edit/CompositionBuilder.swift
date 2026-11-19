@@ -141,7 +141,8 @@ enum CompositionBuilder {
         vc.instructions = [CompositionInstruction(timeRange: CMTimeRange(start: .zero, duration: built.duration), screenTrack: built.screenTrack,
                                                   cameraTrack: built.cameraTrack, plan: plan,
                                                   outTransfer: out, screenTransfer: p.color.transfer, screenSize: built.screenSize, cameraSize: built.cameraSize,
-                                                  onOverlaysPending: onOverlaysPending, sdrWhiteNits: waitForOverlays ? SdrBrightness.current : nil)]
+                                                  onOverlaysPending: onOverlaysPending, sdrWhiteNits: waitForOverlays ? SdrBrightness.current : nil,
+                                                  grades: waitForOverlays ? PictureAdjust.current : nil)]
         return vc
     }
 

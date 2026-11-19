@@ -59,12 +59,12 @@ final class SceneThumbnailer {
             sources[.camera] = SourceInfo(size: CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb)))
             textures[.camera] = .biplanar(y: p.0, c: p.1, bits: p.3, transfer: 2, bt709: true)
         }
-        let tokens = context.tokens(atNs: nowNs())
+        let tokens = context.tokens(atNs: nowNs()), white = SdrBrightness.current, grades = PictureAdjust.current
         for (i, s) in scenes.enumerated() {
             let comp = s.composition(canvas)
             let o = OverlayTextureCache.shared.overlays(for: comp, canvas: size, assets: context.assets, tokens: tokens, consumer: .thumbnails)
             let all = sources.merging(o.sources) { own, _ in own }
-            core.encodeLayers(cb, target: targets[i], canvas: size, background: comp.backgroundColor, outTransfer: 2, sdrWhiteNits: SdrBrightness.current,
+            core.encodeLayers(cb, target: targets[i], canvas: size, background: comp.backgroundColor, outTransfer: 2, sdrWhiteNits: white, grades: grades,
                               layers: DrawLayer.pair(SceneResolver.resolve(comp, canvas: size, sources: all), textures.merging(o.textures) { own, _ in own }))
         }
         cb.commit(); cb.waitUntilCompleted()

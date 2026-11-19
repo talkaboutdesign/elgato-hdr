@@ -70,6 +70,23 @@ float3 encodeOut(float3 l, int t, float sdrWhite) { return t == 0 ? linearToPq(l
 /// SDR sources never reach `linearToSdr` and `sdrWhite` only affects HDR sources drawn into SDR output.
 float3 convert(float3 e, int from, int to, float sdrWhite) { return from == to ? e : encodeOut(toLinear(e, from), to, sdrWhite); }
 float3 convert(float3 e, int from, int to) { return convert(e, from, to, 203.0); }
+/// The exact inverse of `sdrToLinear`, without `linearToSdr`'s roll-off and SDR brightness: a graded SDR source drawn
+/// to SDR output must not be tone mapped, or a nearly neutral grade would jump away from the ungraded picture.
+float3 linearToSdrPlain(float3 l) { return pow(clamp(m2020to709 * l / 0.0203, 0.0, 1.0), 1.0 / 2.4); }
+
+// Manual picture controls, in linear light (BT.2020, 1.0 = 10000 nits). The pivot is 18% grey of SDR white.
+// The tone step is monotonic for every allowed value: its log-log slope is at least 1 - 3 ln2 / 4 > 0, because
+// shadows and highlights differ by at most 3 stops, so no control can invert tones.
+float3 grade(float3 l, float4 gain, float4 tone) {
+    const float p = 0.18 * 0.0203;
+    l *= gain.rgb;                                              // white balance and exposure
+    float Y = max(luma2020(l), 1e-7);
+    float x = Y / p;
+    float Y2 = Y * exp2((tone.x + tone.y * x) / (1.0 + x));     // shadows weigh p/(p+Y), highlights Y/(p+Y)
+    Y2 = p * pow(Y2 / p, gain.w);                               // contrast around the pivot
+    l *= Y2 / Y;                                                // on luminance, so hue is kept
+    return max(mix(float3(Y2), l, tone.z), 0.0);                // saturation
+}
 
 float sdRoundRect(float2 p, float2 c, float2 h, float r) {
     float2 q = abs(p - c) - h + r;
@@ -85,6 +102,8 @@ struct LayerU {
     int4 fmt;           // kind (0 biplanar YCbCr, 1 premultiplied RGBA, 2 color), source transfer, output transfer, bits
     float4 ringColor, ringShape;
     int4 flags;         // source uses BT.709 matrix, mirror, hard edge, -
+    float4 gradeGain;   // picture controls (video layers only): white balance times exposure, contrast exponent
+    float4 gradeTone;   // shadows and highlights in stops, saturation, 1 when graded (0 takes the ungraded path)
 };
 
 // Returns non-premultiplied colour and alpha for source-over blending. With coverage a and shadow s the result over
@@ -115,7 +134,12 @@ fragment float4 layerFrag(V in [[stage_in]], texture2d<float> tY [[texture(0)]],
                 float4 px = tY.sample(ls, uv);
                 cc = convert(px.a > 0.0 ? clamp(px.rgb / px.a, 0.0, 1.0) : float3(0.0), 2, out); a *= px.a;
             } else {
-                cc = convert(yuvToRgb(tY, tC, uv, u.fmt.w, u.flags.x != 0), u.fmt.y, out, sdrWhite);
+                float3 e = yuvToRgb(tY, tC, uv, u.fmt.w, u.flags.x != 0);
+                if (u.gradeTone.w == 0.0) cc = convert(e, u.fmt.y, out, sdrWhite);
+                else {
+                    float3 l = grade(toLinear(e, u.fmt.y), u.gradeGain, u.gradeTone);
+                    cc = (u.fmt.y == 2 && out == 2) ? linearToSdrPlain(l) : encodeOut(l, out, sdrWhite);
+                }
             }
         }
         if (border > 0.0) cc = mix(convert(float3(1.0), 2, out), cc, clamp(-(d + border) + 0.5, 0.0, 1.0));
@@ -175,6 +199,7 @@ struct LayerParams {
     var fmt = SIMD4<Int32>(2, 2, 2, 8)
     var ringColor = SIMD4<Float>(0, 0, 0, 0), ringShape = SIMD4<Float>(0, 0, 0, 0)
     var flags = SIMD4<Int32>(0, 0, 0, 0)
+    var gradeGain = SIMD4<Float>(1, 1, 1, 1), gradeTone = SIMD4<Float>(0, 0, 1, 0)   // neutral: `PictureGrade.uniforms`
 }
 
 struct LayerTextures {
@@ -311,9 +336,11 @@ final class MetalCore {
     /// `outTransfer`. `viewport` places the canvas inside the target (the live view letterboxes it). Every layer is a
     /// full-viewport quad scissored to its frame plus shadow, so small layers on large canvases stay cheap.
     /// `sdrWhiteNits`: the HDR source luminance that becomes SDR white when PQ/HLG layers are drawn into SDR output;
-    /// read per frame, so a change shows on the next frame.
+    /// read per frame, so a change shows on the next frame. `grades`: the picture controls, applied to the game and
+    /// camera video layers only; neutral grades leave the shader on its ungraded path.
     func encodeLayers(_ cb: MTLCommandBuffer, target: MTLTexture, viewport: MTLViewport? = nil,
-                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, sdrWhiteNits: Float = SdrBrightness.current, layers: [DrawLayer], renderPass: MTLRenderPassDescriptor? = nil, layerPipelines: LayerPipelines? = nil) {
+                      canvas: CGSize, background: SIMD4<Float>, outTransfer: Int32, sdrWhiteNits: Float = SdrBrightness.current, grades: PictureGrades = PictureAdjust.current,
+                      layers: [DrawLayer], renderPass: MTLRenderPassDescriptor? = nil, layerPipelines: LayerPipelines? = nil) {
         let rp = renderPass ?? layerRenderPass(target: target)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
         defer { enc.endEncoding() }
@@ -338,6 +365,7 @@ final class MetalCore {
         var base = LayerParams()
         base.canvas = SIMD4(Float(canvas.width), Float(canvas.height), SdrBrightness.clamp(sdrWhiteNits), 0)
         base.fmt.z = outTransfer
+        let gameGrade = grades.game.uniforms, cameraGrade = grades.camera.uniforms
         // Nothing beneath an opaque layer that covers the canvas can show, so start there (the live game usually
         // does), and draw it without blending. Exact when canvas pixels are target pixels: every pixel centre then
         // sits half a pixel inside the canvas, where such a layer's coverage and alpha are 1.
@@ -359,6 +387,7 @@ final class MetalCore {
             switch l.textures {
             case let .biplanar(y, c, bits, transfer, bt709):
                 u.fmt.x = 0; u.fmt.y = transfer; u.fmt.w = bits; u.flags.x = bt709 ? 1 : 0; t0 = y; t1 = c
+                if r.key == .game { (u.gradeGain, u.gradeTone) = gameGrade } else if r.key == .camera { (u.gradeGain, u.gradeTone) = cameraGrade }
             case let .rgba(t): u.fmt.x = 1; t0 = t
             case .none: u.fmt.x = 2; u.color = r.color ?? SIMD4(0, 0, 0, 0)
             }
