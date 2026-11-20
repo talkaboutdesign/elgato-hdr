@@ -120,3 +120,67 @@ and exports play them in sync **without touching the media files**:
 
 A fix would need to change the capture helper (`tools/uvc_capture.c`) or the shared-memory protocol; part 3 cannot
 be done without rewriting media files; or the evidence contradicts the diagnosis above.
+
+## Acceptance results
+
+Root cause confirmed. In `Recorder.appendAudio`, `err = expected - pts > 0` meant fewer samples written than time
+passed, and `adj > 0` dropped samples, so the correction fed itself. Reproduced against the unmodified recorder in
+`RecordingSyncTests.testGameAudioStaysOnTheVideoClockAfterASmallLoss` (3 ms of audio lost at 5 s): audio ended at
+59.484 s for 60.033 s of video, `audio slew 24052 samples`, which is exactly 7 of every 768 samples. The real files
+show the same rate: rate-compensated cross-correlation of game audio against its echo in `mic.mov` finds a local
+rate of 0.9910 in every 30 s window after the runaway began. In 10.57.00 the rate is 1.0000 until about 190 s and the
+offset is flat, so the runaway began there; in 12.23.34 it began within the first 30 s.
+
+1. **Build and tests.** `swift build`: `Build complete!`. `swift test`: `Executed 389 tests, with 11 tests skipped
+   and 0 failures (0 unexpected) in 95.984 (96.026) seconds` (the 11 skips are the existing measurement tests).
+   CI: see pull request #23.
+2. **Demo recording, 11 minutes** (release bundle, `--demo-source 1920x1080@30 --demo-camera --record 660`):
+   ```
+   mic sync: audio 0.121–660.121 s, 0 dropped, slew 0 samples, 1 gaps: 1601 silence / 0 cut
+   game sync: video 0.133–660.133 s (660.000 s), audio 0.105–660.105 s (660.000 s), audio ends -28 ms from video
+   saved game.mov (19768 frames, 0 dropped, 32 gaps, 21 dups, audio slew 0 samples, 0 audio gaps: 0 silence / 0 cut, 16.4 MB)
+   ```
+   (-28 ms is the last video frame's own duration: the last frame starts at 660.100 s.) Tone onset in game audio minus
+   the flash frame in the picture, measured with `ffprobe` signalstats and the decoded audio:
+   start -1.2 ms (59 seconds paired), middle -1.2 ms (60), end -1.2 ms (60); 659 of 661 tones within one frame, slope
+   +0.000 ms/min. The two unpaired tones are the one already playing when recording began and one second whose flash
+   frame the demo source skipped (a video gap). Demo mic tone minus game tone: start +0.5 ms, middle +0.6 ms, end
+   +1.4 ms, no step. **Limit:** the demo source stamps audio on an exact 10 ms schedule from the host clock, so it has
+   neither USB jitter nor an independent sample clock; this shows the recorder stays put, not that it follows a real
+   device. The unit tests simulate those (±100 ppm, ±8 ms jitter, stalls, gaps); the real proof is a recording with
+   the capture card: the log's `game sync:` line should say the audio ends within about one frame of the video and
+   `audio slew` should be a small number (tens of ppm: about 2–10 samples per minute).
+3. **The two real recordings** (APFS clones in a scratch folder, opened with the debug bundle's headless export):
+   ```
+   game audio sync: Capture 2026-11-20 10.57.00 has 2445.545 s of game audio for 2466.267 s of video; re-timed from 192.9 s on
+   game audio sync: Capture 2026-11-20 12.23.34 has 2913.751 s of game audio for 2940.267 s of video; re-timed from 31.1 s on
+   ```
+   Stored maps: 10.57.00 `[[0, 0], [192.856, 192.856], [2445.545, 2466.267]]`, 12.23.34
+   `[[0, 0], [31.110, 31.110], [2913.751, 2940.267]]`; the composed game audio ends at the video's end (checked on a
+   fixture in `GameAudioRepairTests.testShortGameAudioComposesToTheVideoLength`). Exports of 30 s near the start,
+   in the middle and near the end of each: in the exported audio the local rate against `mic.mov` is 0.999–1.001
+   (envelope correlation, 0.0005 steps) where the raw files run at 0.991.
+
+   Residual after correction, measured by correlating game audio with its echo in `mic.mov` in 20 s windows every
+   30 s (windows with a weak peak or within 20 s of a mic hole left out), after removing the mic's own steps (see 4),
+   which are fitted per recording:
+
+   | | app's two-piece map | uniform stretch |
+   |---|---|---|
+   | 10.57.00, 70 windows | rms 27 ms, max 56 ms | rms 242 ms, max 1183 ms (at the start) |
+   | 12.23.34, 83 windows | rms 36 ms, max 87 ms | rms 23 ms, max 69 ms |
+
+   Caveat: the mic steps are fitted together with the residual, so an error in the game audio that coincides with a
+   mic hole would be absorbed into the step. The uniform stretch is slightly better on 12.23.34 (the runaway began
+   in the first seconds there) and a second off on 10.57.00, so the two-piece map ships.
+4. **Mic layer.** `mic.mov` (Studio Display Microphone) is short by 2.45 s and 2.16 s. Its AAC packets are back to
+   back with no timestamp gaps, so every buffer that never arrived pulled the rest of the voice earlier. The mic
+   holes are steps, not drift: the offset against game audio jumps by 0.4–0.7 s exactly where the log shows
+   `game mode: N drawable(s) never reported shown` (about every ten minutes: 608, 1217–1231, 1825–1838, 1888,
+   2446–2495 s), the display that also hosts the microphone dropping out for a moment. Between those moments the mic
+   runs at the game audio's rate (1.0000 ± 0.00015 before the runaway in 10.57.00). Fitted steps: 10.57.00 0.51,
+   0.60, 0.50 s, 1.61 s in all, with the remaining 0.85 s after the last window that can be measured (the event at
+   2446 s); 12.23.34 0.73, 0.49, 0.25 + 0.25 (two events too close to separate), 0.45 s, 2.18 s against a 2.16 s
+   shortfall. So nothing measurable is lost at stop. Fixed by placing mic buffers with the same `AudioClock`
+   (holes become silence). The existing two recordings' mic layers are not corrected; their voice drifts early by up
+   to 2 s by the end, and the inspector's mic offset cannot fix a step.
