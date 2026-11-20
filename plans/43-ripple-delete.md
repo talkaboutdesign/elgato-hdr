@@ -131,3 +131,38 @@ Extend `EditorTimelineTests.swift` and add files as needed.
 
 The change cannot be made without touching the model, `TimeMap`, the composition or the exporter; or keeping the
 preview in source time makes a required behaviour impossible.
+
+## Acceptance results
+
+Debug bundle, `--demo-source --demo-camera`, `-recordingsDir` in a scratch folder, driven by the editor harness on a
+90 s fixture recording (`LongFixtureMaker`, opt-in) and a 200-cut copy of it. `defaults` checked before and after:
+only `NSWindow Frame StudioWindow` had moved (restored); `editorShowRemoved` absent, `muted` unchanged.
+
+1. `swift build`: complete. `swift test`: 371 tests, 0 failures, 11 opt-in skips (353 before this plan, 18 new in
+   `RippleDeleteTests.swift`). Three existing tests asserted the old default view and now set `hideRemoved = false`
+   (`testSelectionFollowsEditsAndDeleteToggles`, `testDragsLandWhereReleasedAndSnapToOthers`,
+   `testDragsThroughMouseEventsLeaveNoIntermediateEdits`); `testCollapsedRangesDrawAsGaps` sets its 8-point gap
+   explicitly. CI: see the pull request.
+2. Snapshots (`EHDR_SNAPSHOT`) attached to the pull request: before a removal, after it (gap closed, seam, ruler ends
+   at 1:15), two cuts (ruler ends at 1:05), seam selected (inspector "Removed", Cut at 0:20.00, Restore), seam under
+   the pointer, Show removed (hatched, source ruler to 1:30, "1:05 kept"), and undo re-opening the gap. Harness
+   `axis` dumps: after the first removal `shown=75.000 seams=1 [314.7@20.000-35.000] ruler-last-label=1:15
+   readout=0:20.00 / 1:15 playhead=35.000`; undo restored the selection (kept 0:45–0:55) and the playhead.
+3. Export (YouTube 1080p SDR) of the two-cut project (kept 0–20, 35–60, 70–90): ruler and read-out 1:05;
+   `ffprobe`: video 65.000000 s (3900 frames at 60 fps), audio 65.000000 s, format 65.000000 s. Same length.
+4. 200-cut project (201 kept pieces of 17 frames), debug bundle, `perftest` (lane draw cost over 120 zoom and scroll
+   frames at 1180 pt), two passes each:
+
+   | build, view | timeline laid out | lane draw average / p95 |
+   |---|---|---|
+   | `main`, removed shown | 153 ms | 4.18 / 6.95 ms, 4.00 / 7.02 ms |
+   | `main`, "Hide removed" (8 pt gaps) | 132 ms | 79.99 / 84.16 ms, 79.97 / 84.22 ms |
+   | this branch, removed hidden (default) | 134 ms | 4.67 / 7.49 ms, 4.74 / 7.94 ms |
+   | this branch, Show removed | 143 ms | 4.57 / 8.67 ms, 3.87 / 7.32 ms |
+
+   A first version of the axis walked every cut per mapping and drew at about 200 ms per frame with 200 cuts; the
+   axis now keeps prefix sums and maps by binary search.
+5. Not checkable without a person: the feel of the close and open animation (spring of `DS.Motion.snappy`, a plain
+   cut under Reduce Motion), the pointer feel of the two coinciding edges at a seam (unit tests drive them through
+   `TimelineInteraction`; the harness `drag` works in source time and cannot aim at one side of a seam), the seam
+   tooltip appearing (set as the input view's `toolTip`; needs a resting pointer), and VoiceOver.
