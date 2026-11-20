@@ -140,6 +140,23 @@ final class EditorModel {
         refreshActiveScene()
         rebuild()
         waveforms.load(game: true, mic: doc.hasMic)
+        checkGameAudioSync()
+    }
+
+    /// Recordings made before plan 44 can have game audio that drifts from the picture; the correction is stored once
+    /// and the preview rebuilt with it.
+    private func checkGameAudioSync() {
+        let project = doc.project, url = doc.url(doc.project.game.file)
+        Task {
+            guard let m = await GameAudioRepair.detect(project, game: url) else { return }
+            await MainActor.run {
+                guard !self.closed, self.project.gameAudioSync == nil else { return }
+                self.setSilently { $0.gameAudioSync = m }
+                self.rebuild()
+                self.showToast(EditorToast(text: "Game sound re-timed to match the picture",
+                                           detail: String(format: "Recorded before the sync fix: %+.1f s by the end. The files are unchanged.", GameAudioRepair.shift(m))), seconds: 8)
+            }
+        }
     }
 
     func refreshActiveScene() {
@@ -343,6 +360,7 @@ final class EditorModel {
                     // A scene or zoom edit can arrive while track loading is suspended.
                     item.videoComposition = self.previewComposition(b, canvas: canvas)
                     item.audioMix = b.audioMix
+                    item.audioTimePitchAlgorithm = CompositionBuilder.timePitch
                     self.player.replaceCurrentItem(with: item)
                     self.previewRevision += 1
                     let d = b.duration.seconds

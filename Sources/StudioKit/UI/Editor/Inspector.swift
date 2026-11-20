@@ -180,6 +180,10 @@ struct AudioInspector: View {
     var body: some View {
         InspectorSection(title: "Audio & Sync") {
             LabeledSlider(label: "Game volume", value: model.projectBinding(\.game.volume, "Game Volume"), range: 0...2, defaultValue: 1, onEditingChanged: model.gesture)
+            if let m = model.project.gameAudioSync {
+                Text(String(format: "Game sound re-timed to match the picture (%+.1f s by the end): recorded before the sync fix.", GameAudioRepair.shift(m)))
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if model.hasMic {
                 LabeledSlider(label: "Mic volume", value: Binding(get: { model.project.mic?.volume ?? 1 }, set: { v in model.update("Mic Volume") { $0.mic?.volume = v } }),
                               range: 0...3, defaultValue: 1, onEditingChanged: model.gesture)

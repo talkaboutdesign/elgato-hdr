@@ -340,6 +340,9 @@ struct AudioLane: View {
         let layer = mic ? model.project.mic : Optional(model.project.game)
         let offsetMs = layer?.offsetMs ?? 0, volume = layer?.volume ?? 1
         let color = mic ? TimelineStyle.micWave : TimelineStyle.gameWave
+        // Re-timed game audio (recordings made before plan 44) is drawn where it is heard.
+        let sync = mic ? nil : model.project.gameAudioSync
+        let fileMs: (Double) -> Double = { ms in sync.map { $0.audio(at: ms / 1000) * 1000 } ?? ms }
         SwiftUI.Canvas { ctx, size in
             laneBackground(&ctx, size, opacity: 0.04)
             let h = Double(size.height), mid = h / 2, width = Double(size.width)
@@ -356,7 +359,8 @@ struct AudioLane: View {
                 let cols = AudioLane.columns(axis, piece, width: width)
                 var top: [CGPoint] = [], bottom: [CGPoint] = []
                 for c in cols {
-                    let (lo, hi) = w.range(c.t0 * 1000 - offsetMs, max(c.t1 * 1000 - offsetMs, c.t0 * 1000 - offsetMs + 1))
+                    let a0 = fileMs(c.t0 * 1000 - offsetMs), a1 = fileMs(c.t1 * 1000 - offsetMs)
+                    let (lo, hi) = w.range(a0, max(a1, a0 + 1))
                     top.append(CGPoint(x: c.x, y: max(1, mid - Double(hi) * gain)))
                     bottom.append(CGPoint(x: c.x, y: min(h - 1, mid - Double(lo) * gain)))
                 }
