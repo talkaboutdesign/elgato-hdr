@@ -83,6 +83,7 @@ extension AppDelegate {
             proj.state = "recording"
             proj.width = s.w; proj.height = s.h; proj.fps = fps; proj.colorMode = colorMode.rawValue
             proj.cameraMirror = cameraMirror
+            proj.audioClock = true
             beginSceneLog(&proj, startNs: startNs)
             bundleOverlayAssets(proj.scenes, into: dir)
             if camera.cameraOn, let pb = camera.latest {
@@ -162,6 +163,7 @@ extension AppDelegate {
         guard let doc = ProjectDoc.load(dir) else { log("export: no project.json in \(dir.path)"); exit(1) }
         Task {
             if doc.project.durationMs == 0 { await withCheckedContinuation { c in doc.finalize { c.resume() } } }
+            if let m = await GameAudioRepair.detect(doc.project, game: doc.url(doc.project.game.file)) { doc.project.gameAudioSync = m; doc.save() }
             for canvas in Canvas.allCases {
                 let t0 = Date()
                 do {

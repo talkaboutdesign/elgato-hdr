@@ -164,6 +164,11 @@ struct Project: Codable, Equatable {
     /// Wall-clock time of the recording's first frame, for `{time}` in edits and exports; nil before it was stored
     /// (`createdAt`, a fraction of a second later, stands in; a duplicate keeps this but gets a new `createdAt`).
     var recordedAt: Date? = nil
+    /// Game audio written on the host clock (`AudioClock`, plan 44). Absent on older recordings, whose game audio may
+    /// be squeezed or stretched and is checked when opened (`GameAudioRepair`).
+    var audioClock = false
+    /// Where an older recording's game audio belongs in time; nil when it needs no correction.
+    var gameAudioSync: AudioTimeMap? = nil
     var timeline = Timeline()
     var lastExport: [String: String] = [:]    // canvas raw value -> file name
 
@@ -171,7 +176,7 @@ struct Project: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case version, name, createdAt, state, durationMs, width, height, fps, colorMode, game, camera, mic, cameraMirror
         case trimStartMs, trimEndMs, wide, vertical, lastExport, scenes, events, timeline, eventsImported, sceneTransition
-        case eventTransitions, recordedAt, liveZooms
+        case eventTransitions, recordedAt, liveZooms, audioClock, gameAudioSync
     }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -188,6 +193,7 @@ struct Project: Codable, Equatable {
         eventsImported = c.v(.eventsImported, false); eventTransitions = c.v(.eventTransitions, false)
         liveZooms = c.v(.liveZooms, false)
         recordedAt = c.v(.recordedAt, nil)
+        audioClock = c.v(.audioClock, false); gameAudioSync = c.v(.gameAudioSync, nil)
         if scenes.isEmpty { scenes = [defaultScene] }
         if version < 2 { migrateTimeline() }
         importEvents()
@@ -319,6 +325,8 @@ struct Project: Codable, Equatable {
         try c.encode(eventTransitions, forKey: .eventTransitions)
         try c.encode(liveZooms, forKey: .liveZooms)
         try c.encodeIfPresent(recordedAt, forKey: .recordedAt)
+        if audioClock { try c.encode(audioClock, forKey: .audioClock) }
+        try c.encodeIfPresent(gameAudioSync, forKey: .gameAudioSync)
         try c.encode(timeline, forKey: .timeline)
         let bounds = timeline.segments.sorted { $0.startMs < $1.startMs }
         try c.encode(bounds.first?.startMs ?? trimStartMs, forKey: .trimStartMs)

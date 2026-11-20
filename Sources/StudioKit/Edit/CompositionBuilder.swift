@@ -76,7 +76,7 @@ enum CompositionBuilder {
         try await insert(gv, into: sv, offsetMs: 0, kept: kept, holdFirstFrame: frame)
         var mixParams: [AVMutableAudioMixInputParameters] = []
         if let ga = try await game.loadTracks(withMediaType: .audio).first, let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            try await insert(ga, into: t, offsetMs: 0, kept: kept)
+            if let m = p.gameAudioSync { try insert(ga, into: t, kept: kept, map: m) } else { try await insert(ga, into: t, offsetMs: 0, kept: kept) }
             if t.segments.isEmpty { comp.removeTrack(t) } else { mixParams.append(audioParameters(t, volume: p.game.volume, map: map)) }
         }
         var cameraSize: CGSize?
@@ -179,6 +179,33 @@ enum CompositionBuilder {
             at += r.end - r.start
         }
     }
+    /// Re-timed game audio (`AudioTimeMap`, recordings made before plan 44): each kept range takes the audio the map
+    /// assigns to it, split at the map's knots, and each piece is scaled to the length it covers in recording time.
+    /// Players and readers render the scaling with `timePitch`.
+    private static func insert(_ src: AVAssetTrack, into t: AVMutableCompositionTrack, kept: [(start: Int64, end: Int64)], map: AudioTimeMap) throws {
+        func tick(_ v: Int64) -> CMTime { CMTime(value: v, timescale: ticks) }
+        func ticksOf(_ seconds: Double) -> Int64 { Int64((seconds * Double(ticks)).rounded()) }
+        let lo = ticksOf(map.recordingRange.lowerBound), hi = ticksOf(map.recordingRange.upperBound)
+        let knots = map.recordingKnots.map(ticksOf)
+        var at: Int64 = 0
+        for r in kept {
+            let from = max(r.start, lo), to = min(r.end, hi)
+            let edges = [from] + knots.filter { $0 > from && $0 < to } + [to]
+            for (v0, v1) in zip(edges, edges.dropFirst()) where v1 > v0 {
+                let a0 = ticksOf(map.audio(at: Double(v0) / Double(ticks))), a1 = ticksOf(map.audio(at: Double(v1) / Double(ticks)))
+                guard a1 > a0 else { continue }
+                let pos = at + v0 - r.start
+                try t.insertTimeRange(CMTimeRange(start: tick(a0), end: tick(a1)), of: src, at: tick(pos))
+                if a1 - a0 != v1 - v0 { t.scaleTimeRange(CMTimeRange(start: tick(pos), duration: tick(a1 - a0)), toDuration: tick(v1 - v0)) }
+            }
+            at += r.end - r.start
+        }
+    }
+
+    /// How scaled audio is rendered. Spectral keeps the pitch (varispeed would detune the game by up to 16 cents at
+    /// the old recorder's 0.9%) and suits music and effects better than the speech-oriented time-domain method.
+    static let timePitch: AVAudioTimePitchAlgorithm = .spectral
+
     private static func audioParameters(_ track: AVMutableCompositionTrack, volume: Double, map: TimeMap) -> AVMutableAudioMixInputParameters {
         let p = AVMutableAudioMixInputParameters(track: track), v = Float(volume)
         p.setVolume(v, at: .zero)

@@ -182,6 +182,7 @@ final class Exporter {
                 AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2,
                 AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false])
             o.audioMix = built.audioMix
+            o.audioTimePitchAlgorithm = CompositionBuilder.timePitch
             if reader.canAdd(o) { reader.add(o); aOut = o }
         }
 

@@ -18,14 +18,13 @@ final class Recorder {
     let queue = DispatchQueue(label: "recorder")
     let startNs: UInt64
     var sessionStarted = false
-    var audioAnchor: Double = -1     // seconds (recording time) of the first audio sample written
-    var audioSamplesWritten: Int64 = 0
+    /// Keeps the counted game-audio samples on the host clock (and so on the video's frame grid).
+    var audioClock = AudioClock()
     var videoFrames = 0, droppedVideo = 0, dupFrames = 0, gapFrames = 0
     var finished = false
     let fps: Double
     let frameDur: Int64          // in 60000 units
-    var lastIndex: Int64 = -1
-    var slewSamples = 0
+    var firstIndex: Int64 = -1, lastIndex: Int64 = -1
 
     /// Below one second the per-fragment index writes start to cost the recorder queue real time.
     static let fragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
@@ -105,7 +104,7 @@ final class Recorder {
             if lastIndex >= 0 && index > lastIndex + 1 { gapFrames += Int(index - lastIndex - 1) }
             guard video.isReadyForMoreMediaData else { droppedVideo += 1; return }
             let pts = CMTime(value: index * frameDur, timescale: 60000)
-            if adaptor.append(pb, withPresentationTime: pts) { videoFrames += 1; lastIndex = index }
+            if adaptor.append(pb, withPresentationTime: pts) { videoFrames += 1; lastIndex = index; if firstIndex < 0 { firstIndex = index } }
             else { log("video append failed: \(writer.error?.localizedDescription ?? "?")"); droppedVideo += 1 }
         }
     }
@@ -114,47 +113,41 @@ final class Recorder {
     func appendAudio(_ data: Data, ns: UInt64) {
         let frames = data.count / 4
         guard frames > 0 else { return }
-        let endT = time(ns), dur = Double(frames) / 48000.0
+        let endT = time(ns)
         queue.async { [self] in
-            guard !finished, writer.status == .writing, audio.isReadyForMoreMediaData else { return }
-            var d = data, n = frames
-            if audioAnchor < 0 {
-                var startT = endT - dur
-                if startT < 0 { // trim samples that precede the recording start
-                    let skip = min(n, Int(-startT * 48000)); d = d.subdata(in: skip * 4 ..< d.count); n -= skip; startT = 0
-                }
-                guard n > 0 else { return }
-                audioAnchor = startT; audioSamplesWritten = 0
+            guard !finished, writer.status == .writing else { return }
+            guard audio.isReadyForMoreMediaData else { audioClock.lost(frames: frames); return }
+            let first = audioClock.start == nil, at = audioClock.next
+            let step = audioClock.place(frames: frames, end: endT)
+            guard let start = audioClock.start else { return }    // the whole chunk preceded the recording
+            let pcm: [Int16] = data.withUnsafeBytes { raw in
+                let src = raw.bindMemory(to: Int16.self)
+                if step.isEmpty { return Array(src) }
+                return step.apply(to: src, channels: 2, zero: 0) { Int16((Int32($0) + Int32($1)) / 2) }
             }
-            let pts = audioAnchor + Double(audioSamplesWritten) / 48000.0
-            // Slew instead of jumping: if the sample clock drifts from arrival time, drop or repeat a few samples
-            // spread across this chunk (max 1%), keeping audio continuous and locked to the video clock.
-            let expected = endT - Double(n) / 48000.0
-            let err = expected - pts                       // > 0: audio is behind (need to drop samples)
-            if abs(err) > 0.002 {
-                let want = Int((err * 48000).rounded())
-                let maxAdj = max(1, n / 100)
-                let adj = max(-maxAdj, min(maxAdj, want))
-                if adj != 0 {
-                    var out = Data(capacity: (n + abs(adj)) * 4)
-                    let stride = n / abs(adj)
-                    var i = 0, k = 0
-                    while i < n {
-                        let frame = d.subdata(in: i * 4 ..< i * 4 + 4)
-                        if (i + 1) % stride == 0 && k < abs(adj) { k += 1; if adj > 0 { i += 1; continue } else { out.append(frame) } }
-                        out.append(frame); i += 1
-                    }
-                    d = out; n = out.count / 4; slewSamples += adj
-                }
-            }
+            // Each chunk goes exactly where the previous one ended; its silence, if any, comes first.
+            let pts = first ? start : at
+            let n = pcm.count / 2
+            guard n > 0 else { return }
+            let bytes = pcm.count * 2
             var block: CMBlockBuffer?
-            guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: d.count, blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: d.count, flags: 0, blockBufferOut: &block) == noErr, let bb = block else { return }
-            d.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: bb, offsetIntoDestination: 0, dataLength: d.count) }
+            guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: bytes, blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: bytes, flags: 0, blockBufferOut: &block) == noErr, let bb = block else { return }
+            pcm.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: bb, offsetIntoDestination: 0, dataLength: bytes) }
             var sb: CMSampleBuffer?
             let ptsTime = CMTime(value: CMTimeValue((pts * 48000).rounded()), timescale: 48000)
             guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(allocator: nil, dataBuffer: bb, formatDescription: audioFormat, sampleCount: n, presentationTimeStamp: ptsTime, packetDescriptions: nil, sampleBufferOut: &sb) == noErr, let s = sb else { return }
-            if audio.append(s) { audioSamplesWritten += Int64(n) } else { log("audio append failed: \(writer.error?.localizedDescription ?? "?")") }
+            if !audio.append(s) { log("audio append failed: \(writer.error?.localizedDescription ?? "?")") }
         }
+    }
+
+    /// Where the two tracks start and end as written; a difference at the end means the audio clock was not followed.
+    var syncReport: String {
+        let unit = Double(frameDur) / 60000
+        guard firstIndex >= 0, let audioStart = audioClock.start else { return "game sync: \(videoFrames) video frames, \(audioClock.start == nil ? "no" : "some") audio" }
+        let v0 = Double(firstIndex) * unit, v1 = Double(lastIndex + 1) * unit, a0 = audioStart, a1 = audioClock.next
+        let line = String(format: "game sync: video %.3f–%.3f s (%.3f s), audio %.3f–%.3f s (%.3f s), audio ends %+.0f ms from video",
+                          v0, v1, v1 - v0, a0, a1, a1 - a0, (a1 - v1) * 1000)
+        return abs(a1 - v1) > 0.050 ? "warning: " + line : line
     }
 
     func finish(_ completion: @escaping (String) -> Void) {
@@ -162,10 +155,11 @@ final class Recorder {
             finished = true
             guard writer.status == .writing else { completion("recording failed: \(writer.error?.localizedDescription ?? "unknown")"); return }
             video.markAsFinished(); audio.markAsFinished()
-            let frames = videoFrames, dropped = droppedVideo, url = url
+            let frames = videoFrames, dropped = droppedVideo, url = url, clock = audioClock
+            log(syncReport)
             writer.finishWriting {
                 let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-                completion(String(format: "saved %@ (%d frames, %d dropped, %d gaps, %d dups, audio slew %d samples, %.1f MB)", url.lastPathComponent, frames, dropped, self.gapFrames, self.dupFrames, self.slewSamples, Double(size) / 1e6))
+                completion(String(format: "saved %@ (%d frames, %d dropped, %d gaps, %d dups, audio slew %+d samples, %d audio gaps: %d silence / %d cut, %.1f MB)", url.lastPathComponent, frames, dropped, self.gapFrames, self.dupFrames, clock.slewed, clock.gaps, clock.filled, clock.cut, Double(size) / 1e6))
             }
         }
     }
