@@ -102,7 +102,13 @@ final class RecordingSyncTests: XCTestCase {
         var frame = 0
         var (chunk, chunkEnd) = card.next()
         func ns(_ s: Double) -> UInt64 { zero + UInt64(max(0, s) * 1e9) }
-        func waitReady() { while !(r.video.isReadyForMoreMediaData && r.audio.isReadyForMoreMediaData) { usleep(200) } }
+        let deadline = Date().addingTimeInterval(seconds + 120)
+        func waitReady() {
+            while !(r.video.isReadyForMoreMediaData && r.audio.isReadyForMoreMediaData) {
+                if Date() > deadline { XCTFail("writer never became ready"); return }
+                usleep(200)
+            }
+        }
         // Both stop at `seconds`, as a recording stops both at once: the last frame ends there, the last chunk within one
         // chunk of it.
         while true {
@@ -176,7 +182,8 @@ final class RecordingSyncTests: XCTestCase {
                 return clicksAt.contains { t >= $0 && t < $0 + 0.002 } ? 0.9 : Float(sin(t * 2 * .pi * 300) * 0.05)
             }
             let sb = try XCTUnwrap(LayerWriter.sampleBuffer(samples, pts: .zero))
-            while !mic.input.isReadyForMoreMediaData { usleep(200) }
+            let wait = Date().addingTimeInterval(10)
+            while !mic.input.isReadyForMoreMediaData && Date() < wait { usleep(200) }
             mic.appendAudio(sb, ns: zero + UInt64((t0 + rng.uniform() * 0.002) * 1e9)); mic.queue.sync {}
             produced += 1024
         }

@@ -75,7 +75,7 @@ final class GameAudioRepairTests: XCTestCase {
     /// file): detected on open, stored, and composed to an audio track as long as the video with the clicks in place.
     func testShortGameAudioComposesToTheVideoLength() async throws {
         let url = dir.appendingPathComponent("game.mov")
-        try writeMovie(url, videoSeconds: 10, audioSeconds: 9.9, clicksInFile: [0.99, 4.95, 8.91])
+        try await writeMovie(url, videoSeconds: 10, audioSeconds: 9.9, clicksInFile: [0.99, 4.95, 8.91])
         var project = Project(name: "Short", createdAt: Date())
         project.fps = 30; project.colorMode = ColorMode.sdr.rawValue; project.durationMs = 10_000
         let m = await GameAudioRepair.detect(project, game: url)
@@ -97,7 +97,7 @@ final class GameAudioRepairTests: XCTestCase {
 
     // MARK: Fixture
 
-    func writeMovie(_ url: URL, videoSeconds: Double, audioSeconds: Double, clicksInFile: [Double]) throws {
+    func writeMovie(_ url: URL, videoSeconds: Double, audioSeconds: Double, clicksInFile: [Double]) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let video = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 160, AVVideoHeightKey: 96])
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: video, sourcePixelBufferAttributes: nil)
@@ -106,28 +106,31 @@ final class GameAudioRepairTests: XCTestCase {
         XCTAssertTrue(writer.startWriting()); writer.startSession(atSourceTime: .zero)
         var frame = 0, sample = 0
         let frames = Int(videoSeconds * 30), samples = Int(audioSeconds * 48000)
-        while frame < frames || sample < samples {
-            if frame < frames && (Double(frame) / 30 <= Double(sample) / 48000 || sample >= samples) {
-                while !video.isReadyForMoreMediaData { usleep(500) }
+        // Feed whichever input is ready, earlier timestamp first: the writer interleaves and can hold one input back
+        // until the other catches up, so waiting on one input alone can deadlock. Each finishes as soon as it is done.
+        let deadline = Date().addingTimeInterval(60)
+        var videoDone = false, audioDone = false
+        while !(videoDone && audioDone) {
+            guard Date() < deadline else { XCTFail("fixture writer stalled at frame \(frame), sample \(sample)"); break }
+            if !videoDone && frame == frames { video.markAsFinished(); videoDone = true }
+            if !audioDone && sample == samples { audio.markAsFinished(); audioDone = true }
+            let videoFirst = !videoDone && (audioDone || Double(frame) / 30 <= Double(sample) / 48000)
+            if !videoDone && video.isReadyForMoreMediaData && (videoFirst || !audio.isReadyForMoreMediaData) {
                 var pb: CVPixelBuffer?
                 CVPixelBufferCreate(nil, 160, 96, kCVPixelFormatType_32BGRA, nil, &pb)
                 XCTAssertTrue(adaptor.append(pb!, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: 30)))
                 frame += 1
-            } else {
+            } else if !audioDone && audio.isReadyForMoreMediaData {
                 let n = min(1024, samples - sample)
                 let chunk = (0..<n).map { i -> Float in
                     let t = Double(sample + i) / 48000
                     return clicksInFile.contains { t >= $0 && t < $0 + 0.02 } ? Float(sin(t * 2 * .pi * 1000) * 0.9) : 0
                 }
-                while !audio.isReadyForMoreMediaData { usleep(500) }
                 XCTAssertTrue(audio.append(try XCTUnwrap(LayerWriter.sampleBuffer(chunk, pts: CMTime(value: CMTimeValue(sample), timescale: 48000)))))
                 sample += n
-            }
+            } else { usleep(500) }
         }
-        video.markAsFinished(); audio.markAsFinished()
-        let done = expectation(description: "written")
-        writer.finishWriting { done.fulfill() }
-        wait(for: [done], timeout: 30)
+        await writer.finishWriting()
         XCTAssertEqual(writer.status, .completed)
     }
 
