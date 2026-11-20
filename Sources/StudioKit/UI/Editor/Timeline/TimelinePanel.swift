@@ -75,11 +75,12 @@ struct PlayButton: View {
 struct TimeReadout: View {
     let model: EditorModel
     var body: some View {
+        // Export time while removed footage is hidden: the length is the export's. Shown, the recording's clock.
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(formatTimecode(model.time, fps: model.project.fps)).font(.system(size: 13, weight: .semibold).monospacedDigit())
-            Text("/ " + formatTime(model.duration)).font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
+            Text(formatTimecode(model.shownSeconds(model.time), fps: model.project.fps)).font(.system(size: 13, weight: .semibold).monospacedDigit())
+            Text("/ " + formatTime(model.shownDuration)).font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
             let kept = model.keptDuration
-            if abs(kept - model.duration) > 0.05 {
+            if !model.hideRemoved && abs(kept - model.duration) > 0.05 {
                 Text("· \(formatTime(kept)) kept").font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
                     .help("Length after cuts")
             }
@@ -186,7 +187,7 @@ struct TimelineZoomControl: View {
     var body: some View {
         let fraction = model.axis.zoomFraction
         HStack(spacing: 4) {
-            IconButton(systemImage: model.hideRemoved ? "eye.slash" : "eye", help: model.hideRemoved ? "Show removed sections (H)" : "Hide removed sections (H)", isOn: model.hideRemoved, size: 26) {
+            IconButton(systemImage: model.hideRemoved ? "eye.slash" : "eye", help: model.hideRemoved ? "Show removed footage (H)" : "Hide removed footage (H)", isOn: !model.hideRemoved, size: 26) {
                 model.hideRemoved.toggle()
             }
             Rectangle().fill(DS.Color.stroke).frame(width: 1, height: 18).padding(.horizontal, 4)
@@ -196,7 +197,7 @@ struct TimelineZoomControl: View {
                 .frame(width: 96)
                 .accessibilityLabel("Timeline zoom")
             IconButton(systemImage: "plus.magnifyingglass", help: "Zoom in (=)", size: 24) { model.zoomTimeline(in: true) }
-            IconButton(systemImage: "arrow.left.and.right.square", help: "Show the whole recording (⇧Z)", size: 24) { model.fitTimeline() }
+            IconButton(systemImage: "arrow.left.and.right.square", help: model.hideRemoved ? "Show the whole edit (⇧Z)" : "Show the whole recording (⇧Z)", size: 24) { model.fitTimeline() }
         }
     }
 }
@@ -223,25 +224,27 @@ struct TrackHeaders: View {
     }
 }
 
-/// The whole recording in a thin strip with the visible window; shown when zoomed in. Drag to scroll.
+/// The whole timeline in a thin strip with the visible window; shown when zoomed in. Drag to scroll. It counts shown
+/// time like the ruler, so hidden removed footage takes no room here either.
 struct Minimap: View {
     let model: EditorModel
     var body: some View {
-        let axis = model.axis
+        let axis = model.drawnAxis
         let sections = TimelineEdits.sections(model.project)
-        let markers = model.project.timeline.markers.map(\.tMs)
-        let d = max(axis.duration, 0.001)
+        let markers = model.project.timeline.markers.map(\.tMs).filter { !axis.isCollapsed($0 / 1000) }
+        let d = max(axis.shownDuration, 0.001)
         GeometryReader { geo in
             let w = geo.size.width
             SwiftUI.Canvas { ctx, size in
                 let h = size.height
                 ctx.fill(Path(roundedRect: CGRect(x: 0, y: 3, width: w, height: h - 6), cornerRadius: 2), with: .color(.primary.opacity(0.10)))
                 for s in sections where !s.kept {
-                    let r = CGRect(x: s.startMs / 1000 / d * w, y: 3, width: (s.endMs - s.startMs) / 1000 / d * w, height: h - 6)
-                    ctx.fill(Path(r), with: .color(.primary.opacity(0.18)))
+                    let a = axis.shownTime(s.startMs / 1000), b = axis.shownTime(s.endMs / 1000)
+                    guard b - a > 0.0001 else { continue }
+                    ctx.fill(Path(CGRect(x: a / d * w, y: 3, width: (b - a) / d * w, height: h - 6)), with: .color(.primary.opacity(0.18)))
                 }
-                for m in markers { ctx.fill(Path(CGRect(x: m / 1000 / d * w - 0.5, y: 2, width: 1, height: h - 4)), with: .color(DS.Color.warn)) }
-                let x0 = axis.visibleStart / d * w, x1 = axis.visibleEnd / d * w
+                for m in markers { ctx.fill(Path(CGRect(x: axis.shownTime(m / 1000) / d * w - 0.5, y: 2, width: 1, height: h - 4)), with: .color(DS.Color.warn)) }
+                let x0 = axis.shownTime(axis.visibleStart) / d * w, x1 = axis.shownTime(axis.visibleEnd) / d * w
                 let win = CGRect(x: x0, y: 0.5, width: max(6, x1 - x0), height: h - 1)
                 ctx.fill(Path(roundedRect: win, cornerRadius: 3), with: .color(.accentColor.opacity(0.18)))
                 ctx.stroke(Path(roundedRect: win, cornerRadius: 3), with: .color(.accentColor.opacity(0.8)), lineWidth: 1)
@@ -249,7 +252,7 @@ struct Minimap: View {
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0).onChanged { g in
                 var a = model.axis
-                let center = Double(g.location.x / w) * d
+                let center = a.sourceTime(shown: Double(g.location.x / w) * d)
                 a.offset = a.contentX(center) - a.width / 2
                 a.clampOffset()
                 model.axis = a

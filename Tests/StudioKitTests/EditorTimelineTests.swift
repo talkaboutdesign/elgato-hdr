@@ -42,11 +42,12 @@ final class TimelineAxisTests: XCTestCase {
     }
 
     func testCollapsedRangesDrawAsGaps() {
-        var a = TimelineAxis(duration: 100, width: 1000, collapsed: [20...40])
-        let s = (1000 - TimelineAxis.gap) / 80
+        // A fixed-width gap per range (the axis still supports one; the editor uses 0, see TimelineSeamTests).
+        var a = TimelineAxis(duration: 100, width: 1000, collapsed: [20...40], gap: 8)
+        let s = (1000 - a.gap) / 80
         XCTAssertEqual(a.pps, s, accuracy: 1e-9)
         XCTAssertEqual(a.contentX(20), 20 * s, accuracy: 1e-9)
-        XCTAssertEqual(a.contentX(40), 20 * s + TimelineAxis.gap, accuracy: 1e-9)
+        XCTAssertEqual(a.contentX(40), 20 * s + a.gap, accuracy: 1e-9)
         XCTAssertEqual(a.contentWidth, 1000, accuracy: 1e-6)
         for t in [0.0, 10, 20, 30, 40, 70, 100] { XCTAssertEqual(a.time(atContentX: a.contentX(t)), t, accuracy: 1e-6) }
         a.collapsed = []
@@ -251,8 +252,11 @@ final class TimelineSelectionTests: XCTestCase {
         XCTAssertEqual(hit(300, .micAudio), .lane(.micAudio))
     }
 
+    /// "Show removed": a removed section stays where it was and a second ⌫ restores it. (The default view clears
+    /// the selection instead: `RippleDeleteTests`.)
     func testSelectionFollowsEditsAndDeleteToggles() {
         let m = makeEditorModel()
+        m.hideRemoved = false
         m.seek(3); m.split(); m.seek(6); m.split()
         m.seek(4.5)
         m.deleteSelection()   // nothing selected: the section under the playhead
@@ -305,6 +309,7 @@ final class TimelineSelectionTests: XCTestCase {
 final class TimelineInteractionTests: XCTestCase {
     func testDragsLandWhereReleasedAndSnapToOthers() {
         let m = makeEditorModel(durationMs: 100_000, fps: 50)   // 10 pt per second at 1000 pt
+        m.hideRemoved = false                                     // source positions on screen; seams: RippleTrimTests
         m.setTimelineWidth(1000)
         let layout = TimelineLayout.make(hasMic: false)
         let ui = TimelineInteraction(model: m, layout: layout)
@@ -338,6 +343,7 @@ final class TimelineInteractionTests: XCTestCase {
 final class TimelineMouseEventTests: XCTestCase {
     func testDragsThroughMouseEventsLeaveNoIntermediateEdits() throws {
         let m = makeEditorModel(durationMs: 10_000, fps: 60)
+        m.hideRemoved = false                                     // source positions on screen; seams: RippleTrimTests
         m.setTimelineWidth(1000)                                  // 100 pt per second
         let layout = TimelineLayout.make(hasMic: false)
         let view = TimelineInputView(frame: NSRect(x: 0, y: 0, width: 1000, height: layout.height))

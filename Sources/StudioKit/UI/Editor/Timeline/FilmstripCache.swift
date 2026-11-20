@@ -48,12 +48,53 @@ final class FilmstripCache {
         ladder.first { Double($0) / 1000 * pps >= slotWidth } ?? ladder[ladder.count - 1]
     }
 
+    /// One thumbnail on the video lane: the frame at `key` (ms) drawn over source seconds `t0…t1`.
+    struct Slot: Equatable {
+        var key: Int
+        var interval: Int
+        var t0: Double
+        var t1: Double
+        /// Start of the slot's piece of footage (ms): placeholders come from no earlier.
+        var from = 0
+    }
+
+    /// The visible thumbnails. Slots follow the interval grid within each piece of shown footage and stop at its
+    /// seams, so no tile straddles a cut. A tile cut short on its left by a seam shows a frame from its own side
+    /// (the next finest grid point after the seam), never one from the removed footage.
+    static func slots(_ axis: TimelineAxis, interval: Int) -> [Slot] {
+        let vs = axis.visibleStart, ve = min(axis.visibleEnd, axis.duration)
+        guard ve > vs, interval > 0 else { return [] }
+        let iv = Double(interval) / 1000, fine = ladder[0]
+        var out: [Slot] = []
+        // Pieces keep their true start (not the visible edge), so tiles stay put while scrolling.
+        for piece in axis.pieces(0, axis.duration) where piece.upperBound > vs && piece.lowerBound < ve {
+            let a = piece.lowerBound, b = piece.upperBound
+            var k = Int((max(a, vs) / iv).rounded(.down)) * interval
+            while Double(k) / 1000 < min(b, ve) {
+                let s0 = max(Double(k) / 1000, a), s1 = min(Double(k + interval) / 1000, b)
+                if s1 > s0 {
+                    if Double(k) / 1000 < a - 1e-9 {
+                        let key = Int((a * 1000 / Double(fine)).rounded(.up)) * fine
+                        out.append(Slot(key: key, interval: fine, t0: s0, t1: s1, from: Int((a * 1000).rounded(.up))))
+                    } else {
+                        out.append(Slot(key: k, interval: interval, t0: s0, t1: s1, from: Int((a * 1000).rounded(.up))))
+                    }
+                }
+                k += interval
+            }
+        }
+        return out
+    }
+
     /// The image for a slot, else the nearest coarser one already cached (a placeholder while it loads).
-    func image(for key: Int, interval: Int) -> CGImage? {
+    /// A placeholder never comes from before `notBefore` (ms): the far side of a seam is removed footage.
+    func image(for key: Int, interval: Int, notBefore: Int = 0) -> CGImage? {
         if let i = images[key] { return i }
         var step = interval * 2
         while step <= Self.ladder[Self.ladder.count - 1] {
-            if let i = images[key / step * step] { return i }
+            let k = key / step * step
+            if k < notBefore { return nil }
+            if let i = images[k] { return i }
             step *= 2
         }
         return nil

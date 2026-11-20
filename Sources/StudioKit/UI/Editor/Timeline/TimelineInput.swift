@@ -57,8 +57,8 @@ final class TimelineInputView: NSView {
     override func mouseDown(with e: NSEvent) { trace("down", e); window?.makeFirstResponder(self); interaction?.mouseDown(at: point(e), clickCount: e.clickCount, flags: e.modifierFlags); setCursor() }
     override func mouseDragged(with e: NSEvent) { trace("drag", e); interaction?.mouseDragged(to: point(e), flags: e.modifierFlags); setCursor() }
     override func mouseUp(with e: NSEvent) { trace("up", e); interaction?.mouseUp(at: point(e)); interaction?.mouseMoved(to: point(e)); setCursor() }
-    override func mouseMoved(with e: NSEvent) { interaction?.mouseMoved(to: point(e)); setCursor() }
-    override func mouseExited(with e: NSEvent) { interaction?.mouseExited(); cursor = .arrow; cursor.set() }
+    override func mouseMoved(with e: NSEvent) { interaction?.mouseMoved(to: point(e)); setCursor(); setToolTip() }
+    override func mouseExited(with e: NSEvent) { interaction?.mouseExited(); cursor = .arrow; cursor.set(); setToolTip() }
     override func cursorUpdate(with e: NSEvent) { cursor.set() }
     override func scrollWheel(with e: NSEvent) {
         let precise = e.hasPreciseScrollingDeltas
@@ -68,6 +68,12 @@ final class TimelineInputView: NSView {
     override func magnify(with e: NSEvent) { interaction?.magnify(by: e.magnification, at: point(e)) }
     override func smartMagnify(with e: NSEvent) { interaction?.smartMagnify(at: point(e)) }
     override func menu(for e: NSEvent) -> NSMenu? { interaction?.menu(at: point(e)) }
+
+    /// "12.4 s removed" over a seam's notch.
+    private func setToolTip() {
+        let tip = interaction?.toolTip
+        if toolTip != tip { toolTip = tip }
+    }
 
     private func setCursor() {
         let c = interaction?.cursor ?? .arrow
@@ -90,7 +96,7 @@ final class TimelineInteraction {
         case sceneChange(UUID)
         case zoomMove(UUID, original: ZoomBlock, grab: Double, room: (lo: Double, hi: Double))
         case zoomEdge(UUID, leading: Bool, room: (lo: Double, hi: Double))
-        case cut(CutBoundary, original: [Segment])
+        case cut(CutBoundary, original: [Segment], grabX: Double)
     }
     private var drag = Drag.none
     /// Snap targets fixed when the drag began, without the dragged item: recomputed live, the item would snap to
@@ -128,6 +134,8 @@ final class TimelineInteraction {
             m.select(.zoom(id)); drag = .pending(h, start: p, time: t)
         case .cut:
             drag = .pending(h, start: p, time: t)
+        case .seam(let s):
+            m.select(.section(s)); drag = .none
         case .section(let s):
             m.selection = .section(s); m.beginScrub(); m.seek(t); drag = .pending(h, start: p, time: t)
         case .lane:
@@ -169,10 +177,17 @@ final class TimelineInteraction {
             let target = snapped(t * 1000, on: snapOn)
             m.updateDrag("Resize Zoom") { TimelineEdits.resizeZoom(&$0, id: id, leading: leading, toMs: target, room: room) }
             if let z = m.zoomBlock(id), !m.playing { m.seek((leading ? z.startMs : z.endMs) / 1000, fast: true) }
-        case .cut(let b, let original):
-            let target = snapped(t * 1000, on: snapOn)
+        case .cut(let b, let original, let grabX):
+            // Measured from the edge in points of footage, not through the layout: at a seam the removed footage
+            // has no width, yet dragging outwards brings it back point by point.
+            let raw = b.ms + (Double(p.x) - grabX) / max(m.axis.pps, 0.0001) * 1000
+            let target = snapped(raw, on: snapOn)
             m.updateDrag("Trim") { TimelineEdits.move(b, to: target, original: original, in: &$0) }
-            m.seek(TimelineEdits.snapToFrame(target, m.project) / 1000, fast: true)
+            let edge = TimelineEdits.kept(m.project).flatMap { [$0.startMs, $0.endMs] }.min { abs($0 - target) < abs($1 - target) } ?? target
+            m.moveTrim(toMs: edge)
+            // Hidden removed footage: the playhead shows the frame on the kept side of the edge.
+            let frame = !m.hideRemoved ? target : b.right == nil && b.left != nil ? edge - m.frameDuration * 1000 : edge
+            m.seek(TimelineEdits.snapToFrame(frame, m.project) / 1000, fast: true)
         }
     }
 
@@ -204,7 +219,8 @@ final class TimelineInteraction {
         case .zoomEdge(let id, let leading):
             m.beginGesture(); drag = .zoomEdge(id, leading: leading, room: TimelineEdits.zoomRoom(m.project, id: id))
         case .cut(let b):
-            m.beginGesture(); m.beginScrub(); drag = .cut(b, original: TimelineEdits.kept(m.project))
+            m.beginGesture(); m.beginScrub(); m.beginTrim(b)
+            drag = .cut(b, original: TimelineEdits.kept(m.project), grabX: m.axis.x(b.ms / 1000))
         case .section:
             snapTargets = TimelineEdits.editPoints(m.project)
             drag = .scrub
@@ -223,7 +239,7 @@ final class TimelineInteraction {
         }
         switch drag {
         case .scrub, .pending(.section, _, _): m.endScrub()
-        case .cut: m.endScrub(); m.endGesture()
+        case .cut: m.endScrub(); m.endGesture(); m.endTrim()
         case .marker, .sceneChange, .zoomMove, .zoomEdge: m.endGesture()
         default: break
         }
@@ -240,11 +256,21 @@ final class TimelineInteraction {
     }
     func mouseExited() { guard case .none = drag else { return }; model?.hover = nil; cursor = .arrow }
 
+    var toolTip: String? {
+        guard case .seam(let s)? = model?.hover else { return nil }
+        return TimelineInteraction.removedText(s)
+    }
+    static func removedText(_ s: CutSection) -> String {
+        let secs = (s.endMs - s.startMs) / 1000
+        return (secs < 60 ? String(format: "%.1f s", secs) : formatTime(secs)) + " removed"
+    }
+
     private func updateCursor(_ h: TimelineHit?, dragging: Bool) {
         switch h {
         case .cut, .sceneChange, .zoomEdge: cursor = .resizeLeftRight
         case .zoom: cursor = dragging ? .closedHand : .openHand
         case .marker: cursor = dragging ? .closedHand : .pointingHand
+        case .seam: cursor = .pointingHand
         default: cursor = .arrow
         }
     }
@@ -323,6 +349,9 @@ final class TimelineInteraction {
             add("Split Here") { m.seek(t); m.split() }
         case .cut(let b):
             add("Split Here") { m.seek(b.ms / 1000); m.split() }
+        case .seam(let s):
+            m.selection = .section(s)
+            add("Restore Section") { m.restoreSection(s) }
         case .sceneRun(let id): sceneItems(id)
         case .sceneChange(let id): sceneItems(id)
         case .zoom(let id), .zoomEdge(let id, _):

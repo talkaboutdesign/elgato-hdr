@@ -44,12 +44,14 @@ enum TimelineHit: Equatable {
     case zoomEdge(UUID, leading: Bool)
     case zoom(UUID)
     case cut(CutBoundary)
+    case seam(CutSection)               // the notch of a cut whose removed footage is hidden: the removed section
     case section(CutSection)
     case lane(LaneKind)
 }
 
 enum TimelineHitTest {
     static let edgeSlop = 5.0
+    static let notchSlop = 7.0
 
     static func hit(x: Double, y: Double, layout: TimelineLayout, axis: TimelineAxis, project p: Project, selection: TimelineSelection) -> TimelineHit {
         guard let lane = layout.lane(atY: y) else { return .ruler }
@@ -65,13 +67,15 @@ enum TimelineHitTest {
             }
             return .ruler
         case .scenes:
-            let changes = TimelineEdits.sortedSpans(p).filter { $0.startMs > 0 && near($0.startMs) }
+            // A change whose span is all hidden footage is not drawn; the next visible one owns the seam.
+            let shown = Set(TimelineEdits.sceneRuns(p).filter { !axis.pieces($0.startMs / 1000, $0.endMs / 1000).isEmpty }.compactMap { $0.span?.id })
+            let changes = TimelineEdits.sortedSpans(p).filter { $0.startMs > 0 && shown.contains($0.id) && near($0.startMs) }
             if let c = changes.min(by: { abs(axis.x($0.startMs / 1000) - x) < abs(axis.x($1.startMs / 1000) - x) }) { return .sceneChange(c.id) }
             if let run = TimelineEdits.sceneRun(at: t, in: p) { return .sceneRun(run.span?.id) }
             return .lane(.scenes)
         case .zoom:
             // The selected block's handles win where two blocks touch.
-            var zooms = p.timeline.zooms
+            var zooms = p.timeline.zooms.filter { !axis.pieces($0.startMs / 1000, $0.endMs / 1000).isEmpty }
             if case .zoom(let id) = selection, let i = zooms.firstIndex(where: { $0.id == id }) { zooms.insert(zooms.remove(at: i), at: 0) }
             for z in zooms {
                 let x0 = axis.x(z.startMs / 1000), x1 = axis.x(z.endMs / 1000)
@@ -82,9 +86,30 @@ enum TimelineHitTest {
             if let z = zooms.first(where: { t >= $0.startMs && t < $0.endMs }) { return .zoom(z.id) }
             return .lane(.zoom)
         case .video:
+            if y < lane.y + TimelineStyle.notchSize.height * 1.2 + 3,
+               let seam = axis.visibleSeams().min(by: { abs($0.x - x) < abs($1.x - x) }), abs(seam.x - x) <= notchSlop,
+               let s = TimelineEdits.sections(p).first(where: { !$0.kept && abs($0.startMs - seam.range.lowerBound * 1000) < 0.5 }) {
+                return .seam(s)
+            }
+            // At a seam the end of the section on the left and the start of the one on the right share an x: the
+            // side of the seam the pointer is on picks the edge.
+            func distance(_ b: CutBoundary) -> Double {
+                let bx: Double = axis.x(b.ms / 1000), d: Double = abs(bx - x)
+                let atEnd: Bool = bx >= axis.contentWidth - axis.offset - 0.5, atStart: Bool = bx <= 0.5 - axis.offset
+                let sideOK: Bool
+                if b.left != nil && b.right != nil { sideOK = true }
+                else if b.right == nil { sideOK = x < bx || atEnd }     // the end of the section on the left
+                else { sideOK = x >= bx || atStart }                    // the start of the section on the right
+                return sideOK ? d : d + edgeSlop * 4
+            }
             let b = TimelineEdits.boundaries(p).filter { near($0.ms) }
-            if let best = b.min(by: { abs(axis.x($0.ms / 1000) - x) < abs(axis.x($1.ms / 1000) - x) }) { return .cut(best) }
-            if let s = TimelineEdits.section(at: t, in: p) { return .section(s) }
+            if let best = b.min(by: { distance($0) < distance($1) }) { return .cut(best) }
+            if let s = TimelineEdits.section(at: t, in: p) {
+                // Hidden removed footage has no width: the end of the timeline belongs to the last kept section.
+                if !s.kept, axis.isCollapsed(t / 1000) || t / 1000 >= axis.duration - 1e-9,
+                   let k = TimelineEdits.sections(p).last(where: { $0.kept && $0.endMs <= t + 0.5 }) { return .section(k) }
+                return .section(s)
+            }
             return .lane(.video)
         case .gameAudio, .micAudio:
             return .lane(lane.kind)
