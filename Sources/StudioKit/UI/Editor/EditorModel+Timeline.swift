@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import QuartzCore
+import SwiftUI
 
 // Timeline commands: the keyboard, the transport buttons, context menus and the debug harness all call these.
 extension EditorModel {
@@ -16,13 +17,25 @@ extension EditorModel {
     }
 
     /// ⌫: removes the selected section (or brings a removed one back), or deletes the selected scene change, zoom
-    /// or marker. With nothing selected it acts on the section under the playhead and selects it, so a second ⌫
-    /// undoes the removal in place.
+    /// or marker. With nothing selected it acts on the section under the playhead. While removed footage is hidden
+    /// the gap closes, the selection clears and the playhead moves on to the footage after the cut; with it shown,
+    /// the removed section stays selected so a second ⌫ undoes the removal in place.
     func deleteSelection() {
         switch selection {
         case .section(let s):
-            if s.kept { update("Remove Section") { TimelineEdits.remove(&$0, section: s) } }
-            else { update("Restore Section") { TimelineEdits.restore(&$0, section: s) } }
+            if hideRemoved {
+                guard s.kept else { restoreSection(s); return }
+                let before = project
+                update("Remove Section", keepView: true) { TimelineEdits.remove(&$0, section: s) }
+                guard project != before else { return }
+                selection = .none
+                let kept = keptSeconds
+                if let next = kept.first(where: { $0.start >= s.endMs / 1000 - 1e-6 }) { seek(next.start) }
+                else if let last = kept.last { seek(max(last.start, last.end - frameDuration)) }
+                return
+            }
+            if s.kept { update("Remove Section", keepView: true) { TimelineEdits.remove(&$0, section: s) } }
+            else { update("Restore Section", keepView: true) { TimelineEdits.restore(&$0, section: s) } }
             selection = .section(CutSection(startMs: s.startMs, endMs: s.endMs, kept: !s.kept))
             validateSelection()
         case .scene(let id):
@@ -45,7 +58,7 @@ extension EditorModel {
     }
 
     func restoreSection(_ s: CutSection) {
-        update("Restore Section") { TimelineEdits.restore(&$0, section: s) }
+        update("Restore Section", keepView: true) { TimelineEdits.restore(&$0, section: s) }
         selection = .section(CutSection(startMs: s.startMs, endMs: s.endMs, kept: true))
         validateSelection()
     }
@@ -55,6 +68,14 @@ extension EditorModel {
     func clearInOut() { update("Clear In and Out") { TimelineEdits.clearInOut(&$0) } }
 
     var keptDuration: Double { TimelineEdits.kept(project).reduce(0.0) { $0 + $1.endMs - $1.startMs } / 1000 }
+
+    /// A source time as the timeline shows it: export time (kept footage only) while removed footage is hidden,
+    /// else source time. The ruler, the playhead read-out and the inspectors count in it.
+    func shownSeconds(_ s: Double) -> Double {
+        hideRemoved ? TimelineEdits.exportMs(atSourceMs: s * 1000, in: project) / 1000 : s
+    }
+    /// Length of the timeline in shown time: the export's length while removed footage is hidden.
+    var shownDuration: Double { hideRemoved ? keptDuration : duration }
 
     // MARK: Zoom
 
@@ -137,13 +158,20 @@ extension EditorModel {
         update("Add Marker") { id = TimelineEdits.addMarker(&$0, atMs: t) }
         selection = .marker(id)
     }
+    /// Markers inside hidden footage are not on the timeline, so jumps pass them by.
+    private var reachableMarkers: Project {
+        guard hideRemoved else { return project }
+        var p = project
+        p.timeline.markers.removeAll { !TimelineEdits.isKept($0.tMs, in: project) }
+        return p
+    }
     func nextMarker() {
-        guard let m = TimelineEdits.nextMarker(after: playheadMs, in: project) else { NSSound.beep(); return }
+        guard let m = TimelineEdits.nextMarker(after: playheadMs, in: reachableMarkers) else { NSSound.beep(); return }
         if playing { pause() }
         seek(m.tMs / 1000); selection = .marker(m.id)
     }
     func previousMarker() {
-        guard let m = TimelineEdits.previousMarker(before: playheadMs, in: project) else { NSSound.beep(); return }
+        guard let m = TimelineEdits.previousMarker(before: playheadMs, in: reachableMarkers) else { NSSound.beep(); return }
         if playing { pause() }
         seek(m.tMs / 1000); selection = .marker(m.id)
     }
@@ -192,7 +220,10 @@ extension EditorModel {
 
     /// ↑ and ↓: the previous or next cut, scene change, zoom edge or marker.
     func jumpToEdit(forward: Bool) {
-        let pts = TimelineEdits.editPoints(project) + [0, project.durationMs]
+        var pts = TimelineEdits.editPoints(project) + [0, project.durationMs]
+        // With removed footage hidden, an edit point inside it lands where the playhead may rest: the kept side of
+        // the seam in the direction of the jump, so both edges of a cut are one stop.
+        if hideRemoved { pts = Array(Set(pts.map { keptPlayhead($0 / 1000, forward: forward) * 1000 })) }
         let t = playheadMs, eps = frameDuration * 500
         let target = forward ? pts.filter { $0 > t + eps }.min() : pts.filter { $0 < t - eps }.max()
         guard let ms = target else { NSSound.beep(); return }
@@ -226,10 +257,75 @@ extension EditorModel {
         axis = a
     }
 
-    func updateCollapsed() {
+    /// Lays the axis out for the current cuts and view. Removed footage takes no width while hidden. The change
+    /// animates (`DS.Motion.snappy`'s spring; a plain cut under Reduce Motion), keeps a fitted timeline fitted and
+    /// the playhead on screen. While a seam edge is dragged the layout waits for the release (`endTrim`).
+    func updateCollapsed(animated: Bool = true) {
+        guard trimGhost == nil else { return }
         var a = axis
         a.collapsed = hideRemoved ? TimelineEdits.removedRanges(project).map { ($0.startMs / 1000)...($0.endMs / 1000) } : []
+        a.shown = []; a.gap = 0
         a.clampOffset()
-        if a != axis { axis = a }
+        guard a != axis else { return }
+        let from = drawnAxis
+        a.reveal(time)
+        axis = a
+        if animated && !DS.Motion.reduceMotion { animateLayout(from: from) }
+        else { stopLayoutAnimation() }
     }
+
+    /// The axis the lanes draw: the final layout, or a frame of the transition to it.
+    var drawnAxis: TimelineAxis { animatedAxis ?? axis }
+
+    private func animateLayout(from: TimelineAxis) {
+        layoutAnimation?.invalidate()
+        let spring = Spring(response: 0.28, dampingRatio: 0.86)
+        let started = CACurrentMediaTime(), length = min(0.6, spring.settlingDuration)
+        animatedAxis = from.transition(to: axis, progress: 0)
+        let t = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            let elapsed = CACurrentMediaTime() - started
+            if elapsed >= length { self.stopLayoutAnimation(); return }
+            let p = spring.value(target: 1.0, time: elapsed)
+            // Each frame starts from the live axis, so scrolling and zooming during the animation still apply.
+            self.animatedAxis = from.transition(to: self.axis, progress: p)
+        }
+        RunLoop.main.add(t, forMode: .common)
+        layoutAnimation = t
+    }
+    private func stopLayoutAnimation() {
+        layoutAnimation?.invalidate(); layoutAnimation = nil
+        if animatedAxis != nil { animatedAxis = nil }
+    }
+
+    // MARK: Trimming at a seam
+
+    /// Starts dragging a cut edge. At a seam (removed footage hidden) the layout freezes for the gesture: the edge is
+    /// drawn where it is dragged and the timeline lays out again once, on release.
+    func beginTrim(_ b: CutBoundary) {
+        guard hideRemoved, b.left == nil || b.right == nil else { return }
+        let x = axis.contentX(b.ms / 1000)
+        trimGhost = TrimGhost(boundary: b, seamX: x, edgeX: x)
+    }
+    /// Where the dragged edge is now (source ms), drawn against the frozen layout: points per second of footage
+    /// moved away from the seam.
+    func moveTrim(toMs ms: Double) {
+        guard var g = trimGhost else { return }
+        g.edgeX = g.seamX + (ms - g.boundary.ms) / 1000 * axis.pps
+        if g != trimGhost { trimGhost = g }
+    }
+    func endTrim() {
+        guard trimGhost != nil else { return }
+        trimGhost = nil
+        updateCollapsed()
+    }
+}
+
+/// A seam edge being dragged: `seamX` is where the gesture began, `edgeX` where the edge is now (content points).
+/// Moving outwards (left section's end to the right, right section's start to the left) brings footage back.
+struct TrimGhost: Equatable {
+    var boundary: CutBoundary
+    var seamX: Double
+    var edgeX: Double
+    var restoring: Bool { boundary.left != nil ? edgeX > seamX : edgeX < seamX }
 }

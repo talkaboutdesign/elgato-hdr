@@ -20,6 +20,25 @@ enum TimelineStyle {
         return scenes[i % scenes.count]
     }
     static let laneRadius = 6.0
+
+    /// A cut with its removed footage hidden: a hairline through the lanes and a notch on top of the video lane.
+    /// Quiet at rest; selected or under the pointer it takes the removed-section colour.
+    static let seam = DS.Color.textSecondary
+    static let notchSize = CGSize(width: 11, height: 9)
+    static func drawSeam(_ ctx: inout GraphicsContext, x: Double, top: Double, bottom: Double, notchY: Double, on: Bool, hot: Bool) {
+        let px = x.rounded() + (x.rounded() <= 0 ? 0.75 : 0)
+        ctx.fill(Path(CGRect(x: px - 1.25, y: top, width: 2.5, height: bottom - top)), with: .color(.black.opacity(0.35)))
+        let color = on || hot ? DS.Color.warn : seam
+        ctx.fill(Path(CGRect(x: px - 0.5, y: top, width: 1, height: bottom - top)), with: .color(color))
+        let w = notchSize.width * (hot || on ? 1.2 : 1), nh = notchSize.height * (hot || on ? 1.2 : 1)
+        var notch = Path()
+        notch.move(to: CGPoint(x: px - w / 2, y: notchY))
+        notch.addLine(to: CGPoint(x: px + w / 2, y: notchY))
+        notch.addLine(to: CGPoint(x: px, y: notchY + nh))
+        notch.closeSubpath()
+        ctx.fill(notch, with: .color(color))
+        ctx.stroke(notch, with: .color(on ? Color.white : Color.black.opacity(0.35)), lineWidth: on ? 1.5 : 0.75)
+    }
 }
 
 struct TimelineTracks: View {
@@ -64,21 +83,24 @@ private func laneBackground(_ ctx: inout GraphicsContext, _ size: CGSize, opacit
 struct RulerLane: View {
     let model: EditorModel
     var body: some View {
-        let axis = model.axis, p = model.project
-        let markers = p.timeline.markers
+        let axis = model.drawnAxis, p = model.project
+        let markers = p.timeline.markers.filter { !axis.isCollapsed($0.tMs / 1000) }
         let selected: UUID? = { if case .marker(let id) = model.selection { return id }; return nil }()
         let hovered: UUID? = { if case .marker(let id) = model.hover { return id }; return nil }()
         SwiftUI.Canvas { ctx, size in
             let h = Double(size.height), width = Double(size.width)
+            // Ticks count shown time (kept footage only while removed footage is hidden), so the ruler ends at
+            // the export's length.
             let (major, minor) = axis.ticks()
             let parts = max(1, Int((major / minor).rounded()))
-            let first = Int((axis.visibleStart / minor).rounded(.down)), last = Int((axis.visibleEnd / minor).rounded(.up))
+            let e0 = axis.shownTime(axis.visibleStart), e1 = axis.shownTime(axis.visibleEnd), total = axis.shownDuration
+            let first = Int((e0 / minor).rounded(.down)), last = Int((e1 / minor).rounded(.up))
             var lines = Path(), majors = Path()
             if last >= first {
                 for i in first...last {
                     let t = Double(i) * minor
-                    guard t <= axis.duration + 1e-6, !axis.collapsed.contains(where: { t > $0.lowerBound && t < $0.upperBound }) else { continue }
-                    let x = axis.x(t).rounded() + 0.5
+                    guard t <= total + 1e-6 else { continue }
+                    let x = axis.x(axis.sourceTime(shown: t)).rounded() + 0.5
                     if i % parts == 0 {
                         majors.move(to: CGPoint(x: x, y: h - 10)); majors.addLine(to: CGPoint(x: x, y: h))
                         let label = ctx.resolve(Text(formatRuler(t, step: major)).font(.system(size: 10, weight: .medium).monospacedDigit()).foregroundStyle(.secondary))
@@ -120,8 +142,8 @@ struct RulerLane: View {
 struct SceneLane: View {
     let model: EditorModel
     var body: some View {
-        let axis = model.axis, p = model.project
-        let runs = TimelineEdits.sceneRuns(p)
+        let axis = model.drawnAxis, p = model.project
+        let runs = TimelineEdits.sceneRuns(p).filter { !axis.pieces($0.startMs / 1000, $0.endMs / 1000).isEmpty }
         let selected: UUID?? = { if case .scene(let id) = model.selection { return .some(id) }; return .none }()
         let hoverChange: UUID? = { if case .sceneChange(let id) = model.hover { return id }; return nil }()
         let hoverRun: UUID?? = { if case .sceneRun(let id) = model.hover { return .some(id) }; return .none }()
@@ -174,7 +196,8 @@ struct SceneLane: View {
 struct ZoomLane: View {
     let model: EditorModel
     var body: some View {
-        let axis = model.axis, zooms = model.project.timeline.zooms
+        let axis = model.drawnAxis
+        let zooms = model.project.timeline.zooms.filter { !axis.pieces($0.startMs / 1000, $0.endMs / 1000).isEmpty }
         let selected: UUID? = { if case .zoom(let id) = model.selection { return id }; return nil }()
         let hover = model.hover
         SwiftUI.Canvas { ctx, size in
@@ -220,30 +243,28 @@ struct ZoomLane: View {
 struct VideoLane: View {
     let model: EditorModel
     var body: some View {
-        let axis = model.axis, p = model.project
+        let axis = model.drawnAxis, p = model.project
         let film = model.filmstrip
         let _ = film.revision
         let sections = TimelineEdits.sections(p)
         let splits = TimelineEdits.boundaries(p).filter { $0.left != nil && $0.right != nil }.map(\.ms)
         let selected: CutSection? = { if case .section(let s) = model.selection { return s }; return nil }()
         let hover = model.hover
+        let ghost = model.trimGhost
         let interval = FilmstripCache.interval(pps: axis.pps)
-        let firstKey = Int(axis.visibleStart * 1000) / interval * interval
-        let lastKey = min(Int(axis.duration * 1000), Int(axis.visibleEnd * 1000))
-        let keys = lastKey >= firstKey ? Array(stride(from: firstKey, through: lastKey, by: interval)) : []
+        let slots = FilmstripCache.slots(axis, interval: interval)
+        let keys = slots.map(\.key)
         let center = Int((axis.visibleStart + axis.visibleEnd) * 500)
         SwiftUI.Canvas { ctx, size in
             let h = Double(size.height), width = Double(size.width)
             let lane = Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: TimelineStyle.laneRadius)
             ctx.clip(to: lane)
             ctx.fill(lane, with: .color(Color(white: 0.12)))
-            for key in keys {
-                let t = Double(key) / 1000
-                if axis.collapsed.contains(where: { t >= $0.lowerBound && t < $0.upperBound }) { continue }
-                let x0 = axis.x(t), x1 = axis.x(min(axis.duration, Double(key + interval) / 1000))
-                guard x1 > 0, x0 < width else { continue }
+            for s in slots {
+                let x0 = axis.x(s.t0), x1 = axis.x(s.t1)
+                guard x1 > 0, x0 < width, x1 - x0 > 0.01 else { continue }
                 let slot = CGRect(x: x0, y: 0, width: x1 - x0, height: h)
-                if let img = film.image(for: key, interval: interval) {
+                if let img = film.image(for: s.key, interval: s.interval, notBefore: s.from) {
                     let aspect = Double(img.width) / Double(max(1, img.height))
                     let w = max(slot.width, h * aspect)
                     var c = ctx; c.clip(to: Path(slot))
@@ -255,7 +276,9 @@ struct VideoLane: View {
             }
             for s in sections {
                 let x0 = axis.x(s.startMs / 1000), x1 = axis.x(s.endMs / 1000)
-                guard x1 > 0, x0 < width else { continue }
+                // Hidden removed footage has no width; it shows while a gap opens or closes and while an edge
+                // drag removes more (the layout waits for the release).
+                guard x1 > 0, x0 < width, x1 - x0 > 0.25 else { continue }
                 let r = CGRect(x: x0, y: 0, width: x1 - x0, height: h)
                 if !s.kept {
                     ctx.fill(Path(r), with: .color(.black.opacity(0.62)))
@@ -283,13 +306,25 @@ struct VideoLane: View {
                 }
                 ctx.fill(bracket, with: .color(DS.Color.warn))
             }
+            if let g = ghost {
+                // The dragged seam edge against the frozen layout: footage coming back is tinted, the edge follows
+                // the pointer.
+                let sx = g.seamX - axis.offset, ex = g.edgeX - axis.offset
+                if g.restoring {
+                    ctx.fill(Path(CGRect(x: min(sx, ex), y: 0, width: abs(ex - sx), height: h)), with: .color(Color.accentColor.opacity(0.28)))
+                }
+                ctx.fill(Path(roundedRect: CGRect(x: ex - 2, y: 0, width: 4, height: h), cornerRadius: 2), with: .color(DS.Color.warn))
+            }
             if let s = selected {
                 let x0 = axis.x(s.startMs / 1000), x1 = axis.x(s.endMs / 1000)
-                let r = CGRect(x: x0 + 1, y: 1, width: max(2, x1 - x0 - 2), height: h - 2)
-                ctx.stroke(Path(roundedRect: r, cornerRadius: 4), with: .color(s.kept ? .accentColor : DS.Color.warn), lineWidth: 2.5)
+                if s.kept || x1 - x0 > 2 {
+                    let r = CGRect(x: x0 + 1, y: 1, width: max(2, x1 - x0 - 2), height: h - 2)
+                    ctx.stroke(Path(roundedRect: r, cornerRadius: 4), with: .color(s.kept ? .accentColor : DS.Color.warn), lineWidth: 2.5)
+                }
             }
         }
-        .task(id: "\(interval) \(firstKey) \(lastKey)") { film.request(keys, center: center) }
+        // Keyed on every slot: a cut can swap one frame for another and leave the count and the ends as they were.
+        .task(id: keys) { film.request(keys, center: center) }
         .accessibilityHidden(true)
     }
 }
@@ -300,7 +335,7 @@ struct AudioLane: View {
     let model: EditorModel
     let mic: Bool
     var body: some View {
-        let axis = model.axis
+        let axis = model.drawnAxis
         let wave = mic ? model.waveforms.mic : model.waveforms.game
         let layer = mic ? model.project.mic : Optional(model.project.game)
         let offsetMs = layer?.offsetMs ?? 0, volume = layer?.volume ?? 1
@@ -314,22 +349,22 @@ struct AudioLane: View {
             }
             // Normalized to the layer's loudest moment, then scaled by its volume, so gain changes are visible.
             let gain = (mid - 2) * 0.92 / Double(max(w.peak, 0.02)) * min(volume, 2)
-            let step = 2.0
-            var top: [CGPoint] = [], bottom: [CGPoint] = []
-            var x = max(0, axis.x(offsetMs / 1000))
-            let end = min(width, axis.x(axis.duration))
-            while x < end {
-                let a = axis.time(atX: x) * 1000 - offsetMs, b = axis.time(atX: x + step) * 1000 - offsetMs
-                let (lo, hi) = w.range(a, max(b, a + 1))
-                top.append(CGPoint(x: x, y: max(1, mid - Double(hi) * gain)))
-                bottom.append(CGPoint(x: x, y: min(h - 1, mid - Double(lo) * gain)))
-                x += step
-            }
-            guard top.count > 1 else { return }
+            // One envelope per piece of shown footage: a column never reaches across a seam into removed audio.
             var path = Path()
-            path.addLines(top)
-            path.addLines(bottom.reversed())
-            path.closeSubpath()
+            let from = max(axis.visibleStart, offsetMs / 1000), to = min(axis.visibleEnd, axis.duration)
+            for piece in axis.pieces(from, to) {
+                let cols = AudioLane.columns(axis, piece, width: width)
+                var top: [CGPoint] = [], bottom: [CGPoint] = []
+                for c in cols {
+                    let (lo, hi) = w.range(c.t0 * 1000 - offsetMs, max(c.t1 * 1000 - offsetMs, c.t0 * 1000 - offsetMs + 1))
+                    top.append(CGPoint(x: c.x, y: max(1, mid - Double(hi) * gain)))
+                    bottom.append(CGPoint(x: c.x, y: min(h - 1, mid - Double(lo) * gain)))
+                }
+                guard top.count > 1 else { continue }
+                path.addLines(top)
+                path.addLines(bottom.reversed())
+                path.closeSubpath()
+            }
             ctx.fill(path, with: .color(color.opacity(0.85)))
             ctx.fill(Path(CGRect(x: 0, y: mid - 0.25, width: width, height: 0.5)), with: .color(color.opacity(0.5)))
         }
@@ -337,24 +372,47 @@ struct AudioLane: View {
     }
 }
 
+extension AudioLane {
+    /// Waveform columns 2 points apart over one piece of shown footage (source seconds), each covering the source
+    /// time under it and clipped to the piece, the last one ending exactly at it.
+    static func columns(_ axis: TimelineAxis, _ piece: ClosedRange<Double>, width: Double, step: Double = 2) -> [(x: Double, t0: Double, t1: Double)] {
+        let x0 = max(0, axis.x(piece.lowerBound)), x1 = min(width, axis.x(piece.upperBound))
+        guard x1 > x0 else { return [] }
+        var out: [(x: Double, t0: Double, t1: Double)] = []
+        var x = x0
+        while x < x1 {
+            let next = min(x + step, x1)
+            let a = max(piece.lowerBound, min(piece.upperBound, axis.time(atX: x)))
+            let b = next >= x1 ? piece.upperBound : max(a, min(piece.upperBound, axis.time(atX: next)))
+            out.append((x, a, b))
+            x = next
+            if next >= x1 { out.append((x1, b, b)); break }
+        }
+        return out
+    }
+}
+
 // MARK: - Overlays
 
-/// Removed ranges dimmed across the lanes, marker lines and the snap guide.
+/// Removed ranges dimmed across the lanes (or, hidden, a seam at each cut), marker lines and the snap guide.
 struct GuidesOverlay: View {
     let model: EditorModel
     let layout: TimelineLayout
     var body: some View {
-        let axis = model.axis, p = model.project
+        let axis = model.drawnAxis, p = model.project
         let removed = TimelineEdits.removedRanges(p)
-        let markers = p.timeline.markers.map(\.tMs)
+        let markers = p.timeline.markers.map(\.tMs).filter { !axis.isCollapsed($0 / 1000) }
         let snap = model.snapGuide
+        let seams = axis.visibleSeams()
+        let selectedSeam: Double? = { if case .section(let s) = model.selection, !s.kept { return s.startMs / 1000 }; return nil }()
+        let hoverSeam: Double? = { if case .seam(let s) = model.hover { return s.startMs / 1000 }; return nil }()
         SwiftUI.Canvas { ctx, size in
             let top = (layout.lane(.scenes)?.y ?? 28)
             let video = layout.lane(.video)
             let width = Double(size.width), height = Double(size.height)
             for r in removed {
                 let x0 = axis.x(r.startMs / 1000), x1 = axis.x(r.endMs / 1000)
-                guard x1 > 0, x0 < width else { continue }
+                guard x1 > 0, x0 < width, x1 - x0 > 0.25 else { continue }
                 for lane in layout.lanes where lane.kind != .ruler && lane.kind != video?.kind {
                     ctx.fill(Path(CGRect(x: x0, y: lane.y, width: x1 - x0, height: lane.height)), with: .color(Color(nsColor: .windowBackgroundColor).opacity(0.55)))
                 }
@@ -366,6 +424,14 @@ struct GuidesOverlay: View {
                 lines.move(to: CGPoint(x: x, y: top)); lines.addLine(to: CGPoint(x: x, y: height))
             }
             ctx.stroke(lines, with: .color(TimelineStyle.marker.opacity(0.45)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            if let v = video {
+                for seam in seams {
+                    let x = seam.x
+                    let on = selectedSeam.map { abs($0 - seam.range.lowerBound) < 0.0005 } ?? false
+                    let hot = hoverSeam.map { abs($0 - seam.range.lowerBound) < 0.0005 } ?? false
+                    TimelineStyle.drawSeam(&ctx, x: x, top: top, bottom: height, notchY: v.y, on: on, hot: hot)
+                }
+            }
             if let s = snap {
                 let x = axis.x(s)
                 ctx.fill(Path(CGRect(x: x - 0.75, y: 0, width: 1.5, height: height)), with: .color(DS.Color.warn))
@@ -378,8 +444,10 @@ struct PlayheadOverlay: View {
     let model: EditorModel
     let layout: TimelineLayout
     var body: some View {
-        let x = model.axis.x(model.time)
-        let width = model.axis.width
+        let axis = model.drawnAxis
+        // Dragging a seam edge, the playhead shows the edge's frame and stays on the edge.
+        let x = model.trimGhost.map { $0.edgeX - axis.offset } ?? axis.x(model.time)
+        let width = axis.width
         ZStack(alignment: .topLeading) {
             if x > -8 && x < width + 8 {
                 Rectangle().fill(TimelineStyle.playhead).frame(width: 1.5, height: layout.height).offset(x: x - 0.75)

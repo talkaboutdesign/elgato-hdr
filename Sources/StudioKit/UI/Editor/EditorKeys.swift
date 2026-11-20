@@ -46,8 +46,8 @@ struct EditorShortcut: Identifiable {
         .init(keys: "⌃1 … ⌃9", title: "Change to scene 1…9 at the playhead", group: "Zoom, Scenes and Markers", command: .sceneChange(1)),
         .init(keys: "M", title: "Add a marker", group: "Zoom, Scenes and Markers", command: .addMarker),
         .init(keys: "=  -", title: "Zoom the timeline in or out (or ⌘-scroll, pinch)", group: "Timeline", command: .zoomIn),
-        .init(keys: "⇧Z", title: "Show the whole recording", group: "Timeline", command: .fit),
-        .init(keys: "H", title: "Hide or show removed sections", group: "Timeline", command: .toggleRemoved),
+        .init(keys: "⇧Z", title: "Show the whole timeline", group: "Timeline", command: .fit),
+        .init(keys: "H", title: "Show removed footage, or hide it again", group: "Timeline", command: .toggleRemoved),
         .init(keys: "⌘E", title: "Export…", group: "Project", command: .export),
         .init(keys: "⌘/", title: "This list", group: "Project", command: .shortcuts),
     ]

@@ -43,7 +43,20 @@ final class EditorModel {
     // timeline
     var selection: TimelineSelection = .none
     var axis = TimelineAxis()
-    var hideRemoved = false { didSet { if hideRemoved != oldValue { updateCollapsed() } } }
+    /// Removed footage is gone from the timeline and the rest closes up (the default); off is "Show removed", the
+    /// recording at scale with removed sections hatched. Remembered as `editorShowRemoved`.
+    var hideRemoved = true {
+        didSet {
+            guard hideRemoved != oldValue else { return }
+            if hideRemoved { defaults.removeObject(forKey: Self.showRemovedKey) } else { defaults.set(true, forKey: Self.showRemovedKey) }
+            updateCollapsed()
+        }
+    }
+    static let showRemovedKey = "editorShowRemoved"
+    /// What the lanes draw while a layout change animates; `axis` is already the final layout (hit testing).
+    var animatedAxis: TimelineAxis?
+    /// An edge being dragged at a seam: the layout stays as it was for the gesture, this is where the edge is drawn.
+    var trimGhost: TrimGhost?
     var hover: TimelineHit?
     var snapGuide: Double?          // seconds; shown while a drag sits on a snap point
     var toast: EditorToast?
@@ -51,6 +64,8 @@ final class EditorModel {
     var previewRevision = 0         // bumped when the preview's composition changes
 
     @ObservationIgnored let player = AVPlayer()
+    @ObservationIgnored let defaults: UserDefaults
+    @ObservationIgnored var layoutAnimation: Timer?
     /// Owned by the model rather than the window, so the history goes away with the project and the same editor can
     /// live in its own window or inside the library window. Grouping is explicit: one group per edit or gesture.
     @ObservationIgnored var sceneLayerActions = SceneActions()
@@ -101,15 +116,18 @@ final class EditorModel {
     /// Where the preview's overlay textures come from (the app's one cache; tests pass a cold one).
     @ObservationIgnored let overlayCache: OverlayTextureCache
 
-    init(doc: ProjectDoc, overlayCache: OverlayTextureCache = .shared) {
+    init(doc: ProjectDoc, overlayCache: OverlayTextureCache = .shared, defaults: UserDefaults = .standard) {
         self.doc = doc
         self.overlayCache = overlayCache
+        self.defaults = defaults
+        hideRemoved = !defaults.bool(forKey: Self.showRemovedKey)
         project = doc.project
         range = doc.project.color == .sdr ? .sdr : .hdr
         filmstrip = FilmstripCache(doc: doc)
         waveforms = WaveformCache(doc: doc)
         duration = doc.project.durationMs / 1000
         axis.duration = duration
+        axis.collapsed = hideRemoved ? TimelineEdits.removedRanges(doc.project).map { ($0.startMs / 1000)...($0.endMs / 1000) } : []
         exportQueue = ExportQueue { [weak doc] job in
             guard let doc = doc else { throw CompositionBuilder.err("project closed") }
             return Exporter(doc: doc, job: job)
@@ -134,6 +152,7 @@ final class EditorModel {
         closed = true
         player.pause()
         reverseTimer?.invalidate()
+        layoutAnimation?.invalidate(); layoutAnimation = nil
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
         if let o = boundaryObserver { player.removeTimeObserver(o); boundaryObserver = nil }
         exportQueue.cancelAll()
@@ -149,15 +168,17 @@ final class EditorModel {
 
     /// Every edit goes through here. Outside a gesture each call is one undo step; inside one, the whole gesture is.
     /// While an export queue runs, the project is frozen: queued jobs export what was there when they were queued.
-    func update(_ name: String = "Edit", _ f: (inout Project) -> Void) {
+    /// `keepView`: the edit moves the selection and playhead (removing a section), so undo and redo put them back.
+    func update(_ name: String = "Edit", keepView: Bool = false, _ f: (inout Project) -> Void) {
         guard !editsLocked else { NSSound.beep(); return }
         let old = project
         var p = project; f(&p)
         syncDerived(&p, from: old)
         guard p != old else { return }
-        if gestureBase == nil { registerUndo(restoring: old, name: name) } else { gestureName = name }
+        if gestureBase == nil { registerUndo(restoring: old, name: name, view: keepView ? viewState : nil) } else { gestureName = name }
         apply(p, from: old)
     }
+    var viewState: EditorViewState { EditorViewState(selection: selection, time: time) }
 
     /// A timeline drag update: the edit applied to the timeline as it was when the gesture began, never on top of the
     /// previous update, so intermediate positions cannot leave anything behind (a dragged split stays one split).
@@ -186,22 +207,27 @@ final class EditorModel {
     func undo() { guard !editsLocked else { return }; endGesture(); if undoManager.canUndo { undoManager.undo() }; refreshUndoState() }
     func redo() { guard !editsLocked else { return }; endGesture(); if undoManager.canRedo { undoManager.redo() }; refreshUndoState() }
 
-    private func registerUndo(restoring old: Project, name: String) {
+    private func registerUndo(restoring old: Project, name: String, view: EditorViewState? = nil) {
         undoManager.beginUndoGrouping()
-        undoManager.registerUndo(withTarget: self) { $0.revert(to: old, name: name) }
+        undoManager.registerUndo(withTarget: self) { $0.revert(to: old, name: name, view: view) }
         undoManager.setActionName(name)
         undoManager.endUndoGrouping()
         refreshUndoState()
     }
 
     /// Undo and redo swap whole project values; registering the current one here becomes the opposite step.
-    private func revert(to p: Project, name: String) {
-        let current = project
-        undoManager.registerUndo(withTarget: self) { $0.revert(to: current, name: name) }
+    private func revert(to p: Project, name: String, view: EditorViewState? = nil) {
+        let current = project, currentView = view == nil ? nil : viewState
+        undoManager.registerUndo(withTarget: self) { $0.revert(to: current, name: name, view: currentView) }
         undoManager.setActionName(name)
         var restored = p
         restored.lastExport = current.lastExport   // export history is not an edit
         apply(restored, from: current)
+        if let v = view {
+            selection = v.selection
+            validateSelection()
+            if !playing { seek(v.time) }
+        }
         DispatchQueue.main.async { [weak self] in self?.refreshUndoState() }
     }
 
@@ -411,6 +437,12 @@ final class EditorModel {
             withAnimation(DS.Motion.gentle) { self.toast = nil }
         }
     }
+}
+
+/// The selection and playhead an edit moved, for its undo and redo.
+struct EditorViewState: Equatable {
+    var selection: TimelineSelection
+    var time: Double
 }
 
 /// Transient message at the bottom of the preview. An export result carries its file for Show in Finder and drag.

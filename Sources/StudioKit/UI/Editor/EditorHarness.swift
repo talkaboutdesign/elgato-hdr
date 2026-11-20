@@ -87,6 +87,7 @@ enum EditorHarness {
             try? FileManager.default.removeItem(at: dst)
             try? FileManager.default.copyItem(at: m.doc.dir.appendingPathComponent("project.json"), to: dst)
         case "hover": hover(parts, m)
+        case "axis": axisDump(arg, m)
         // Picture editing through real mouse events on the preview: canvas pixels of the 1080p canvas.
         case "pclick": postPicture(parts, m, drag: false)          // pclick <x> <y> [clicks]
         case "pdrag": postPicture(parts, m, drag: true); delay = 0.8   // pdrag <x0> <y0> <x1> <y1> [opt]
@@ -214,17 +215,41 @@ enum EditorHarness {
         case "scene": if let r = TimelineEdits.sceneRun(at: t, in: m.project) { m.select(.scene(r.span?.id)) }
         case "zoom": if let z = m.project.timeline.zooms.first { m.select(.zoom(z.id)) }
         case "marker": if let k = m.project.timeline.markers.first { m.select(.marker(k.id)) }
+        case "seam":   // select seam <n>: the n-th seam (1-based) of the hidden view, as clicking its notch does
+            let n = Int(parts.count > 2 ? parts[2] : "1") ?? 1, seams = m.axis.seams
+            guard n >= 1, n <= seams.count else { log("harness: no seam \(n) of \(seams.count)"); return }
+            if let s = TimelineEdits.sections(m.project).first(where: { !$0.kept && abs($0.startMs - seams[n - 1].range.lowerBound * 1000) < 0.5 }) { m.select(.section(s)) }
         default: m.select(.none)
         }
     }
 
-    /// Hover state for screenshots of handles: `hover cut <s>`, `hover zoomedge`, `hover marker`.
+    /// The axis and every time read-out, for checking the layout without a screen: `axis <label>`.
+    private static func axisDump(_ label: String, _ m: EditorModel) {
+        let a = m.axis, fps = m.project.fps
+        let seams = a.seams.map { String(format: "%.1f@%.3f-%.3f", $0.x - a.offset, $0.range.lowerBound, $0.range.upperBound) }
+        let (major, _) = a.ticks()
+        let rulerEnd = (a.shownDuration / major).rounded(.down) * major
+        let sel: String = {
+            guard case .section(let s) = m.selection else { return "-" }
+            return "\(s.kept ? "kept" : "removed") \(formatTimecode(m.shownSeconds(s.startMs / 1000), fps: fps))-\(formatTimecode(m.shownSeconds(s.endMs / 1000), fps: fps)) length \(formatDuration((s.endMs - s.startMs) / 1000))"
+        }()
+        log(String(format: "harness: axis %@ view=%@ width=%.0f pps=%.3f fitted=%d offset=%.1f content=%.1f duration=%.3f shown=%.3f seams=%d [%@] ruler-last-label=%@ readout=%@ / %@ playhead=%.3f sel=%@",
+                   label, m.hideRemoved ? "hidden" : "shown", a.width, a.pps, a.fitted ? 1 : 0, a.offset, a.contentWidth, a.duration, a.shownDuration,
+                   seams.count, seams.joined(separator: " "), formatRuler(rulerEnd, step: major), formatTimecode(m.shownSeconds(m.time), fps: fps),
+                   formatTime(m.shownDuration), m.time, sel))
+    }
+
+    /// Hover state for screenshots of handles: `hover cut <s>`, `hover zoomedge`, `hover marker`, `hover seam <n>`.
     private static func hover(_ parts: [String], _ m: EditorModel) {
         switch parts.count > 1 ? parts[1] : "" {
         case "cut": let t = (Double(parts.count > 2 ? parts[2] : "") ?? 0) * 1000
             m.hover = TimelineEdits.boundaries(m.project).min { abs($0.ms - t) < abs($1.ms - t) }.map { .cut($0) }
         case "zoomedge": m.hover = m.project.timeline.zooms.first.map { .zoomEdge($0.id, leading: false) }
         case "marker": m.hover = m.project.timeline.markers.first.map { .marker($0.id) }
+        case "seam":
+            let n = Int(parts.count > 2 ? parts[2] : "1") ?? 1, seams = m.axis.seams
+            guard n >= 1, n <= seams.count else { m.hover = nil; return }
+            m.hover = TimelineEdits.sections(m.project).first { !$0.kept && abs($0.startMs - seams[n - 1].range.lowerBound * 1000) < 0.5 }.map { .seam($0) }
         default: m.hover = nil
         }
     }

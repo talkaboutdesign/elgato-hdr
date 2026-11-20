@@ -3,7 +3,8 @@ import Foundation
 // Pure edits on a Project in source milliseconds, shared by the editor's commands, timeline drags and tests.
 // Times are snapped to source frames so a cut never lands between two frames.
 
-/// A stretch of the recording between two cut points. Removed sections stay on screen, hatched.
+/// A stretch of the recording between two cut points. A removed one is a seam on the timeline, or hatched with
+/// "Show removed" on.
 struct CutSection: Equatable, Hashable {
     var startMs: Double
     var endMs: Double
@@ -78,6 +79,16 @@ enum TimelineEdits {
     }
     static func removedRanges(_ p: Project) -> [Segment] { sections(p).filter { !$0.kept }.map(\.range) }
     static func isKept(_ ms: Double, in p: Project) -> Bool { kept(p).contains { ms >= $0.startMs && ms < $0.endMs } }
+    /// Export time of a source time: the kept footage before it. A time inside a removed range gives the cut point,
+    /// the export time of the next kept frame (`TimeMap.timeline(fromSource:)` is nil there).
+    static func exportMs(atSourceMs ms: Double, in p: Project) -> Double {
+        var t = 0.0
+        for s in kept(p) {
+            if ms <= s.startMs { break }
+            t += min(ms, s.endMs) - s.startMs
+        }
+        return t
+    }
 
     @discardableResult
     static func split(_ p: inout Project, atMs ms: Double) -> Bool {

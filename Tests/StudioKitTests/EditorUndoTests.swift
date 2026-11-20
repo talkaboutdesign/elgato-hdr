@@ -1,9 +1,19 @@
 import XCTest
 @testable import StudioKit
 
+/// A private, empty defaults suite: editor view preferences (`editorShowRemoved`) never leak between tests or
+/// into the app's own domain.
+func editorTestDefaults() -> UserDefaults {
+    let name = "StudioKitTests.editor"
+    let d = UserDefaults(suiteName: name)!
+    d.removePersistentDomain(forName: name)
+    return d
+}
+
 /// A project folder without media: the model's preview build fails quietly, every edit path still runs.
 /// `layers` adds (empty) camera and mic files, as the fixture recording has, so the camera scenes are offered.
-func makeEditorModel(durationMs: Double = 10_000, fps: Double = 60, name: String = "Test", layers: Bool = false) -> EditorModel {
+func makeEditorModel(durationMs: Double = 10_000, fps: Double = 60, name: String = "Test", layers: Bool = false,
+                     defaults: UserDefaults? = nil) -> EditorModel {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Editor-" + UUID().uuidString)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     var p = Project(name: name, createdAt: Date(timeIntervalSince1970: 0))
@@ -14,7 +24,7 @@ func makeEditorModel(durationMs: Double = 10_000, fps: Double = 60, name: String
     }
     let doc = ProjectDoc(dir: dir, project: p)
     doc.save()
-    let m = EditorModel(doc: doc)
+    let m = EditorModel(doc: doc, defaults: defaults ?? editorTestDefaults())
     m.duration = durationMs / 1000
     return m
 }

@@ -107,9 +107,27 @@ extension EditorModel {
     }
     private func stopReverse() { reverseTimer?.invalidate(); reverseTimer = nil }
 
-    /// ←/→ step through the decoder (no keyframe round trip); the time observer reports the new frame.
+    /// Where the playhead may rest. While removed footage is hidden it never rests inside it: a time there moves to
+    /// the first kept frame after the cut (`forward`) or the last one before it, and past either end of the kept
+    /// footage to its first or last frame. With removed footage shown, any time.
+    func keptPlayhead(_ t: Double, forward: Bool) -> Double {
+        let kept = keptSeconds, eps = 1e-6
+        guard hideRemoved, let first = kept.first, let last = kept.last else { return t }
+        func lastFrame(_ r: (start: Double, end: Double)) -> Double { max(r.start, r.end - frameDuration) }
+        if kept.contains(where: { t >= $0.start - eps && t < $0.end - eps }) { return t }
+        if t < first.start { return first.start }
+        if t >= last.end - eps { return lastFrame(last) }
+        if forward, let next = kept.first(where: { $0.start > t }) { return next.start }
+        if let prev = kept.last(where: { $0.end <= t + eps }) { return lastFrame(prev) }
+        return first.start
+    }
+
+    /// ←/→ step through the decoder (no keyframe round trip); the time observer reports the new frame. Across a
+    /// seam the decoder would walk into removed footage, so that step seeks to the other side instead.
     func step(frames n: Int) {
         if playing { pause() }
+        let next = min(max(0, time + Double(n) * frameDuration), duration)
+        if hideRemoved && keptPlayhead(next, forward: n > 0) != next { seek(next); return }
         if let item = player.currentItem, !seekInFlight, pendingSeek == nil, n > 0 ? item.canStepForward : item.canStepBackward {
             let target = min(max(0, time + Double(n) * frameDuration), duration)
             time = (target / frameDuration).rounded() * frameDuration
@@ -120,9 +138,13 @@ extension EditorModel {
             seek(time + Double(n) * frameDuration)
         }
     }
+    /// ⇧←/⇧→: a second of the timeline, which is a second of kept footage while removed footage is hidden.
     func jump(seconds s: Double) {
         if playing { pause() }
-        seek(time + s)
+        guard hideRemoved else { seek(time + s); return }
+        let map = TimeMap(segments: TimelineEdits.kept(project), sourceDurationMs: project.durationMs, frameMs: frameDuration * 1000)
+        let e = shownSeconds(time) + s
+        seek(e >= map.durationMs / 1000 ? duration : map.source(fromTimeline: max(0, e) * 1000) / 1000)
     }
 
     /// Moves the playhead. The model shows the target at once; the player follows with at most one seek in flight.
@@ -133,6 +155,7 @@ extension EditorModel {
         let d = duration > 0 ? duration : project.durationMs / 1000
         var t = min(max(0, s), max(0, d - frameDuration * 0.5))
         if quantize { t = (t / frameDuration).rounded() * frameDuration }
+        t = keptPlayhead(t, forward: t >= time)
         time = t
         var a = axis; a.reveal(t)
         if a != axis { axis = a }

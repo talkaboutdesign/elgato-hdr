@@ -202,21 +202,35 @@ struct SectionInspector: View {
     let model: EditorModel
     let section: CutSection
     var body: some View {
+        // Times count the timeline as shown: export time while removed footage is hidden.
+        let fps = model.project.fps
         InspectorSection(title: section.kept ? "Kept" : "Removed") {
-            InspectorRow(label: "Start") { Text(formatTimecode(section.startMs / 1000, fps: model.project.fps)).monospacedDigit() }
-            InspectorRow(label: "End") { Text(formatTimecode(section.endMs / 1000, fps: model.project.fps)).monospacedDigit() }
+            if !section.kept && model.hideRemoved {
+                InspectorRow(label: "Cut at") { Text(formatTimecode(model.shownSeconds(section.startMs / 1000), fps: fps)).monospacedDigit() }
+            } else {
+                InspectorRow(label: "Start") { Text(formatTimecode(model.shownSeconds(section.startMs / 1000), fps: fps)).monospacedDigit() }
+                InspectorRow(label: "End") { Text(formatTimecode(model.shownSeconds(section.endMs / 1000), fps: fps)).monospacedDigit() }
+            }
             InspectorRow(label: "Length") { Text(formatDuration((section.endMs - section.startMs) / 1000)).monospacedDigit() }
             if section.kept {
                 PillButton("Remove Section", systemImage: "scissors", help: "Remove this section from the export (⌫)") { model.deleteSelection() }
-                Text("Removed sections stay on the timeline, hatched, so they can be brought back. Drag a section's edge to trim it.")
+                Text(SectionInspector.keptNote(hideRemoved: model.hideRemoved))
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 PillButton("Restore Section", systemImage: "arrow.uturn.backward", prominent: true, help: "Bring this section back (⌫)") { model.restoreSection(section) }
-                Text("Playback skips removed sections, and exports leave them out.")
+                Text("Playback skips removed sections, and exports leave them out. Nothing is deleted from the recording.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
         .font(.system(size: 12))
+    }
+}
+
+extension SectionInspector {
+    static func keptNote(hideRemoved: Bool) -> String {
+        hideRemoved
+            ? "A removed section leaves the timeline and the footage after it closes up; nothing is deleted. Click a seam, or press H to show removed footage, to bring it back. Drag a section's edge to trim it."
+            : "Removed sections stay on the timeline, hatched, so they can be brought back. Drag a section's edge to trim it."
     }
 }
 
@@ -232,7 +246,7 @@ struct SceneInspector: View {
         if let run = model.selectedSceneRun() {
             let p = model.project
             InspectorSection(title: "Scene") {
-                Text("\(formatTimecode(run.startMs / 1000, fps: p.fps)) – \(formatTimecode(run.endMs / 1000, fps: p.fps))")
+                Text("\(formatTimecode(model.shownSeconds(run.startMs / 1000), fps: p.fps)) – \(formatTimecode(model.shownSeconds(run.endMs / 1000), fps: p.fps))")
                     .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
                 let columns = [GridItem(.flexible(), spacing: DS.Space.s), GridItem(.flexible(), spacing: DS.Space.s)]
                 LazyVGrid(columns: columns, spacing: DS.Space.s) {
@@ -404,8 +418,8 @@ struct ZoomInspector: View {
             }
             .font(.system(size: 12))
             InspectorSection(title: "Timing") {
-                InspectorRow(label: "Start") { Text(formatTimecode(z.startMs / 1000, fps: model.project.fps)).monospacedDigit() }
-                InspectorRow(label: "Length") { Text(formatDuration((z.endMs - z.startMs) / 1000)).monospacedDigit() }
+                InspectorRow(label: "Start") { Text(formatTimecode(model.shownSeconds(z.startMs / 1000), fps: model.project.fps)).monospacedDigit() }
+                InspectorRow(label: "Length") { Text(formatDuration(model.shownSeconds(z.endMs / 1000) - model.shownSeconds(z.startMs / 1000))).monospacedDigit() }
                 Text("Drag the block to move it, its edges to resize it.").font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .font(.system(size: 12))
@@ -425,7 +439,7 @@ struct MarkerInspector: View {
             InspectorSection(title: "Marker") {
                 CommitTextField(title: "Name", text: m.label, placeholder: TimelineEdits.markerTitle(m, in: model.project)) { model.renameMarker(id, $0) }
                 InspectorRow(label: "Time") {
-                    Text(formatTimecode(m.tMs / 1000, fps: model.project.fps)).monospacedDigit()
+                    Text(formatTimecode(model.shownSeconds(m.tMs / 1000), fps: model.project.fps)).monospacedDigit()
                     Button("Go") { model.seek(m.tMs / 1000) }.controlSize(.small)
                 }
                 .font(.system(size: 12))
