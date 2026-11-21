@@ -176,6 +176,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 var proceed = false
                 DispatchQueue.main.sync { proceed = self?.confirmAdminPromptIfFirstLaunch() ?? false }
                 guard proceed else { return }   // the first-launch sheet restarts capture when answered
+                guard bundledHelperPath() != nil else {
+                    log("capture helper missing from \(Bundle.main.bundlePath)")
+                    DispatchQueue.main.async { self?.setConnection(.noSignal("The app was moved or replaced while open: quit and reopen it")) }
+                    return
+                }
                 var spawned = false
                 DispatchQueue.main.sync { spawned = spawnHelperWithAdminPrompt() }
                 if !spawned { DispatchQueue.main.async { self?.setConnection(.noSignal("The helper was not started (password prompt cancelled)")) }; return }

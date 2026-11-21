@@ -26,9 +26,17 @@ func connectHelper() -> Int32 {
     return fd
 }
 
+/// The capture helper inside the running bundle, or nil when it is not there to run: the bundle was moved,
+/// rebuilt or deleted while the app was open. Asking for a password then starts nothing.
+func bundledHelperPath() -> String? {
+    guard let path = Bundle.main.url(forResource: "uvc_capture", withExtension: nil, subdirectory: nil)?.path
+        ?? Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("uvc_capture").path,
+        FileManager.default.isExecutableFile(atPath: path) else { return nil }
+    return path
+}
+
 func spawnHelperWithAdminPrompt() -> Bool {
-    guard let helper = Bundle.main.url(forResource: "uvc_capture", withExtension: nil, subdirectory: nil)?.path
-        ?? Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("uvc_capture").path else { return false }
+    guard let helper = bundledHelperPath() else { return false }
     let quoted = "'" + helper.replacingOccurrences(of: "'", with: "'\\''") + "'"
     let shell = "\(quoted) --serve \(socketPath) --idle 20 >/dev/null 2>>/tmp/elgato-uvc.log &"
     let script = "do shell script \"\(shell.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\" with administrator privileges"
