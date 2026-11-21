@@ -16,7 +16,10 @@ final class AudioPlayer {
     let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
     let engineQueue = DispatchQueue(label: "audio-engine")
     var queuedFrames: Int = 0
-    let maxQueuedFrames = 48000 * 150 / 1000   // trim above 150 ms of backlog
+    /// Trim above 150 ms of audio waiting in the player. This counts audio the player has not yet rendered, not
+    /// audio still on its way to the ear: an output with a long delay of its own (Bluetooth headphones on A2DP
+    /// hold about 200 ms) would otherwise sit over the limit for good and lose a chunk in every few.
+    let maxQueuedFrames = 48000 * 150 / 1000
     let lock = NSLock()
     var _muted = false
     var muted: Bool {
@@ -58,7 +61,8 @@ final class AudioPlayer {
             engine.connect(player, to: engine.mainMixerNode, format: format)
             lock.lock(); queuedFrames = 0; lock.unlock()
             startLocked()
-            log("audio engine rebuilt (\(reason)) on \(engine.outputNode.outputFormat(forBus: 0).sampleRate) Hz")
+            log(String(format: "audio engine rebuilt (%@) on %.0f Hz, output delay %.0f ms", reason,
+                       engine.outputNode.outputFormat(forBus: 0).sampleRate, engine.outputNode.presentationLatency * 1000))
         }
     }
 
@@ -82,7 +86,7 @@ final class AudioPlayer {
         engineQueue.async { [self] in
             guard running, engine.isRunning else { return }
             lock.lock(); queuedFrames += frames; lock.unlock()
-            player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            player.scheduleBuffer(buf, completionCallbackType: .dataConsumed) { [weak self] _ in
                 guard let self = self else { return }
                 self.lock.lock(); self.queuedFrames -= frames; self.lock.unlock()   // counter only; no transport calls
             }
